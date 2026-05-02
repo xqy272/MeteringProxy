@@ -1,0 +1,91 @@
+# Agent Notes
+
+This file is for coding agents working in this repository. User-facing setup, deployment, backup, rollback, and operations documentation belongs in `README.md`.
+
+## Project Summary
+
+MeteringProxy is a transparent HTTP metering proxy for AI gateway traffic. It forwards LLM API requests to CLIProxyAPI while asynchronously recording usage statistics in SQLite for a read-only WebUI.
+
+Primary traffic path:
+
+```text
+Client -> Caddy -> MeteringProxy -> CLIProxyAPI -> upstream provider
+```
+
+Only the metered API paths should be handled by this proxy in production:
+
+- `POST /v1/chat/completions`
+- `POST /v1/responses`
+
+## Non-Negotiable Invariants
+
+1. LLM request forwarding is more important than metering completeness.
+2. Do not store prompt bodies, response bodies, plaintext API keys, or plaintext client IPs.
+3. Preserve request and response transparency: method, path, query, headers, body bytes, status code, and SSE bytes.
+4. Do not block client traffic on DB writes, cost calculation, dashboard queries, or parsing.
+5. Queue overflow must drop metering events rather than slow or fail LLM traffic.
+6. Database migrations must be additive and compatible with older SQLite files.
+7. Keep the salt file byte-stable across deployments; changing it breaks historical hash grouping.
+
+## Code Map
+
+```text
+main.go                 wiring, HTTP server, shutdown, health reporter
+internal/config         YAML config defaults and validation
+internal/db             SQLite schema, migrations, queries
+internal/extractor      usage extraction for chat and responses APIs
+internal/hash           salted SHA256 hashing
+internal/pricing        estimated cost calculation
+internal/proxy          reverse proxy, SSE handling, usage capture
+internal/webui          dashboard API and embedded static UI
+internal/writer         async batch writer and counters
+```
+
+## Data Model Notes
+
+- `latency_ms` is total request lifecycle duration.
+- `ttfb_ms` is time until upstream response headers are received.
+- `created_at_unix` and `timestamp_unix` are used for range queries; text timestamps remain for display and compatibility.
+- Empty model and key hash values are grouped as `unknown` in aggregate queries.
+- `request_usage` is append-only for normal operation.
+- `health_metrics` stores periodic snapshots of process-lifetime counters.
+
+## Extractor Notes
+
+- Chat Completions usage uses `prompt_tokens`, `completion_tokens`, and `total_tokens`.
+- Responses API usage uses `input_tokens`, `output_tokens`, and `total_tokens`.
+- Reasoning and cached token fields are detail fields and may be absent.
+- SSE parsing is best-effort and must never alter forwarded bytes.
+
+## Pricing Notes
+
+Reasoning tokens are treated as a subset of output tokens.
+
+- If `reasoning_per_1m` is set: charge regular output as `output_tokens - reasoning_tokens`, clamped at zero, plus reasoning at `reasoning_per_1m`.
+- If `reasoning_per_1m` is not set: charge all `output_tokens` at `output_per_1m` and do not add reasoning again.
+
+## Test Commands
+
+Use project-local Go caches when running locally on Windows:
+
+```powershell
+$env:GOCACHE='c:\Users\QingYang\Desktop\MeteringProxy\.gocache'
+$env:GOMODCACHE='c:\Users\QingYang\Desktop\MeteringProxy\.gomodcache'
+go test ./...
+go vet ./...
+go build -o ai-gateway-metering-proxy.exe .
+```
+
+For shell script edits:
+
+```bash
+bash -n scripts/backup.sh
+```
+
+## Editing Guidance
+
+- Keep production behavior conservative and transparent.
+- Prefer focused tests around changed behavior.
+- Do not replace existing migrations with destructive schema rebuilds.
+- Do not add request logging by default if it can expose usage patterns or increase load.
+- Keep deployment and operator documentation in `README.md`, not here.

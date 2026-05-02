@@ -1,0 +1,48 @@
+pricing:
+  # OpenAI models
+  gpt-5.4-mini:
+    input_per_1m: 0.15
+    cached_input_per_1m: 0.075
+    output_per_1m: 0.60
+  gpt-5.4:
+    input_per_1m: 1.25
+    cached_input_per_1m: 0.625
+    output_per_1m: 5.00
+  gpt-5.4-mini-2026-03-17:
+    input_per_1m: 0.15
+    cached_input_per_1m: 0.075
+    output_per_1m: 0.60
+  gpt-4o:
+    input_per_1m: 2.50
+    cached_input_per_1m: 1.25
+    output_per_1m: 10.00
+  gpt-4o-mini:
+    input_per_1m: 0.15
+    cached_input_per_1m: 0.075
+    output_per_1m: 0.60
+  # Anthropic models
+  claude-sonnet-4-6:
+    input_per_1m: 3.00
+    cached_input_per_1m: 0.30
+    output_per_1m: 15.00
+    reasoning_per_1m: 3.00
+  claude-opus-4-7:
+    input_per_1m: 15.00
+    cached_input_per_1m: 1.50
+    output_per_1m: 75.00
+    reasoning_per_1m: 15.00
+  claude-haiku-4-5:
+    input_per_1m: 1.00
+    cached_input_per_1m: 0.10
+    output_per_1m: 5.00
+    reasoning_per_1m: 1.00
+  # DeepSeek models
+  deepseek-chat:
+    input_per_1m: 0.27
+    cached_input_per_1m: 0.07
+    output_per_1m: 1.10
+  deepseek-reasoner:
+    input_per_1m: 0.55
+    cached_input_per_1m: 0.14
+    output_per_1m: 2.19
+    reasoning_per_1m: 0.55

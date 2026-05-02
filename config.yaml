@@ -1,0 +1,12 @@
+listen: "127.0.0.1:8320"
+upstream: "http://127.0.0.1:8317"
+database: "/opt/ai-gateway/metering/usage.sqlite"
+salt_file: "/opt/ai-gateway/metering/salt"
+queue_capacity: 1000
+batch_size: 50
+flush_interval: "1s"
+max_nonstream_sample_bytes: 2097152
+webui:
+  enabled: true
+  base_path: "/metering"
+pricing_file: "/opt/ai-gateway/metering/pricing.yaml"

@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Metering Proxy - Statistics</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --bg2: #161b22;
+  --bg3: #21262d;
+  --border: #30363d;
+  --text: #c9d1d9;
+  --text2: #8b949e;
+  --green: #3fb950;
+  --red: #f85149;
+  --blue: #58a6ff;
+  --yellow: #d2991d;
+  --purple: #a371f7;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
+header { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; justify-content: space-between; align-items: center; position: sticky; top:0; z-index: 10; }
+header h1 { font-size: 1.2em; }
+nav { display: flex; gap: 8px; }
+nav button, nav select { background: var(--bg3); color: var(--text); border: 1px solid var(--border); padding: 6px 16px; border-radius: 6px; cursor: pointer; font-size: 0.9em; }
+nav button:hover, nav button.active { background: var(--border); }
+main { max-width: 1400px; margin: 0 auto; padding: 20px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+.card .label { font-size: 0.8em; color: var(--text2); margin-bottom: 4px; }
+.card .value { font-size: 1.8em; font-weight: 600; }
+.card .sub { font-size: 0.8em; color: var(--text2); margin-top: 4px; }
+.green { color: var(--green); }
+.red { color: var(--red); }
+.blue { color: var(--blue); }
+.purple { color: var(--purple); }
+table { width: 100%; border-collapse: collapse; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+th, td { padding: 8px 12px; text-align: left; font-size: 0.85em; }
+th { background: var(--bg3); color: var(--text2); font-weight: 600; position: sticky; top: 0; }
+tr { border-bottom: 1px solid var(--border); }
+tr:hover { background: var(--bg3); }
+.section { margin-bottom: 32px; }
+.section h2 { font-size: 1.1em; margin-bottom: 12px; color: var(--text2); }
+.filters { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.filters input, .filters select { background: var(--bg3); color: var(--text); border: 1px solid var(--border); padding: 6px 12px; border-radius: 6px; font-size: 0.85em; }
+.chart-container { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+.bar-chart { display: flex; align-items: flex-end; gap: 2px; height: 120px; overflow-x: auto; }
+.bar { flex: 1; min-width: 8px; background: var(--blue); border-radius: 2px 2px 0 0; position: relative; cursor: help; }
+.bar:hover { background: var(--purple); }
+.bar.error { background: var(--red); }
+.bar.error:hover { background: #ff6b6b; }
+.empty { text-align: center; color: var(--text2); padding: 40px; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.75em; }
+.badge.ok { background: #1a3a1a; color: var(--green); }
+.badge.err { background: #3a1a1a; color: var(--red); }
+.badge.warn { background: #3a3a1a; color: var(--yellow); }
+.tabs { display: flex; gap: 4px; }
+@media (max-width: 768px) { .cards { grid-template-columns: repeat(2, 1fr); } nav { flex-wrap: wrap; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Metering Proxy</h1>
+  <nav>
+    <select id="range-select">
+      <option value="24h" selected>Last 24h</option>
+      <option value="today">Today</option>
+      <option value="7d">Last 7 days</option>
+      <option value="30d">Last 30 days</option>
+    </select>
+    <button onclick="refresh()" id="refresh-btn">Refresh</button>
+  </nav>
+</header>
+<main>
+  <!-- Overview Cards -->
+  <section class="section">
+    <div class="cards" id="summary-cards">
+      <div class="card"><div class="label">Requests</div><div class="value" id="total-requests">-</div><div class="sub" id="failed-requests"></div></div>
+      <div class="card"><div class="label">Input Tokens</div><div class="value blue" id="input-tokens">-</div><div class="sub" id="cached-tokens"></div></div>
+      <div class="card"><div class="label">Output Tokens</div><div class="value green" id="output-tokens">-</div><div class="sub" id="reasoning-tokens"></div></div>
+      <div class="card"><div class="label">Total Tokens</div><div class="value purple" id="total-tokens">-</div></div>
+      <div class="card"><div class="label">Est. Cost</div><div class="value" style="color:var(--yellow)" id="total-cost">-</div></div>
+    </div>
+  </section>
+
+  <!-- Timeseries chart -->
+  <section class="section">
+    <h2>Request Volume</h2>
+    <div class="chart-container">
+      <div class="bar-chart" id="timeseries-chart"></div>
+      <div class="sub" style="margin-top:8px" id="timeseries-label"></div>
+    </div>
+  </section>
+
+  <!-- Models -->
+  <section class="section">
+    <h2>Models</h2>
+    <div style="overflow-x:auto">
+    <table>
+      <thead><tr><th>Model</th><th>Requests</th><th>Input</th><th>Output</th><th>Reasoning</th><th>Cached</th><th>Total</th><th>Est. Cost</th></tr></thead>
+      <tbody id="models-table"><tr><td colspan="8" class="empty">Loading...</td></tr></tbody>
+    </table>
+    </div>
+  </section>
+
+  <!-- Keys -->
+  <section class="section">
+    <h2>API Keys</h2>
+    <div style="overflow-x:auto">
+    <table>
+      <thead><tr><th>Key Hash</th><th>Requests</th><th>Failed</th><th>Failure Rate</th><th>Input</th><th>Output</th><th>Total</th></tr></thead>
+      <tbody id="keys-table"><tr><td colspan="7" class="empty">Loading...</td></tr></tbody>
+    </table>
+    </div>
+  </section>
+
+  <!-- Errors -->
+  <section class="section">
+    <h2>Errors &amp; Health <span style="font-size:0.8em;color:var(--text2)">(since process start)</span></h2>
+    <div class="cards" id="health-cards">
+      <div class="card"><div class="label">Queue Depth</div><div class="value" id="queue-depth">-</div></div>
+      <div class="card"><div class="label">Dropped Events</div><div class="value red" id="dropped-events">-</div></div>
+      <div class="card"><div class="label">Parse Errors</div><div class="value" style="color:var(--yellow)" id="parse-errors">-</div></div>
+      <div class="card"><div class="label">DB Write Errors</div><div class="value red" id="db-errors">-</div></div>
+    </div>
+  </section>
+
+  <!-- Recent Requests -->
+  <section class="section">
+    <h2>Recent Requests</h2>
+    <div class="filters">
+      <select id="filter-status" onchange="loadRequests()">
+        <option value="">All Status</option>
+        <option value="success">2xx Success</option>
+        <option value="4xx">4xx Client Errors</option>
+        <option value="5xx">5xx Server Errors</option>
+      </select>
+      <input id="filter-model" placeholder="Model name..." onchange="loadRequests()">
+      <select id="filter-endpoint" onchange="loadRequests()">
+        <option value="">All Endpoints</option>
+        <option value="/v1/chat/completions">/v1/chat/completions</option>
+        <option value="/v1/responses">/v1/responses</option>
+      </select>
+    </div>
+    <div style="overflow-x:auto">
+    <table>
+      <thead><tr><th>Time</th><th>Endpoint</th><th>Status</th><th>TTFB</th><th>Total</th><th>Model</th><th>Input</th><th>Output</th><th>Total</th><th>Key Hash</th></tr></thead>
+      <tbody id="requests-table"><tr><td colspan="10" class="empty">Loading...</td></tr></tbody>
+    </table>
+    </div>
+  </section>
+</main>
+
+<script>
+const BASE = '/metering/api/';
+
+function esc(s) {
+  if (s == null) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+function getRange() { return document.getElementById('range-select').value; }
+
+function formatNum(n) {
+  if (n == null) return '0';
+  if (n >= 1e6) return (n/1e6).toFixed(1)+'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
+  return n.toString();
+}
+
+function formatCost(c) {
+  if (c == null || c === 0) return '$0.00';
+  if (c < 0.01) return '<$0.01';
+  return '$'+c.toFixed(2);
+}
+
+function formatLat(ms) {
+  if (ms < 1000) return ms+'ms';
+  return (ms/1000).toFixed(1)+'s';
+}
+
+function shortHash(h) { return h ? h.substring(0,12)+'...' : '-'; }
+
+async function fetchJSON(path) {
+  const res = await fetch(BASE + path);
+  if (!res.ok) throw new Error(res.statusText);
+  return res.json();
+}
+
+async function loadSummary() {
+  const data = await fetchJSON('summary?range='+getRange());
+  document.getElementById('total-requests').textContent = formatNum(data.total_requests);
+  document.getElementById('failed-requests').textContent = formatNum(data.failed_requests) + ' failed';
+  document.getElementById('input-tokens').textContent = formatNum(data.total_input_tokens);
+  document.getElementById('cached-tokens').textContent = formatNum(data.total_cached_tokens) + ' cached';
+  document.getElementById('output-tokens').textContent = formatNum(data.total_output_tokens);
+  document.getElementById('reasoning-tokens').textContent = formatNum(data.total_reasoning_tokens) + ' reasoning';
+  document.getElementById('total-tokens').textContent = formatNum(data.total_tokens);
+}
+
+async function loadModels() {
+  const data = await fetchJSON('models?range='+getRange());
+  const tbody = document.getElementById('models-table');
+  if (!data.length) { tbody.innerHTML = '<tr><td colspan="8" class="empty">No data</td></tr>'; return; }
+  let totalCost = 0;
+  tbody.innerHTML = data.map(r => {
+    const costStr = r.cost_known ? formatCost(r.cost) : '-';
+    if (r.cost_known) totalCost += r.cost;
+    return `<tr>
+      <td>${esc(r.model) || 'unknown'}</td><td>${formatNum(r.request_count)}</td>
+      <td>${formatNum(r.input_tokens)}</td><td>${formatNum(r.output_tokens)}</td>
+      <td>${formatNum(r.reasoning_tokens)}</td><td>${formatNum(r.cached_tokens)}</td>
+      <td>${formatNum(r.total_tokens)}</td><td>${costStr}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('total-cost').textContent = totalCost > 0 ? formatCost(totalCost) : '-';
+}
+
+async function loadKeys() {
+  const data = await fetchJSON('keys?range='+getRange());
+  const tbody = document.getElementById('keys-table');
+  if (!data.length) { tbody.innerHTML = '<tr><td colspan="7" class="empty">No data</td></tr>'; return; }
+  tbody.innerHTML = data.map(r => `<tr>
+    <td><code>${shortHash(esc(r.key_hash))}</code></td><td>${formatNum(r.request_count)}</td>
+    <td>${formatNum(r.failed_count)}</td>
+    <td>${r.request_count > 0 ? (r.failed_count/r.request_count*100).toFixed(1)+'%' : '-'}</td>
+    <td>${formatNum(r.input_tokens)}</td><td>${formatNum(r.output_tokens)}</td>
+    <td>${formatNum(r.total_tokens)}</td>
+  </tr>`).join('');
+}
+
+async function loadRequests() {
+  const status = document.getElementById('filter-status').value;
+  const model = document.getElementById('filter-model').value;
+  const endpoint = document.getElementById('filter-endpoint').value;
+  const range = getRange();
+  let url = 'requests?limit=100&range=' + range;
+  if (status) url += '&status=' + status;
+  if (model) url += '&model=' + encodeURIComponent(model);
+  if (endpoint) url += '&endpoint=' + encodeURIComponent(endpoint);
+  const data = await fetchJSON(url);
+  const tbody = document.getElementById('requests-table');
+  if (!data.length) { tbody.innerHTML = '<tr><td colspan="10" class="empty">No data</td></tr>'; return; }
+  tbody.innerHTML = data.map(r => `<tr>
+    <td>${new Date(r.created_at).toLocaleString()}</td>
+    <td>${esc(r.endpoint)}</td>
+    <td><span class="badge ${r.status < 400 ? 'ok' : r.status < 500 ? 'warn' : 'err'}">${r.status}</span></td>
+    <td>${r.ttfb_ms ? formatLat(r.ttfb_ms) : '-'}</td>
+    <td>${formatLat(r.latency_ms)}</td>
+    <td>${esc(r.model_returned) || esc(r.model_requested) || '-'}</td>
+    <td>${formatNum(r.input_tokens)}</td><td>${formatNum(r.output_tokens)}</td>
+    <td>${formatNum(r.total_tokens)}</td>
+    <td><code>${shortHash(esc(r.api_key_hash))}</code></td>
+  </tr>`).join('');
+}
+
+async function loadTimeseries() {
+  const range = getRange();
+  const bucket = range === '30d' ? '1d' : range === '7d' ? '1h' : '10m';
+  const data = await fetchJSON('timeseries?range='+range+'&bucket='+bucket);
+  const chart = document.getElementById('timeseries-chart');
+  if (!data.length) { chart.innerHTML = '<div class="empty">No data</div>'; return; }
+  const maxVal = Math.max(...data.map(d => d.count), 1);
+  chart.innerHTML = data.map(d =>
+    `<div class="bar" style="height:${(d.count/maxVal*100).toFixed(0)}%" title="${esc(d.timestamp)}: ${d.count} requests\nTokens: ${formatNum(d.total_tokens)}"></div>`
+  ).join('');
+  document.getElementById('timeseries-label').textContent = `${data.length} buckets - max: ${formatNum(maxVal)} requests`;
+}
+
+async function loadHealth() {
+  const data = await fetchJSON('health');
+  document.getElementById('queue-depth').textContent = data.queue_depth;
+  document.getElementById('dropped-events').textContent = data.dropped_events;
+  document.getElementById('parse-errors').textContent = data.parse_errors;
+  document.getElementById('db-errors').textContent = data.db_write_errors;
+}
+
+async function refresh() {
+  const btn = document.getElementById('refresh-btn');
+  btn.textContent = '...'; btn.disabled = true;
+  try {
+    await Promise.all([loadSummary(), loadModels(), loadKeys(), loadRequests(), loadTimeseries(), loadHealth()]);
+  } catch(e) { console.error(e); }
+  btn.textContent = 'Refresh'; btn.disabled = false;
+}
+
+document.getElementById('range-select').addEventListener('change', refresh);
+document.addEventListener('DOMContentLoaded', refresh);
+</script>
+</body>
+</html>

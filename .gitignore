@@ -1,0 +1,7 @@
+*.exe
+ai-gateway-metering-proxy
+usage.sqlite*
+salt
+.claude/
+.gocache/
+.gomodcache/

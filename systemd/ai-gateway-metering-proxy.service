@@ -1,0 +1,22 @@
+[Unit]
+Description=AI Gateway Metering Proxy
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/ai-gateway/metering
+ExecStart=/usr/local/bin/ai-gateway-metering-proxy -config /opt/ai-gateway/metering/config.yaml
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/ai-gateway/metering
+
+[Install]
+WantedBy=multi-user.target
