@@ -124,7 +124,33 @@ docker run -d \
 
 > `--add-host host.docker.internal:host-gateway` 让容器能通过 `host.docker.internal` 访问宿主机上的 CLIProxyAPI。如果你的 CLIProxyAPI 也在 Docker 中，改用 `--network` 把两个容器放到同一个网络，并把 `upstream` 改为容器名。
 
-### 6. 验证
+### 6. 配置 Caddy
+
+将 MeteringProxy 接入 Caddy 反向代理链路：
+
+```caddyfile
+@metered {
+    method POST
+    path /v1/chat/completions /v1/responses
+}
+
+reverse_proxy @metered 127.0.0.1:8320
+reverse_proxy 127.0.0.1:8317
+```
+
+关键点：
+- 仅将计量目标 API 路径路由至 MeteringProxy（`:8320`），其余请求直通 CLIProxyAPI（`:8317`）。
+- 为 `/metering` 路径配置 Basic Auth 或等效访问控制，防止仪表盘数据暴露。
+
+重载 Caddy 使其生效：
+
+```bash
+caddy reload --config /path/to/Caddyfile
+# 或 Docker Caddy：
+docker exec caddy caddy reload --config /etc/caddy/Caddyfile
+```
+
+### 7. 验证
 
 ```bash
 # 检查容器状态
@@ -140,7 +166,7 @@ curl -s http://127.0.0.1:8320/metering/api/health
 curl -s http://127.0.0.1:8320/metering/api/summary?range=24h
 ```
 
-### 7. 升级
+### 8. 升级
 
 ```bash
 docker pull ghcr.io/xyq272/ai-gateway-metering-proxy:v0.2.0
