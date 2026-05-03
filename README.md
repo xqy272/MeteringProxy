@@ -110,7 +110,7 @@ pricing:
 ### 5. 拉取并启动容器
 
 ```bash
-docker pull ghcr.io/xyq272/ai-gateway-metering-proxy:v0.1.0
+docker pull ghcr.io/xqy272/ai-gateway-metering-proxy:v0.1.0
 
 docker run -d \
   --name metering-proxy \
@@ -118,7 +118,7 @@ docker run -d \
   -v /opt/ai-gateway/metering:/data \
   --add-host host.docker.internal:host-gateway \
   -p 127.0.0.1:8320:8320 \
-  ghcr.io/xyq272/ai-gateway-metering-proxy:v0.1.0 \
+  ghcr.io/xqy272/ai-gateway-metering-proxy:v0.1.0 \
   -config /data/config.yaml
 ```
 
@@ -169,7 +169,7 @@ curl -s http://127.0.0.1:8320/metering/api/summary?range=24h
 ### 8. 升级
 
 ```bash
-docker pull ghcr.io/xyq272/ai-gateway-metering-proxy:v0.2.0
+docker pull ghcr.io/xqy272/ai-gateway-metering-proxy:v0.2.0
 docker stop metering-proxy
 docker rm metering-proxy
 # 用新版本号重新 docker run（参数同上）
@@ -179,7 +179,7 @@ docker run -d \
   -v /opt/ai-gateway/metering:/data \
   --add-host host.docker.internal:host-gateway \
   -p 127.0.0.1:8320:8320 \
-  ghcr.io/xyq272/ai-gateway-metering-proxy:v0.2.0 \
+  ghcr.io/xqy272/ai-gateway-metering-proxy:v0.2.0 \
   -config /data/config.yaml
 ```
 
@@ -202,7 +202,7 @@ docker run -d \
 ### 1. 构建 Linux 二进制（或从 Release 下载）
 
 ```bash
-wget https://github.com/xyq272/ai-gateway-metering-proxy/releases/download/v0.1.0/ai-gateway-metering-proxy
+wget https://github.com/xqy272/ai-gateway-metering-proxy/releases/download/v0.1.0/ai-gateway-metering-proxy
 chmod +x ai-gateway-metering-proxy
 sudo cp ai-gateway-metering-proxy /usr/local/bin/
 ```
@@ -432,7 +432,7 @@ docker run -d \
   -v /opt/ai-gateway/metering:/data \
   --add-host host.docker.internal:host-gateway \
   -p 127.0.0.1:8320:8320 \
-  ghcr.io/xyq272/ai-gateway-metering-proxy:v0.1.0 \
+  ghcr.io/xqy272/ai-gateway-metering-proxy:v0.1.0 \
   -config /data/config.yaml
 ```
 

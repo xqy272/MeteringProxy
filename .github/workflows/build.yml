@@ -41,7 +41,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/xyq272/ai-gateway-metering-proxy
+          images: ghcr.io/xqy272/ai-gateway-metering-proxy
           tags: |
             type=edge,branch=main
             type=semver,pattern={{version}}
