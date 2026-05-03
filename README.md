@@ -104,13 +104,13 @@ pricing:
     reasoning_per_1m: 1.00
   # DeepSeek
   deepseek-v4-flash:
-    input_per_1m: 1.00
-    cached_input_per_1m: 0.02
-    output_per_1m: 2.00
+    input_per_1m: 0.14
+    cached_input_per_1m: 0.0028
+    output_per_1m: 0.28
   deepseek-v4-pro:
-    input_per_1m: 3.00
-    cached_input_per_1m: 0.025
-    output_per_1m: 6.00
+    input_per_1m: 0.435
+    cached_input_per_1m: 0.003625
+    output_per_1m: 0.87
 ```
 
 ### 5. 拉取并启动容器
