@@ -1,5 +1,8 @@
 ﻿const apiBaseMeta = document.querySelector('meta[name="api-base"]');
 const BASE = apiBaseMeta && apiBaseMeta.content ? apiBaseMeta.content : '/metering/api/';
+const LANG_KEY = 'metering-proxy-language';
+
+const I18N = window.METERING_I18N || {};
 
 let metadata = null;
 let currentModels = [];
@@ -7,6 +10,7 @@ let autoRefreshTimer = null;
 let isRefreshing = false;
 let lastRefreshAt = 0;
 let requestsExpanded = false;
+let currentLang = detectLanguage();
 
 const fallbackRanges = [
   { key: '24h', label: 'Last 24 Hours', bucket: '10m' },
@@ -16,6 +20,26 @@ const fallbackRanges = [
 ];
 
 const $ = id => document.getElementById(id);
+
+function detectLanguage() {
+  try {
+    const saved = localStorage.getItem(LANG_KEY);
+    if (saved === 'en' || saved === 'zh') return saved;
+  } catch (_) {}
+  return (navigator.language || '').toLowerCase().startsWith('zh') ? 'zh' : 'en';
+}
+
+function locale() {
+  return currentLang === 'zh' ? 'zh-CN' : 'en-US';
+}
+
+function t(key, vars) {
+  const fallback = I18N.en || {};
+  const dict = I18N[currentLang] || fallback;
+  let text = dict[key] || fallback[key] || key;
+  if (!vars) return text;
+  return text.replace(/\{([a-zA-Z0-9_]+)\}/g, (_, name) => vars[name] == null ? '' : String(vars[name]));
+}
 
 function esc(s) {
   if (s == null) return '';
@@ -36,7 +60,7 @@ function formatNum(n) {
 }
 
 function formatFull(n) {
-  return Number(n || 0).toLocaleString();
+  return Number(n || 0).toLocaleString(locale());
 }
 
 function formatCost(c) {
@@ -51,11 +75,6 @@ function formatPercent(value, total) {
   total = Number(total || 0);
   if (total <= 0) return '0.0%';
   return (value / total * 100).toFixed(1) + '%';
-}
-
-function formatRate(rate) {
-  rate = Number(rate || 0);
-  return (rate * 100).toFixed(1) + '%';
 }
 
 function formatLat(ms) {
@@ -76,14 +95,14 @@ function formatTime(value) {
   if (!value) return '-';
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return value;
-  return d.toLocaleString();
+  return d.toLocaleString(locale());
 }
 
 function formatShortTime(value) {
   if (!value) return '-';
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return value;
-  return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  return d.toLocaleString(locale(), { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
 function shortHash(h) {
@@ -95,6 +114,10 @@ function getRange() {
   return $('range-select').value || '24h';
 }
 
+function rangeLabel(r) {
+  return t('range.' + r.key) || r.label || r.key;
+}
+
 function bucketForRange(range) {
   const ranges = metadata && metadata.ranges ? metadata.ranges : fallbackRanges;
   const item = ranges.find(r => r.key === range);
@@ -104,14 +127,33 @@ function bucketForRange(range) {
 function setStatus(kind, title, detail) {
   const pill = $('status-pill');
   pill.className = 'status-pill ' + (kind === 'error' ? 'err' : kind === 'partial' ? 'warn' : 'ok');
-  pill.textContent = kind === 'error' ? 'Error' : kind === 'partial' ? 'Partial' : 'Live';
+  pill.textContent = kind === 'error' ? t('status.error') : kind === 'partial' ? t('status.partial') : t('status.live');
   $('status-title').textContent = title;
   $('status-detail').textContent = detail || '';
 }
 
 function setLastRefresh(date) {
   lastRefreshAt = date ? date.getTime() : 0;
-  $('last-refresh').textContent = 'Last refresh: ' + (date ? date.toLocaleString() : 'never');
+  $('last-refresh').textContent = date ? t('status.last_refresh', { time: date.toLocaleString(locale()) }) : t('status.last_refresh_never');
+}
+
+function applyStaticI18N() {
+  document.documentElement.lang = currentLang === 'zh' ? 'zh-CN' : 'en';
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    el.textContent = t(el.dataset.i18n);
+  });
+  const select = $('language-select');
+  if (select) select.value = currentLang;
+}
+
+function setLanguage(lang) {
+  if (lang !== 'en' && lang !== 'zh') return;
+  currentLang = lang;
+  try { localStorage.setItem(LANG_KEY, lang); } catch (_) {}
+  applyStaticI18N();
+  applyMetadata();
+  setLastRefresh(lastRefreshAt ? new Date(lastRefreshAt) : null);
+  refresh();
 }
 
 async function fetchJSON(path) {
@@ -140,11 +182,15 @@ function errorRow(colspan, message) {
   return `<tr><td colspan="${colspan}" class="empty error-line">${esc(message)}</td></tr>`;
 }
 
+function emptyChart(title, detail) {
+  return `<div class="empty"><strong>${esc(title)}</strong>${esc(detail || '')}</div>`;
+}
+
 function applyMetadata() {
   const rangeSelect = $('range-select');
   const currentRange = rangeSelect.value;
   const ranges = metadata && metadata.ranges && metadata.ranges.length ? metadata.ranges : fallbackRanges;
-  rangeSelect.innerHTML = ranges.map(r => `<option value="${esc(r.key)}">${esc(r.label)}</option>`).join('');
+  rangeSelect.innerHTML = ranges.map(r => `<option value="${esc(r.key)}">${esc(rangeLabel(r))}</option>`).join('');
   if ([...rangeSelect.options].some(o => o.value === currentRange)) {
     rangeSelect.value = currentRange;
   } else {
@@ -157,7 +203,7 @@ function applyMetadata() {
     .filter(e => e.capture_mode !== 'passthrough')
     .map(e => `<option value="${esc(e.path)}">${esc(e.display_name || e.path)}</option>`)
     .join('');
-  endpointSelect.innerHTML = '<option value="">All endpoints</option>' + endpointOptions;
+  endpointSelect.innerHTML = `<option value="">${esc(t('filter.all_endpoints'))}</option>` + endpointOptions;
   if ([...endpointSelect.options].some(o => o.value === currentEndpoint)) {
     endpointSelect.value = currentEndpoint;
   }
@@ -171,7 +217,7 @@ function applyModelFilterOptions() {
     .filter((value, index, arr) => arr.indexOf(value) === index)
     .map(model => `<option value="${esc(model)}">${esc(model)}</option>`)
     .join('');
-  select.innerHTML = '<option value="">All models</option>' + options;
+  select.innerHTML = `<option value="">${esc(t('filter.all_models'))}</option>` + options;
   if ([...select.options].some(o => o.value === current)) {
     select.value = current;
   }
@@ -193,13 +239,18 @@ async function loadSummary() {
   const reasoningTokens = Number(data.total_reasoning_tokens || 0);
 
   $('total-requests').textContent = formatNum(totalRequests);
-  $('requests-sub').textContent = `${formatFull(failedRequests)} failed`;
+  $('requests-sub').textContent = t('metric.failed_count', { count: formatFull(failedRequests) });
   $('failure-rate').textContent = formatPercent(failedRequests, totalRequests);
-  $('failure-sub').textContent = `${formatFull(failedRequests)} of ${formatFull(totalRequests)}`;
+  $('failure-sub').textContent = t('metric.failed_of_total', { failed: formatFull(failedRequests), total: formatFull(totalRequests) });
   $('total-tokens').textContent = formatNum(totalTokens);
-  $('tokens-sub').textContent = `${formatNum(inputTokens)} in / ${formatNum(outputTokens)} out / ${formatNum(cachedTokens)} cached / ${formatNum(reasoningTokens)} reasoning`;
+  $('tokens-sub').textContent = t('metric.token_mix', {
+    input: formatNum(inputTokens),
+    output: formatNum(outputTokens),
+    cached: formatNum(cachedTokens),
+    reasoning: formatNum(reasoningTokens)
+  });
   $('total-cost').textContent = formatCost(data.total_cost);
-  $('cost-sub').textContent = 'query-time pricing';
+  $('cost-sub').textContent = t('metric.query_time_pricing');
 }
 
 async function loadActivity() {
@@ -214,17 +265,17 @@ async function loadActivity() {
   const captureIssues = captureFailed + captureSkipped;
 
   $('p95-latency').textContent = formatLat(data.p95_latency_ms);
-  $('latency-sub').textContent = `avg ${formatLat(data.avg_latency_ms)} / ttfb ${formatLat(data.p95_ttfb_ms)}`;
+  $('latency-sub').textContent = t('metric.avg_latency_ttfb', { avg: formatLat(data.avg_latency_ms), ttfb: formatLat(data.p95_ttfb_ms) });
   $('capture-quality').textContent = captureTotal ? formatPercent(captureCaptured, captureTotal) : '-';
-  $('capture-sub').textContent = `${formatFull(captureIssues)} capture issues`;
+  $('capture-sub').textContent = t('metric.capture_issue_count', { count: formatFull(captureIssues) });
 
-  $('request-health-summary').textContent = `${formatFull(sample)} sampled requests`;
+  $('request-health-summary').textContent = t('metric.sampled_requests', { count: formatFull(sample) });
   $('activity-success-rate').textContent = formatPercent(success, sample);
-  $('activity-success-detail').textContent = `${formatFull(success)} success / ${formatFull(failed)} failed`;
+  $('activity-success-detail').textContent = t('metric.success_failed', { success: formatFull(success), failed: formatFull(failed) });
   $('p95-ttfb').textContent = formatLat(data.p95_ttfb_ms);
-  $('ttfb-detail').textContent = `avg ${formatLat(data.avg_ttfb_ms)}`;
+  $('ttfb-detail').textContent = t('metric.avg_latency_ttfb', { avg: formatLat(data.avg_ttfb_ms), ttfb: formatLat(data.p95_ttfb_ms) });
   $('capture-issues').textContent = formatFull(captureIssues);
-  $('capture-issues-detail').textContent = `${formatFull(captureFailed)} failed / ${formatFull(captureSkipped)} skipped`;
+  $('capture-issues-detail').textContent = t('metric.capture_failed_skipped', { failed: formatFull(captureFailed), skipped: formatFull(captureSkipped) });
 
   if (Number(data.latest_error_status || 0) > 0) {
     $('latest-error-status').innerHTML = `<span class="badge err">${esc(data.latest_error_status)}</span>`;
@@ -232,8 +283,8 @@ async function loadActivity() {
     const detail = `${formatShortTime(data.latest_error_at)} ${data.latest_error_endpoint || ''}${model}`;
     $('latest-error-detail').textContent = detail.trim();
   } else {
-    $('latest-error-status').innerHTML = '<span class="badge ok">none</span>';
-    $('latest-error-detail').textContent = 'No request errors in this range';
+    $('latest-error-status').innerHTML = `<span class="badge ok">${esc(t('badge.none'))}</span>`;
+    $('latest-error-detail').textContent = t('metric.no_request_errors');
   }
 }
 
@@ -244,15 +295,15 @@ async function loadModels() {
 
   const tbody = $('models-table');
   if (!currentModels.length) {
-    tbody.innerHTML = emptyRow(7, 'No model data', 'Captured requests with usage will appear here.');
-    $('models-summary').textContent = '0 models';
+    tbody.innerHTML = emptyRow(7, t('state.no_model_data'), t('state.model_hint'));
+    $('models-summary').textContent = t('summary.zero_models');
     return;
   }
 
   const totalCost = currentModels.reduce((sum, r) => sum + (r.cost_known ? Number(r.cost || 0) : 0), 0);
   const totalTokens = currentModels.reduce((sum, r) => sum + Number(r.total_tokens || 0), 0);
   const unknownPricing = currentModels.filter(r => !r.cost_known).length;
-  $('models-summary').textContent = `${currentModels.length} models, ${unknownPricing} without matched pricing`;
+  $('models-summary').textContent = t('summary.models', { count: currentModels.length, unknown: unknownPricing });
 
   tbody.innerHTML = currentModels.map(r => {
     const tokens = Number(r.total_tokens || 0);
@@ -262,8 +313,8 @@ async function loadModels() {
     const costShare = r.cost_known && totalCost > 0 ? cost / totalCost * 100 : 0;
     const tokenShare = totalTokens > 0 ? tokens / totalTokens * 100 : 0;
     const share = r.cost_known ? costShare : tokenShare;
-    const shareLabel = r.cost_known ? `${costShare.toFixed(1)}%` : `${tokenShare.toFixed(1)}% tokens`;
-    const pricing = r.cost_known ? '<span class="badge ok">matched</span>' : '<span class="badge warn">unknown</span>';
+    const shareLabel = r.cost_known ? `${costShare.toFixed(1)}%` : `${tokenShare.toFixed(1)}% ${t('table.tokens').toLowerCase()}`;
+    const pricing = r.cost_known ? `<span class="badge ok">${esc(t('badge.matched'))}</span>` : `<span class="badge warn">${esc(t('badge.pricing_unknown'))}</span>`;
     const costStr = r.cost_known ? formatCost(cost) : '-';
     return `<tr>
       <td><div class="model-name" title="${esc(r.model || 'unknown')}">${esc(r.model || 'unknown')}</div></td>
@@ -281,9 +332,9 @@ async function loadKeys() {
   const data = await fetchJSON('keys?range=' + encodeURIComponent(getRange()));
   const rows = Array.isArray(data) ? data : [];
   const tbody = $('keys-table');
-  $('keys-summary').textContent = rows.length + ' keys';
+  $('keys-summary').textContent = t('summary.keys', { count: rows.length });
   if (!rows.length) {
-    tbody.innerHTML = emptyRow(5, 'No API key data', 'Requests with authorization headers will appear here.');
+    tbody.innerHTML = emptyRow(5, t('state.no_key_data'), t('state.key_hint'));
     return;
   }
   tbody.innerHTML = rows.map(r => {
@@ -312,7 +363,7 @@ async function loadRequests() {
   const rows = Array.isArray(data) ? data : [];
   const tbody = $('requests-table');
   if (!rows.length) {
-    tbody.innerHTML = emptyRow(11, 'No matching requests', 'Adjust the filters or choose a wider time range.');
+    tbody.innerHTML = emptyRow(11, t('state.no_matching_requests'), t('state.adjust_filters'));
     return;
   }
   tbody.innerHTML = rows.map(r => {
@@ -320,7 +371,7 @@ async function loadRequests() {
     const model = r.model_returned || r.model_requested || '-';
     const capture = captureBadge(r);
     const endpoint = r.stream ? `${esc(r.endpoint)} <span class="badge info">stream</span>` : esc(r.endpoint);
-    const bytesTitle = `Request: ${formatBytes(r.request_bytes)} / Response: ${formatBytes(r.response_bytes)}`;
+    const bytesTitle = t('bytes.request_response', { request: formatBytes(r.request_bytes), response: formatBytes(r.response_bytes) });
     return `<tr title="${esc(bytesTitle)}">
       <td class="mono">${esc(formatTime(r.created_at))}</td>
       <td><span class="badge ${statusClass}">${esc(r.status)}</span></td>
@@ -340,11 +391,11 @@ async function loadRequests() {
 function captureBadge(r) {
   const outcome = r.capture_outcome || '';
   const reason = r.capture_reason || '';
-  if (outcome === 'captured') return '<span class="badge ok">captured</span>';
-  if (outcome === 'failed') return `<span class="badge err" title="${esc(reason)}">failed</span>`;
-  if (outcome === 'skipped') return `<span class="badge warn" title="${esc(reason)}">skipped</span>`;
+  if (outcome === 'captured') return `<span class="badge ok">${esc(t('badge.captured'))}</span>`;
+  if (outcome === 'failed') return `<span class="badge err" title="${esc(reason)}">${esc(t('badge.failed'))}</span>`;
+  if (outcome === 'skipped') return `<span class="badge warn" title="${esc(reason)}">${esc(t('badge.skipped'))}</span>`;
   if (reason) return `<span class="badge neutral" title="${esc(reason)}">${esc(reason)}</span>`;
-  return '<span class="badge neutral">unknown</span>';
+  return `<span class="badge neutral">${esc(t('badge.unknown'))}</span>`;
 }
 
 async function loadTimeseries() {
@@ -356,91 +407,205 @@ async function loadTimeseries() {
   renderRequestsChart(rows, bucket);
 }
 
+function chartDimensions(rowCount) {
+  const width = Math.max(760, rowCount * 13 + 76);
+  return { width, height: 250, left: 54, right: 18, top: 18, bottom: 30 };
+}
+
+function chartGrid(maxValue, dims) {
+  const plotH = dims.height - dims.top - dims.bottom;
+  return [0, 0.5, 1].map(f => {
+    const value = maxValue * f;
+    const y = dims.height - dims.bottom - plotH * f;
+    return `<line class="chart-grid-line" x1="${dims.left}" y1="${y.toFixed(1)}" x2="${dims.width - dims.right}" y2="${y.toFixed(1)}"></line>
+      <text class="chart-axis-label" x="${dims.left - 8}" y="${(y + 4).toFixed(1)}">${esc(formatNum(value))}</text>`;
+  }).join('');
+}
+
 function renderTokensChart(rows, bucket) {
   const chart = $('tokens-chart');
   if (!rows.length) {
-    chart.innerHTML = '<div class="empty"><strong>No token data</strong>No captured usage in this range.</div>';
-    $('tokens-chart-summary').textContent = '0 buckets';
+    chart.innerHTML = emptyChart(t('state.no_token_data'), t('state.no_captured_usage'));
+    $('tokens-chart-summary').textContent = t('summary.chart_buckets', { count: 0, bucket });
     $('tokens-chart-left').textContent = '-';
     $('tokens-chart-right').textContent = '-';
     return;
   }
 
-  const totals = rows.map(r => ({
-    cached: Number(r.cached_tokens || 0),
-    uncached: Math.max(0, Number(r.input_tokens || 0) - Number(r.cached_tokens || 0)),
-    output: Number(r.output_tokens || 0),
-    reasoning: Number(r.reasoning_tokens || 0),
-    total: Number(r.total_tokens || 0)
-  }));
-  const maxStack = Math.max(...totals.map(r => r.cached + r.uncached + r.output + r.reasoning), 1);
+  const totals = rows.map(r => {
+    const reasoning = Number(r.reasoning_tokens || 0);
+    const rawOutput = Number(r.output_tokens || 0);
+    return {
+      cached: Number(r.cached_tokens || 0),
+      uncached: Math.max(0, Number(r.input_tokens || 0) - Number(r.cached_tokens || 0)),
+      output: Math.max(0, rawOutput - reasoning),
+      reasoning,
+      total: Number(r.total_tokens || 0)
+    };
+  });
+  const stackTotals = totals.map(r => r.cached + r.uncached + r.output + r.reasoning);
+  const maxStack = Math.max(...stackTotals, 1);
   const totalTokens = totals.reduce((sum, r) => sum + r.total, 0);
   const peakTokens = Math.max(...totals.map(r => r.total), 0);
+  const dims = chartDimensions(rows.length);
+  const plotW = dims.width - dims.left - dims.right;
+  const plotH = dims.height - dims.top - dims.bottom;
+  const slot = plotW / rows.length;
+  const barW = Math.max(4, Math.min(18, slot - 4));
+  const yFor = value => dims.height - dims.bottom - plotH * Number(value || 0) / maxStack;
 
-  chart.innerHTML = rows.map((r, i) => {
-    const t = totals[i];
-    const title = [
-      formatShortTime(r.timestamp),
-      `cached input: ${formatFull(t.cached)}`,
-      `uncached input: ${formatFull(t.uncached)}`,
-      `output: ${formatFull(t.output)}`,
-      `reasoning: ${formatFull(t.reasoning)}`
-    ].join(' | ');
-    return `<div class="stack-wrap" title="${esc(title)}"><div class="stack-bar">
-      ${segment('reasoning', t.reasoning, maxStack)}
-      ${segment('output', t.output, maxStack)}
-      ${segment('uncached', t.uncached, maxStack)}
-      ${segment('cached', t.cached, maxStack)}
-    </div></div>`;
+  const bars = rows.map((r, i) => {
+    const x = dims.left + slot * i + (slot - barW) / 2;
+    let yCursor = dims.height - dims.bottom;
+    const parts = [
+      ['cached', totals[i].cached],
+      ['uncached', totals[i].uncached],
+      ['output', totals[i].output],
+      ['reasoning', totals[i].reasoning]
+    ];
+    const rects = parts.map(([kind, value]) => {
+      if (value <= 0) return '';
+      const y = yFor(value + (dims.height - dims.bottom - yCursor) / plotH * maxStack);
+      let h = yCursor - y;
+      if (h > 0 && h < 1) h = 1;
+      yCursor -= h;
+      return `<rect class="token-segment ${kind}" x="${x.toFixed(1)}" y="${yCursor.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" rx="2"></rect>`;
+    }).join('');
+    return `<g>
+      ${rects}
+      <rect class="chart-hit" x="${(dims.left + slot * i).toFixed(1)}" y="${dims.top}" width="${Math.max(6, slot).toFixed(1)}" height="${plotH}" data-tooltip="${esc(tokenTooltip(r, totals[i]))}"></rect>
+    </g>`;
   }).join('');
 
-  $('tokens-chart-summary').textContent = `${rows.length} ${bucket} buckets, ${formatFull(totalTokens)} tokens`;
+  chart.innerHTML = `<svg class="svg-chart" viewBox="0 0 ${dims.width} ${dims.height}" width="${dims.width}" height="${dims.height}" role="img" aria-label="${esc(t('panel.tokens'))}">
+    ${chartGrid(maxStack, dims)}
+    <line class="axis-line" x1="${dims.left}" y1="${dims.height - dims.bottom}" x2="${dims.width - dims.right}" y2="${dims.height - dims.bottom}"></line>
+    ${bars}
+  </svg>`;
+  attachTooltips(chart);
+
+  $('tokens-chart-summary').textContent = t('summary.tokens_chart', { count: rows.length, bucket, tokens: formatFull(totalTokens) });
   $('tokens-chart-left').textContent = formatShortTime(rows[0].timestamp);
-  $('tokens-chart-right').textContent = `Peak ${formatFull(peakTokens)} tokens`;
+  $('tokens-chart-right').textContent = t('summary.peak_tokens', { tokens: formatFull(peakTokens) });
 }
 
-function segment(kind, value, maxStack) {
-  value = Number(value || 0);
-  if (value <= 0) return '';
-  const height = Math.max(1, value / maxStack * 100);
-  return `<span class="segment ${kind}" style="height:${height.toFixed(2)}%"></span>`;
+function tokenTooltip(row, values) {
+  return tooltipHtml(
+    formatShortTime(row.timestamp),
+    t('tooltip.total_tokens', { value: formatFull(row.total_tokens) }),
+    [
+      ['cached', t('tooltip.cached_input'), formatFull(values.cached)],
+      ['uncached', t('tooltip.uncached_input'), formatFull(values.uncached)],
+      ['output', t('tooltip.output'), formatFull(values.output)],
+      ['reasoning', t('tooltip.reasoning'), formatFull(values.reasoning)]
+    ]
+  );
 }
 
 function renderRequestsChart(rows, bucket) {
   const chart = $('requests-chart');
   if (!rows.length) {
-    chart.innerHTML = '<div class="empty"><strong>No request data</strong>No requests in this range.</div>';
-    $('requests-chart-summary').textContent = '0 buckets';
+    chart.innerHTML = emptyChart(t('state.no_request_data'), t('state.no_requests_range'));
+    $('requests-chart-summary').textContent = t('summary.chart_buckets', { count: 0, bucket });
     $('requests-chart-left').textContent = '-';
     $('requests-chart-right').textContent = '-';
     return;
   }
 
-  const width = 800;
-  const height = 230;
-  const padX = 24;
-  const padY = 20;
+  const dims = chartDimensions(rows.length);
+  const plotW = dims.width - dims.left - dims.right;
+  const plotH = dims.height - dims.top - dims.bottom;
   const maxCount = Math.max(...rows.map(r => Number(r.count || 0)), 1);
   const maxFailed = Math.max(...rows.map(r => Number(r.failed_count || 0)), 0);
-  const xFor = i => rows.length === 1 ? width / 2 : padX + (width - padX * 2) * i / (rows.length - 1);
-  const yFor = value => height - padY - (height - padY * 2) * Number(value || 0) / maxCount;
-  const points = rows.map((r, i) => `${xFor(i).toFixed(1)},${yFor(r.count).toFixed(1)}`).join(' ');
-  const failedPoints = rows.map((r, i) => `${xFor(i).toFixed(1)},${yFor(r.failed_count).toFixed(1)}`).join(' ');
-  const area = `${padX},${height - padY} ${points} ${width - padX},${height - padY}`;
+  const xFor = i => rows.length === 1 ? dims.left + plotW / 2 : dims.left + plotW * i / (rows.length - 1);
+  const yFor = value => dims.height - dims.bottom - plotH * Number(value || 0) / maxCount;
+  const linePath = field => rows.map((r, i) => `${i === 0 ? 'M' : 'L'}${xFor(i).toFixed(1)} ${yFor(r[field]).toFixed(1)}`).join(' ');
+  const requestPath = linePath('count');
+  const failedPath = linePath('failed_count');
+  const areaPath = `${requestPath} L${xFor(rows.length - 1).toFixed(1)} ${dims.height - dims.bottom} L${xFor(0).toFixed(1)} ${dims.height - dims.bottom} Z`;
+  const slot = plotW / rows.length;
   const peakLatency = Math.max(...rows.map(r => Number(r.avg_latency_ms || 0)), 0);
 
-  chart.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Request trend">
-    <line class="axis-line" x1="${padX}" y1="${height - padY}" x2="${width - padX}" y2="${height - padY}"></line>
-    <line class="axis-line" x1="${padX}" y1="${padY}" x2="${padX}" y2="${height - padY}"></line>
-    <polygon class="request-area" points="${area}"></polygon>
-    <polyline class="request-line" points="${points}"></polyline>
-    ${maxFailed > 0 ? `<polyline class="failed-line" points="${failedPoints}"></polyline>` : ''}
-    ${rows.map((r, i) => `<circle cx="${xFor(i).toFixed(1)}" cy="${yFor(r.count).toFixed(1)}" r="3" fill="currentColor"><title>${esc(`${formatShortTime(r.timestamp)}: ${formatFull(r.count)} requests, ${formatFull(r.failed_count)} failed, avg latency ${formatLat(r.avg_latency_ms)}`)}</title></circle>`).join('')}
-  </svg>`;
+  const hits = rows.map((r, i) => {
+    const x = dims.left + slot * i;
+    return `<rect class="chart-hit" x="${x.toFixed(1)}" y="${dims.top}" width="${Math.max(8, slot).toFixed(1)}" height="${plotH}" data-tooltip="${esc(requestTooltip(r))}"></rect>`;
+  }).join('');
+  const points = rows.map((r, i) => `<circle class="request-point" cx="${xFor(i).toFixed(1)}" cy="${yFor(r.count).toFixed(1)}" r="3"></circle>`).join('');
 
-  $('requests-chart-summary').textContent = `${rows.length} ${bucket} buckets, peak ${formatFull(maxCount)} requests`;
+  chart.innerHTML = `<svg class="svg-chart" viewBox="0 0 ${dims.width} ${dims.height}" width="${dims.width}" height="${dims.height}" role="img" aria-label="${esc(t('panel.requests'))}">
+    ${chartGrid(maxCount, dims)}
+    <line class="axis-line" x1="${dims.left}" y1="${dims.height - dims.bottom}" x2="${dims.width - dims.right}" y2="${dims.height - dims.bottom}"></line>
+    <path class="request-area" d="${areaPath}"></path>
+    <path class="request-line" d="${requestPath}"></path>
+    ${maxFailed > 0 ? `<path class="failed-line" d="${failedPath}"></path>` : ''}
+    ${points}
+    ${hits}
+  </svg>`;
+  attachTooltips(chart);
+
+  $('requests-chart-summary').textContent = t('summary.requests_chart', { count: rows.length, bucket, peak: formatFull(maxCount) });
   $('requests-chart-left').textContent = formatShortTime(rows[0].timestamp);
-  $('requests-chart-right').textContent = `Peak avg latency ${formatLat(peakLatency)}`;
+  $('requests-chart-right').textContent = t('summary.peak_latency', { latency: formatLat(peakLatency) });
+}
+
+function requestTooltip(row) {
+  const count = Number(row.count || 0);
+  const failed = Number(row.failed_count || 0);
+  return tooltipHtml(
+    formatShortTime(row.timestamp),
+    '',
+    [
+      ['requests', t('tooltip.requests'), formatFull(count)],
+      ['failed', t('tooltip.failed'), formatFull(failed)],
+      ['failed', t('tooltip.failure_rate'), formatPercent(failed, count)],
+      ['requests', t('tooltip.avg_ttfb'), formatLat(row.avg_ttfb_ms)],
+      ['requests', t('tooltip.avg_latency'), formatLat(row.avg_latency_ms)],
+      ['tokens', t('tooltip.tokens'), formatFull(row.total_tokens)]
+    ]
+  );
+}
+
+function tooltipHtml(title, meta, rows) {
+  return `<div class="tooltip-title"><span>${esc(title)}</span>${meta ? `<strong>${esc(meta)}</strong>` : ''}</div>` +
+    rows.map(([kind, label, value]) => `<div class="tooltip-row"><span><i class="tooltip-swatch ${kind}"></i>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('');
+}
+
+function attachTooltips(container) {
+  container.querySelectorAll('.chart-hit').forEach(el => {
+    el.addEventListener('mouseenter', event => showTooltip(event, el.dataset.tooltip));
+    el.addEventListener('mousemove', moveTooltip);
+    el.addEventListener('mouseleave', hideTooltip);
+    el.addEventListener('focus', event => showTooltip(event, el.dataset.tooltip));
+    el.addEventListener('blur', hideTooltip);
+  });
+}
+
+function showTooltip(event, html) {
+  const tooltip = $('chart-tooltip');
+  tooltip.innerHTML = html || '';
+  tooltip.classList.remove('hidden');
+  moveTooltip(event);
+}
+
+function moveTooltip(event) {
+  const tooltip = $('chart-tooltip');
+  if (!tooltip || tooltip.classList.contains('hidden')) return;
+  const pad = 12;
+  const rect = tooltip.getBoundingClientRect();
+  const targetRect = event.currentTarget && event.currentTarget.getBoundingClientRect ? event.currentTarget.getBoundingClientRect() : null;
+  const clientX = Number.isFinite(event.clientX) ? event.clientX : targetRect ? targetRect.left + targetRect.width / 2 : window.innerWidth / 2;
+  const clientY = Number.isFinite(event.clientY) ? event.clientY : targetRect ? targetRect.top + targetRect.height / 2 : window.innerHeight / 2;
+  let x = clientX + 14;
+  let y = clientY + 14;
+  if (x + rect.width + pad > window.innerWidth) x = clientX - rect.width - 14;
+  if (y + rect.height + pad > window.innerHeight) y = clientY - rect.height - 14;
+  tooltip.style.left = Math.max(pad, x) + 'px';
+  tooltip.style.top = Math.max(pad, y) + 'px';
+}
+
+function hideTooltip() {
+  const tooltip = $('chart-tooltip');
+  if (tooltip) tooltip.classList.add('hidden');
 }
 
 async function loadHealth() {
@@ -452,11 +617,11 @@ async function loadHealth() {
 
   const unhealthy = Number(data.dropped_events || 0) + Number(data.parse_errors || 0) + Number(data.db_write_errors || 0);
   if (data.capture_disabled || !data.metering_enabled) {
-    $('health-summary').innerHTML = '<span class="badge warn">capture off</span>';
+    $('health-summary').innerHTML = `<span class="badge warn">${esc(t('badge.capture_off'))}</span>`;
   } else if (unhealthy > 0 || Number(data.queue_depth || 0) > 0) {
-    $('health-summary').innerHTML = '<span class="badge warn">attention</span>';
+    $('health-summary').innerHTML = `<span class="badge warn">${esc(t('badge.attention'))}</span>`;
   } else {
-    $('health-summary').innerHTML = '<span class="badge ok">healthy</span>';
+    $('health-summary').innerHTML = `<span class="badge ok">${esc(t('badge.healthy'))}</span>`;
   }
 }
 
@@ -466,12 +631,12 @@ async function loadErrors() {
   const source = data.source || 'unknown';
   const bucketCount = Number(data.bucket_count || rows.length || 0);
   const nonzeroBucketCount = Number(data.nonzero_bucket_count || rows.length || 0);
-  $('errors-summary').textContent = `${source}, ${bucketCount} buckets, ${nonzeroBucketCount} non-zero`;
+  $('errors-summary').textContent = t('summary.error_buckets', { source, buckets: bucketCount, nonzero: nonzeroBucketCount });
 
   if (!rows.length) {
     $('errors-table-wrap').classList.add('hidden');
     $('errors-state').classList.remove('hidden');
-    $('errors-state').innerHTML = '<div class="state-box"><strong>No errors in this range</strong>All tracked error buckets are zero.</div>';
+    $('errors-state').innerHTML = `<div class="state-box"><strong>${esc(t('state.no_errors'))}</strong>${esc(t('state.all_error_buckets_zero'))}</div>`;
     return;
   }
 
@@ -490,7 +655,7 @@ async function refresh() {
   if (isRefreshing) return;
   isRefreshing = true;
   const btn = $('refresh-btn');
-  btn.textContent = 'Loading';
+  btn.textContent = t('action.loading');
   btn.disabled = true;
 
   try {
@@ -518,18 +683,18 @@ async function refresh() {
       .map(item => ({ name: item.name, error: item.result.reason }));
 
     if (failures.length === 0) {
-      setStatus('live', 'Dashboard live', 'All panels refreshed successfully.');
+      setStatus('live', t('status.dashboard_live'), t('status.all_panels'));
     } else if (failures.length === tasks.length) {
-      setStatus('error', 'Refresh failed', failures.map(f => `${f.name}: ${f.error.message}`).join(' | '));
+      setStatus('error', t('status.refresh_failed'), failures.map(f => `${f.name}: ${f.error.message}`).join(' | '));
       markFailedPanels(failures);
     } else {
-      setStatus('partial', 'Partial refresh', failures.map(f => `${f.name}: ${f.error.message}`).join(' | '));
+      setStatus('partial', t('status.partial_refresh'), failures.map(f => `${f.name}: ${f.error.message}`).join(' | '));
       markFailedPanels(failures);
     }
 
     setLastRefresh(new Date());
   } finally {
-    btn.textContent = 'Refresh';
+    btn.textContent = t('action.refresh');
     btn.disabled = false;
     isRefreshing = false;
   }
@@ -568,16 +733,16 @@ async function reloadRequestsFromFilter() {
     await loadRequests();
   } catch (err) {
     $('requests-table').innerHTML = errorRow(11, err.message);
-    setStatus('partial', 'Requests refresh failed', err.message);
+    setStatus('partial', t('status.requests_failed'), err.message);
   }
 }
 
 async function toggleRequests() {
   requestsExpanded = !requestsExpanded;
   $('request-details').classList.toggle('hidden', !requestsExpanded);
-  $('toggle-requests').textContent = requestsExpanded ? 'Hide recent requests' : 'Show recent requests';
+  $('toggle-requests').textContent = requestsExpanded ? t('action.hide_requests') : t('action.show_requests');
   if (requestsExpanded) {
-    $('requests-table').innerHTML = emptyRow(11, 'Loading requests', 'Fetching the latest 100 matching rows.');
+    $('requests-table').innerHTML = emptyRow(11, t('state.loading_requests'), t('state.fetching_requests'));
     await reloadRequestsFromFilter();
   }
 }
@@ -596,7 +761,11 @@ function refreshFromFocus() {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+  applyStaticI18N();
   applyMetadata();
+  setStatus('live', t('status.ready'), t('status.waiting'));
+  setLastRefresh(null);
+  $('language-select').addEventListener('change', event => setLanguage(event.target.value));
   $('refresh-btn').addEventListener('click', refresh);
   $('range-select').addEventListener('change', refresh);
   $('filter-status').addEventListener('change', reloadRequestsFromFilter);

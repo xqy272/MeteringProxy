@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Metering Proxy">
+  <rect width="64" height="64" rx="14" fill="#15191d"/>
+  <path d="M14 45V19h7l11 16 11-16h7v26h-8V32L34 45h-4L22 32v13h-8z" fill="#58c9d4"/>
+  <path d="M14 50h36" stroke="#45c77b" stroke-width="4" stroke-linecap="round"/>
+  <path d="M49 15l3 3-3 3" fill="none" stroke="#e3ad55" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

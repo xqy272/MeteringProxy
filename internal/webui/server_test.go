@@ -218,8 +218,26 @@ func TestCustomBasePath(t *testing.T) {
 	if !strings.Contains(body, `href="/stats/styles.css"`) {
 		t.Errorf("custom basePath not injected into stylesheet URL")
 	}
+	if !strings.Contains(body, `href="/stats/mark.svg"`) {
+		t.Errorf("custom basePath not injected into favicon URL")
+	}
 	if !strings.Contains(body, `src="/stats/app.js"`) {
 		t.Errorf("custom basePath not injected into script URL")
+	}
+	if !strings.Contains(body, `src="/stats/i18n.js"`) {
+		t.Errorf("custom basePath not injected into i18n script URL")
+	}
+	if !strings.Contains(body, `src="/stats/mark.svg"`) {
+		t.Errorf("custom basePath not injected into brand image URL")
+	}
+	if !strings.Contains(body, `id="language-select"`) {
+		t.Errorf("language selector missing from WebUI")
+	}
+	if !strings.Contains(body, `<html lang="en">`) {
+		t.Errorf("WebUI static fallback should default to English")
+	}
+	if !strings.Contains(body, `https://github.com/xqy272/MeteringProxy`) {
+		t.Errorf("GitHub link missing from WebUI")
 	}
 	if strings.Contains(body, "__METERING_API_BASE__") || strings.Contains(body, "__METERING_BASE__") {
 		t.Errorf("api base placeholder was not replaced")
@@ -236,6 +254,9 @@ func TestIndexUsesMetadataDrivenFilters(t *testing.T) {
 	if !strings.Contains(body, "fetchJSON('metadata')") {
 		t.Fatal("index should load metadata API")
 	}
+	if !strings.Contains(body, "window.METERING_I18N") {
+		t.Fatal("app script should read the lightweight i18n dictionary")
+	}
 	if !strings.Contains(body, "fetchJSON('activity?range='") {
 		t.Fatal("index should load activity API")
 	}
@@ -247,6 +268,9 @@ func TestIndexUsesMetadataDrivenFilters(t *testing.T) {
 	}
 	if !strings.Contains(body, `meta[name="api-base"]`) {
 		t.Fatal("index should read API base from injected metadata")
+	}
+	if !strings.Contains(body, "data-tooltip") || !strings.Contains(body, "chart-tooltip") {
+		t.Fatal("charts should use custom tooltip plumbing")
 	}
 	if strings.Contains(body, `<option value="/v1/chat/completions">`) ||
 		strings.Contains(body, `<option value="/v1/responses">`) {
@@ -267,7 +291,7 @@ func TestCustomBasePathAPI(t *testing.T) {
 
 func TestStaticFileServed(t *testing.T) {
 	s, _ := newTestServer(t, "/metering")
-	for _, path := range []string{"/metering/", "/metering/styles.css", "/metering/app.js"} {
+	for _, path := range []string{"/metering/", "/metering/styles.css", "/metering/i18n.js", "/metering/app.js", "/metering/mark.svg"} {
 		req := httptest.NewRequest("GET", path, nil)
 		rec := httptest.NewRecorder()
 		s.ServeHTTP(rec, req)
