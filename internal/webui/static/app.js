@@ -11,6 +11,8 @@ let isRefreshing = false;
 let lastRefreshAt = 0;
 let requestsExpanded = false;
 let currentLang = detectLanguage();
+let lastTimeseriesRows = [];
+let lastTimeseriesBucket = '';
 
 const fallbackRanges = [
   { key: '24h', label: 'Last 24 Hours', bucket: '10m' },
@@ -403,13 +405,17 @@ async function loadTimeseries() {
   const bucket = bucketForRange(range);
   const data = await fetchJSON('timeseries?range=' + encodeURIComponent(range) + '&bucket=' + encodeURIComponent(bucket));
   const rows = Array.isArray(data) ? data : [];
+  lastTimeseriesRows = rows;
+  lastTimeseriesBucket = bucket;
   renderTokensChart(rows, bucket);
   renderRequestsChart(rows, bucket);
 }
 
-function chartDimensions(rowCount) {
-  const width = Math.max(760, rowCount * 13 + 76);
-  return { width, height: 250, left: 54, right: 18, top: 18, bottom: 30 };
+function chartDimensions(container) {
+  const rect = container && container.getBoundingClientRect ? container.getBoundingClientRect() : null;
+  const width = Math.max(360, Math.round((rect && rect.width) || (container && container.clientWidth) || 820));
+  const height = Math.max(190, Math.round((rect && rect.height) || (container && container.clientHeight) || 250));
+  return { width, height, left: 54, right: 18, top: 18, bottom: 30 };
 }
 
 function chartGrid(maxValue, dims) {
@@ -420,6 +426,27 @@ function chartGrid(maxValue, dims) {
     return `<line class="chart-grid-line" x1="${dims.left}" y1="${y.toFixed(1)}" x2="${dims.width - dims.right}" y2="${y.toFixed(1)}"></line>
       <text class="chart-axis-label" x="${dims.left - 8}" y="${(y + 4).toFixed(1)}">${esc(formatNum(value))}</text>`;
   }).join('');
+}
+
+function categoryBucket(index, count, dims) {
+  const plotW = dims.width - dims.left - dims.right;
+  const slot = plotW / Math.max(count, 1);
+  return {
+    x: dims.left + slot * index,
+    width: slot,
+    center: dims.left + slot * (index + 0.5)
+  };
+}
+
+function coordinateBucket(index, count, dims, xFor) {
+  const center = xFor(index);
+  const start = index === 0 ? dims.left : (xFor(index - 1) + center) / 2;
+  const end = index === count - 1 ? dims.width - dims.right : (center + xFor(index + 1)) / 2;
+  return {
+    x: start,
+    width: Math.max(4, end - start),
+    center
+  };
 }
 
 function renderTokensChart(rows, bucket) {
@@ -447,15 +474,16 @@ function renderTokensChart(rows, bucket) {
   const maxStack = Math.max(...stackTotals, 1);
   const totalTokens = totals.reduce((sum, r) => sum + r.total, 0);
   const peakTokens = Math.max(...totals.map(r => r.total), 0);
-  const dims = chartDimensions(rows.length);
+  const dims = chartDimensions(chart);
   const plotW = dims.width - dims.left - dims.right;
   const plotH = dims.height - dims.top - dims.bottom;
   const slot = plotW / rows.length;
-  const barW = Math.max(4, Math.min(18, slot - 4));
+  const barW = Math.max(2, Math.min(16, slot * 0.58));
   const yFor = value => dims.height - dims.bottom - plotH * Number(value || 0) / maxStack;
 
   const bars = rows.map((r, i) => {
-    const x = dims.left + slot * i + (slot - barW) / 2;
+    const bucketRect = categoryBucket(i, rows.length, dims);
+    const x = bucketRect.center - barW / 2;
     let yCursor = dims.height - dims.bottom;
     const parts = [
       ['cached', totals[i].cached],
@@ -471,13 +499,19 @@ function renderTokensChart(rows, bucket) {
       yCursor -= h;
       return `<rect class="token-segment ${kind}" x="${x.toFixed(1)}" y="${yCursor.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" rx="2"></rect>`;
     }).join('');
-    return `<g>
+    const stackTop = yCursor;
+    const stackH = Math.max(0, dims.height - dims.bottom - stackTop);
+    const outline = stackH > 0 ? `<rect class="token-outline" x="${(x - 1.5).toFixed(1)}" y="${(stackTop - 1.5).toFixed(1)}" width="${(barW + 3).toFixed(1)}" height="${(stackH + 3).toFixed(1)}" rx="3"></rect>` : '';
+    return `<g class="chart-bucket" tabindex="0" data-tooltip="${esc(tokenTooltip(r, totals[i]))}">
+      <rect class="bucket-band" x="${bucketRect.x.toFixed(1)}" y="${dims.top}" width="${bucketRect.width.toFixed(1)}" height="${plotH}"></rect>
+      <line class="bucket-ruler" x1="${bucketRect.center.toFixed(1)}" y1="${dims.top}" x2="${bucketRect.center.toFixed(1)}" y2="${dims.height - dims.bottom}"></line>
+      ${outline}
       ${rects}
-      <rect class="chart-hit" x="${(dims.left + slot * i).toFixed(1)}" y="${dims.top}" width="${Math.max(6, slot).toFixed(1)}" height="${plotH}" data-tooltip="${esc(tokenTooltip(r, totals[i]))}"></rect>
+      <rect class="chart-hit" x="${bucketRect.x.toFixed(1)}" y="${dims.top}" width="${bucketRect.width.toFixed(1)}" height="${plotH}"></rect>
     </g>`;
   }).join('');
 
-  chart.innerHTML = `<svg class="svg-chart" viewBox="0 0 ${dims.width} ${dims.height}" width="${dims.width}" height="${dims.height}" role="img" aria-label="${esc(t('panel.tokens'))}">
+  chart.innerHTML = `<svg class="svg-chart" viewBox="0 0 ${dims.width} ${dims.height}" role="img" aria-label="${esc(t('panel.tokens'))}">
     ${chartGrid(maxStack, dims)}
     <line class="axis-line" x1="${dims.left}" y1="${dims.height - dims.bottom}" x2="${dims.width - dims.right}" y2="${dims.height - dims.bottom}"></line>
     ${bars}
@@ -512,7 +546,7 @@ function renderRequestsChart(rows, bucket) {
     return;
   }
 
-  const dims = chartDimensions(rows.length);
+  const dims = chartDimensions(chart);
   const plotW = dims.width - dims.left - dims.right;
   const plotH = dims.height - dims.top - dims.bottom;
   const maxCount = Math.max(...rows.map(r => Number(r.count || 0)), 1);
@@ -523,23 +557,31 @@ function renderRequestsChart(rows, bucket) {
   const requestPath = linePath('count');
   const failedPath = linePath('failed_count');
   const areaPath = `${requestPath} L${xFor(rows.length - 1).toFixed(1)} ${dims.height - dims.bottom} L${xFor(0).toFixed(1)} ${dims.height - dims.bottom} Z`;
-  const slot = plotW / rows.length;
   const peakLatency = Math.max(...rows.map(r => Number(r.avg_latency_ms || 0)), 0);
 
-  const hits = rows.map((r, i) => {
-    const x = dims.left + slot * i;
-    return `<rect class="chart-hit" x="${x.toFixed(1)}" y="${dims.top}" width="${Math.max(8, slot).toFixed(1)}" height="${plotH}" data-tooltip="${esc(requestTooltip(r))}"></rect>`;
+  const buckets = rows.map((r, i) => {
+    const bucketRect = coordinateBucket(i, rows.length, dims, xFor);
+    const x = xFor(i);
+    const y = yFor(r.count);
+    const failed = Number(r.failed_count || 0);
+    const failedY = yFor(failed);
+    return `<g class="chart-bucket" tabindex="0" data-tooltip="${esc(requestTooltip(r))}">
+      <rect class="bucket-band" x="${bucketRect.x.toFixed(1)}" y="${dims.top}" width="${bucketRect.width.toFixed(1)}" height="${plotH}"></rect>
+      <line class="bucket-ruler" x1="${x.toFixed(1)}" y1="${dims.top}" x2="${x.toFixed(1)}" y2="${dims.height - dims.bottom}"></line>
+      <circle class="request-point-ring" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="7"></circle>
+      <circle class="request-point" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3.4"></circle>
+      ${failed > 0 ? `<circle class="failed-point" cx="${x.toFixed(1)}" cy="${failedY.toFixed(1)}" r="3"></circle>` : ''}
+      <rect class="chart-hit" x="${bucketRect.x.toFixed(1)}" y="${dims.top}" width="${bucketRect.width.toFixed(1)}" height="${plotH}"></rect>
+    </g>`;
   }).join('');
-  const points = rows.map((r, i) => `<circle class="request-point" cx="${xFor(i).toFixed(1)}" cy="${yFor(r.count).toFixed(1)}" r="3"></circle>`).join('');
 
-  chart.innerHTML = `<svg class="svg-chart" viewBox="0 0 ${dims.width} ${dims.height}" width="${dims.width}" height="${dims.height}" role="img" aria-label="${esc(t('panel.requests'))}">
+  chart.innerHTML = `<svg class="svg-chart" viewBox="0 0 ${dims.width} ${dims.height}" role="img" aria-label="${esc(t('panel.requests'))}">
     ${chartGrid(maxCount, dims)}
     <line class="axis-line" x1="${dims.left}" y1="${dims.height - dims.bottom}" x2="${dims.width - dims.right}" y2="${dims.height - dims.bottom}"></line>
     <path class="request-area" d="${areaPath}"></path>
     <path class="request-line" d="${requestPath}"></path>
     ${maxFailed > 0 ? `<path class="failed-line" d="${failedPath}"></path>` : ''}
-    ${points}
-    ${hits}
+    ${buckets}
   </svg>`;
   attachTooltips(chart);
 
@@ -571,34 +613,52 @@ function tooltipHtml(title, meta, rows) {
 }
 
 function attachTooltips(container) {
-  container.querySelectorAll('.chart-hit').forEach(el => {
-    el.addEventListener('mouseenter', event => showTooltip(event, el.dataset.tooltip));
-    el.addEventListener('mousemove', moveTooltip);
-    el.addEventListener('mouseleave', hideTooltip);
-    el.addEventListener('focus', event => showTooltip(event, el.dataset.tooltip));
-    el.addEventListener('blur', hideTooltip);
+  const svg = container.querySelector('.svg-chart');
+  container.querySelectorAll('.chart-bucket').forEach(el => {
+    el.addEventListener('mouseenter', event => activateBucket(container, svg, el, event));
+    el.addEventListener('mousemove', event => moveTooltip(event, el));
+    el.addEventListener('mouseleave', () => deactivateBucket(container, svg, el));
+    el.addEventListener('focus', event => activateBucket(container, svg, el, event));
+    el.addEventListener('blur', () => deactivateBucket(container, svg, el));
   });
 }
 
-function showTooltip(event, html) {
+function activateBucket(container, svg, el, event) {
+  container.querySelectorAll('.chart-bucket.is-active').forEach(active => {
+    if (active !== el) active.classList.remove('is-active');
+  });
+  if (svg) svg.classList.add('chart-active');
+  el.classList.add('is-active');
+  showTooltip(event, el.dataset.tooltip, el);
+}
+
+function deactivateBucket(container, svg, el) {
+  el.classList.remove('is-active');
+  if (svg && !container.querySelector('.chart-bucket.is-active')) svg.classList.remove('chart-active');
+  hideTooltip();
+}
+
+function showTooltip(event, html, anchor) {
   const tooltip = $('chart-tooltip');
   tooltip.innerHTML = html || '';
   tooltip.classList.remove('hidden');
-  moveTooltip(event);
+  moveTooltip(event, anchor);
 }
 
-function moveTooltip(event) {
+function moveTooltip(event, anchor) {
   const tooltip = $('chart-tooltip');
   if (!tooltip || tooltip.classList.contains('hidden')) return;
   const pad = 12;
   const rect = tooltip.getBoundingClientRect();
-  const targetRect = event.currentTarget && event.currentTarget.getBoundingClientRect ? event.currentTarget.getBoundingClientRect() : null;
-  const clientX = Number.isFinite(event.clientX) ? event.clientX : targetRect ? targetRect.left + targetRect.width / 2 : window.innerWidth / 2;
-  const clientY = Number.isFinite(event.clientY) ? event.clientY : targetRect ? targetRect.top + targetRect.height / 2 : window.innerHeight / 2;
-  let x = clientX + 14;
-  let y = clientY + 14;
-  if (x + rect.width + pad > window.innerWidth) x = clientX - rect.width - 14;
-  if (y + rect.height + pad > window.innerHeight) y = clientY - rect.height - 14;
+  const target = anchor || event.currentTarget;
+  const targetRect = target && target.getBoundingClientRect ? target.getBoundingClientRect() : null;
+  const clientX = targetRect ? targetRect.left + targetRect.width / 2 : Number.isFinite(event.clientX) ? event.clientX : window.innerWidth / 2;
+  const clientY = targetRect ? targetRect.top + 8 : Number.isFinite(event.clientY) ? event.clientY : window.innerHeight / 2;
+  let x = clientX - rect.width / 2;
+  let y = clientY - rect.height - 10;
+  if (y < pad && targetRect) y = targetRect.bottom + 10;
+  if (x + rect.width + pad > window.innerWidth) x = window.innerWidth - rect.width - pad;
+  if (y + rect.height + pad > window.innerHeight) y = window.innerHeight - rect.height - pad;
   tooltip.style.left = Math.max(pad, x) + 'px';
   tooltip.style.top = Math.max(pad, y) + 'px';
 }
@@ -760,6 +820,12 @@ function refreshFromFocus() {
   refresh();
 }
 
+function rerenderTimeseriesCharts() {
+  if (!lastTimeseriesRows.length) return;
+  renderTokensChart(lastTimeseriesRows, lastTimeseriesBucket);
+  renderRequestsChart(lastTimeseriesRows, lastTimeseriesBucket);
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
   applyStaticI18N();
   applyMetadata();
@@ -774,6 +840,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('toggle-requests').addEventListener('click', toggleRequests);
   $('auto-refresh').addEventListener('change', configureAutoRefresh);
   window.addEventListener('focus', debounce(refreshFromFocus, 2000));
+  window.addEventListener('resize', debounce(rerenderTimeseriesCharts, 160));
   await refresh();
 });
 

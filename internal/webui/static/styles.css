@@ -302,13 +302,15 @@ main {
 
 .chart-shell {
   height: 250px;
-  padding-top: 12px;
+  padding-top: 8px;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 .stacked-chart,
 .trend-chart {
   height: 100%;
-  overflow-x: auto;
-  padding-bottom: 2px;
+  overflow: hidden;
+  padding-bottom: 0;
 }
 .trend-chart {
   height: 250px;
@@ -317,48 +319,134 @@ main {
 }
 .svg-chart {
   display: block;
-  min-width: 100%;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
 }
 .chart-grid-line {
   stroke: #252c35;
   stroke-width: 1;
+  pointer-events: none;
 }
 .chart-axis-label {
   fill: var(--muted-2);
   font-size: 11px;
   text-anchor: end;
   font-variant-numeric: tabular-nums;
+  pointer-events: none;
 }
 .token-segment.cached { fill: var(--cyan); }
 .token-segment.uncached { fill: var(--blue); }
 .token-segment.output { fill: var(--green); }
 .token-segment.reasoning { fill: var(--violet); }
+.token-segment {
+  pointer-events: none;
+  opacity: 0.88;
+  transition: opacity 140ms ease;
+}
+.token-outline {
+  fill: transparent;
+  stroke: transparent;
+  stroke-width: 1.5;
+  pointer-events: none;
+  transition: stroke 140ms ease;
+}
+.chart-bucket {
+  outline: none;
+}
+.chart-bucket:focus-visible .bucket-band,
+.chart-bucket.is-active .bucket-band {
+  fill: rgba(255, 255, 255, 0.065);
+}
+.chart-bucket:focus-visible .bucket-ruler,
+.chart-bucket.is-active .bucket-ruler {
+  opacity: 1;
+}
+.chart-active .chart-bucket:not(.is-active) .token-segment,
+.chart-active .chart-bucket:not(.is-active) .request-point,
+.chart-active .chart-bucket:not(.is-active) .failed-point {
+  opacity: 0.36;
+}
+.chart-bucket.is-active .token-segment {
+  opacity: 1;
+}
+.chart-bucket.is-active .token-outline {
+  stroke: rgba(238, 242, 247, 0.5);
+}
 .chart-hit {
   fill: transparent;
-  cursor: crosshair;
+  cursor: default;
   outline: none;
+  pointer-events: all;
+}
+.bucket-band {
+  fill: transparent;
+  pointer-events: none;
+  transition: fill 140ms ease;
+}
+.bucket-ruler {
+  stroke: rgba(238, 242, 247, 0.35);
+  stroke-width: 1;
+  stroke-dasharray: 2 4;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 140ms ease;
 }
 .axis-line {
   stroke: #2a313a;
   stroke-width: 1;
+  pointer-events: none;
 }
 .request-area {
   fill: rgba(227, 173, 85, 0.13);
+  pointer-events: none;
 }
 .request-line {
   fill: none;
   stroke: var(--amber);
   stroke-width: 3;
   vector-effect: non-scaling-stroke;
+  pointer-events: none;
 }
 .failed-line {
   fill: none;
   stroke: var(--red);
   stroke-width: 2;
   vector-effect: non-scaling-stroke;
+  pointer-events: none;
 }
 .request-point {
   fill: var(--amber);
+  pointer-events: none;
+  opacity: 0.92;
+  stroke: var(--surface);
+  stroke-width: 1.5;
+  transition: opacity 140ms ease;
+}
+.request-point-ring {
+  fill: rgba(227, 173, 85, 0.16);
+  stroke: rgba(227, 173, 85, 0.42);
+  stroke-width: 1;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+.failed-point {
+  fill: var(--red);
+  stroke: var(--surface);
+  stroke-width: 1.5;
+  pointer-events: none;
+  opacity: 0.92;
+  transition: opacity 140ms ease;
+}
+.chart-bucket.is-active .request-point {
+  opacity: 1;
+}
+.chart-bucket.is-active .request-point-ring {
+  opacity: 1;
+}
+.chart-bucket.is-active .failed-point {
+  opacity: 1;
 }
 .chart-tooltip {
   position: fixed;
