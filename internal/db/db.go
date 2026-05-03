@@ -77,11 +77,35 @@ type KeyRow struct {
 }
 
 type TimeseriesRow struct {
-	Timestamp    string `json:"timestamp"`
-	Count        int64  `json:"count"`
-	InputTokens  int64  `json:"input_tokens"`
-	OutputTokens int64  `json:"output_tokens"`
-	TotalTokens  int64  `json:"total_tokens"`
+	Timestamp       string `json:"timestamp"`
+	Count           int64  `json:"count"`
+	FailedCount     int64  `json:"failed_count"`
+	InputTokens     int64  `json:"input_tokens"`
+	OutputTokens    int64  `json:"output_tokens"`
+	ReasoningTokens int64  `json:"reasoning_tokens"`
+	CachedTokens    int64  `json:"cached_tokens"`
+	TotalTokens     int64  `json:"total_tokens"`
+	AvgLatencyMs    int64  `json:"avg_latency_ms"`
+	AvgTTFBMs       int64  `json:"avg_ttfb_ms"`
+}
+
+type ActivityRow struct {
+	SampleSize          int64   `json:"sample_size"`
+	SuccessCount        int64   `json:"success_count"`
+	FailedCount         int64   `json:"failed_count"`
+	FailureRate         float64 `json:"failure_rate"`
+	AvgLatencyMs        int64   `json:"avg_latency_ms"`
+	P95LatencyMs        int64   `json:"p95_latency_ms"`
+	AvgTTFBMs           int64   `json:"avg_ttfb_ms"`
+	P95TTFBMs           int64   `json:"p95_ttfb_ms"`
+	CaptureCaptured     int64   `json:"capture_captured"`
+	CaptureFailed       int64   `json:"capture_failed"`
+	CaptureSkipped      int64   `json:"capture_skipped"`
+	LatestErrorStatus   int     `json:"latest_error_status"`
+	LatestErrorAt       string  `json:"latest_error_at"`
+	LatestError         string  `json:"latest_error"`
+	LatestErrorEndpoint string  `json:"latest_error_endpoint"`
+	LatestErrorModel    string  `json:"latest_error_model"`
 }
 
 type RequestRow struct {
@@ -114,12 +138,12 @@ type RequestRow struct {
 }
 
 type HealthRow struct {
-	Timestamp      string `json:"timestamp"`
-	QueueDepth     int64  `json:"queue_depth"`
-	DroppedEvents  int64  `json:"dropped_events"`
-	ParseErrors    int64  `json:"parse_errors"`
-	DBErrors       int64  `json:"db_errors"`
-	SSELineSkips   int64  `json:"sse_line_skips"`
+	Timestamp     string `json:"timestamp"`
+	QueueDepth    int64  `json:"queue_depth"`
+	DroppedEvents int64  `json:"dropped_events"`
+	ParseErrors   int64  `json:"parse_errors"`
+	DBErrors      int64  `json:"db_errors"`
+	SSELineSkips  int64  `json:"sse_line_skips"`
 }
 
 type ErrorTimelineRow struct {
@@ -137,6 +161,7 @@ type DB struct {
 }
 
 const schemaVersion = 4
+const activitySampleLimit = 1000
 
 func Open(path string) (*DB, error) {
 	dir := filepath.Dir(path)
@@ -665,9 +690,14 @@ func (db *DB) Timeseries(since time.Time, bucketMin int) ([]TimeseriesRow, error
 		SELECT
 			`+bucketExpr+`,
 			COUNT(*),
+			COUNT(CASE WHEN status >= 400 THEN 1 END),
 			COALESCE(SUM(input_tokens), 0),
 			COALESCE(SUM(output_tokens), 0),
-			COALESCE(SUM(total_tokens), 0)
+			COALESCE(SUM(reasoning_tokens), 0),
+			COALESCE(SUM(cached_tokens), 0),
+			COALESCE(SUM(total_tokens), 0),
+			COALESCE(CAST(ROUND(AVG(CASE WHEN latency_ms > 0 THEN latency_ms END)) AS INTEGER), 0),
+			COALESCE(CAST(ROUND(AVG(CASE WHEN ttfb_ms > 0 THEN ttfb_ms END)) AS INTEGER), 0)
 		FROM request_usage WHERE created_at_unix >= ?
 		GROUP BY 1 ORDER BY 1 ASC
 	`, since.Unix())
@@ -679,12 +709,140 @@ func (db *DB) Timeseries(since time.Time, bucketMin int) ([]TimeseriesRow, error
 	var result []TimeseriesRow
 	for rows.Next() {
 		var r TimeseriesRow
-		if err := rows.Scan(&r.Timestamp, &r.Count, &r.InputTokens, &r.OutputTokens, &r.TotalTokens); err != nil {
+		if err := rows.Scan(
+			&r.Timestamp, &r.Count, &r.FailedCount,
+			&r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens, &r.TotalTokens,
+			&r.AvgLatencyMs, &r.AvgTTFBMs,
+		); err != nil {
 			return nil, err
 		}
 		result = append(result, r)
 	}
 	return result, rows.Err()
+}
+
+func (db *DB) Activity(since time.Time) (*ActivityRow, error) {
+	row := &ActivityRow{}
+	err := db.read.QueryRow(`
+		WITH sampled AS (
+			SELECT *
+			FROM request_usage
+			WHERE created_at_unix >= ?
+			ORDER BY id DESC
+			LIMIT ?
+		)
+		SELECT
+			COUNT(*),
+			COUNT(CASE WHEN status < 400 THEN 1 END),
+			COUNT(CASE WHEN status >= 400 THEN 1 END),
+			COALESCE(CAST(ROUND(AVG(CASE WHEN latency_ms > 0 THEN latency_ms END)) AS INTEGER), 0),
+			COALESCE(CAST(ROUND(AVG(CASE WHEN ttfb_ms > 0 THEN ttfb_ms END)) AS INTEGER), 0),
+			COUNT(CASE WHEN capture_outcome = 'captured' THEN 1 END),
+			COUNT(CASE WHEN capture_outcome = 'failed' THEN 1 END),
+			COUNT(CASE WHEN capture_outcome = 'skipped' THEN 1 END)
+		FROM sampled
+	`, since.Unix(), activitySampleLimit).Scan(
+		&row.SampleSize, &row.SuccessCount, &row.FailedCount,
+		&row.AvgLatencyMs, &row.AvgTTFBMs,
+		&row.CaptureCaptured, &row.CaptureFailed, &row.CaptureSkipped,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if row.SampleSize > 0 {
+		row.FailureRate = float64(row.FailedCount) / float64(row.SampleSize)
+	}
+
+	var perr error
+	row.P95LatencyMs, perr = db.percentileInt(since, "latency_ms", 0.95, activitySampleLimit)
+	if perr != nil {
+		return nil, perr
+	}
+	row.P95TTFBMs, perr = db.percentileInt(since, "ttfb_ms", 0.95, activitySampleLimit)
+	if perr != nil {
+		return nil, perr
+	}
+
+	err = db.read.QueryRow(`
+		WITH sampled AS (
+			SELECT *
+			FROM request_usage
+			WHERE created_at_unix >= ?
+			ORDER BY id DESC
+			LIMIT ?
+		)
+		SELECT
+			COALESCE(status, 0),
+			COALESCE(created_at, ''),
+			COALESCE(error, ''),
+			COALESCE(endpoint, ''),
+			COALESCE(NULLIF(TRIM(model_returned), ''), NULLIF(TRIM(model_requested), ''), '')
+		FROM sampled
+		WHERE status >= 400
+		ORDER BY id DESC LIMIT 1
+	`, since.Unix(), activitySampleLimit).Scan(
+		&row.LatestErrorStatus, &row.LatestErrorAt, &row.LatestError,
+		&row.LatestErrorEndpoint, &row.LatestErrorModel,
+	)
+	if err == sql.ErrNoRows {
+		return row, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return row, nil
+}
+
+func (db *DB) percentileInt(since time.Time, column string, percentile float64, limit int) (int64, error) {
+	switch column {
+	case "latency_ms", "ttfb_ms":
+	default:
+		return 0, fmt.Errorf("unsupported percentile column %q", column)
+	}
+	if limit <= 0 {
+		limit = activitySampleLimit
+	}
+	var count int64
+	if err := db.read.QueryRow(`
+		WITH sampled AS (
+			SELECT `+column+`
+			FROM request_usage
+			WHERE created_at_unix >= ?
+			ORDER BY id DESC
+			LIMIT ?
+		)
+		SELECT COUNT(*)
+		FROM sampled
+		WHERE `+column+` > 0
+	`, since.Unix(), limit).Scan(&count); err != nil {
+		return 0, err
+	}
+	if count == 0 {
+		return 0, nil
+	}
+	offset := int64(percentile*float64(count)+0.999999) - 1
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= count {
+		offset = count - 1
+	}
+	var value int64
+	err := db.read.QueryRow(`
+		WITH sampled AS (
+			SELECT `+column+`
+			FROM request_usage
+			WHERE created_at_unix >= ?
+			ORDER BY id DESC
+			LIMIT ?
+		)
+		SELECT `+column+`
+		FROM sampled
+		WHERE `+column+` > 0
+		ORDER BY `+column+` ASC
+		LIMIT 1 OFFSET ?
+	`, since.Unix(), limit, offset).Scan(&value)
+	return value, err
 }
 
 func (db *DB) Requests(limit int, statusMin, statusMax int, model, endpoint string, since time.Time) ([]RequestRow, error) {
@@ -736,27 +894,63 @@ func (db *DB) ErrorTimeline(since time.Time) ([]ErrorTimelineRow, error) {
 	rows, err := db.read.Query(`
 		SELECT
 			timestamp,
-			0,
+			timestamp_unix,
 			parse_error_total,
 			db_write_error_total,
 			dropped_events_total
-		FROM health_metrics WHERE timestamp_unix >= ?
-		ORDER BY timestamp ASC
-	`, since.Unix())
+		FROM health_metrics
+		WHERE timestamp_unix >= ?
+			OR id = (
+				SELECT id FROM health_metrics
+				WHERE timestamp_unix < ?
+				ORDER BY timestamp_unix DESC, id DESC LIMIT 1
+			)
+		ORDER BY timestamp_unix ASC, id ASC
+	`, since.Unix(), since.Unix())
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
 	var result []ErrorTimelineRow
+	var prevParse, prevDB, prevDropped int64
+	havePrev := false
 	for rows.Next() {
-		var r ErrorTimelineRow
-		if err := rows.Scan(&r.Timestamp, &r.Count, &r.ParseErrors, &r.DBErrors, &r.DroppedEvents); err != nil {
+		var timestamp string
+		var timestampUnix int64
+		var parseErrors, dbErrors, droppedEvents int64
+		if err := rows.Scan(&timestamp, &timestampUnix, &parseErrors, &dbErrors, &droppedEvents); err != nil {
 			return nil, err
 		}
+		if !havePrev {
+			havePrev = true
+			if timestampUnix < since.Unix() {
+				prevParse = parseErrors
+				prevDB = dbErrors
+				prevDropped = droppedEvents
+				continue
+			}
+		}
+		r := ErrorTimelineRow{
+			Timestamp:     timestamp,
+			Count:         0,
+			ParseErrors:   positiveDelta(parseErrors, prevParse),
+			DBErrors:      positiveDelta(dbErrors, prevDB),
+			DroppedEvents: positiveDelta(droppedEvents, prevDropped),
+		}
+		prevParse = parseErrors
+		prevDB = dbErrors
+		prevDropped = droppedEvents
 		result = append(result, r)
 	}
 	return result, rows.Err()
+}
+
+func positiveDelta(current, previous int64) int64 {
+	if current >= previous {
+		return current - previous
+	}
+	return current
 }
 
 func (db *DB) LatestHealth() (*HealthRow, error) {

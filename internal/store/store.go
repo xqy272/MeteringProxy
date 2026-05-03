@@ -41,6 +41,7 @@ type ReportStore interface {
 	Models(since time.Time) ([]db.ModelRow, error)
 	Keys(since time.Time) ([]db.KeyRow, error)
 	Timeseries(since time.Time, bucketMin int) ([]db.TimeseriesRow, error)
+	Activity(since time.Time) (*db.ActivityRow, error)
 	Requests(limit int, statusMin, statusMax int, model, endpoint string, since time.Time) ([]db.RequestRow, error)
 	ErrorTimeline(since time.Time) ([]db.ErrorTimelineRow, error)
 	ErrorTimelineFromRequests(since time.Time) ([]db.ErrorTimelineRow, error)

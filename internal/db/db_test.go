@@ -391,8 +391,78 @@ func TestTimeseries(t *testing.T) {
 	if rows[0].TotalTokens != 45 {
 		t.Errorf("bucket 1 total_tokens = %d, want 45", rows[0].TotalTokens)
 	}
+	if rows[0].FailedCount != 0 || rows[0].AvgLatencyMs != 100 {
+		t.Errorf("bucket 1 failed/avg latency = %d/%d, want 0/100", rows[0].FailedCount, rows[0].AvgLatencyMs)
+	}
 	if rows[1].Count != 1 {
 		t.Errorf("bucket 2 count = %d, want 1", rows[1].Count)
+	}
+}
+
+func TestActivity(t *testing.T) {
+	d := newTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	records := []UsageRecord{
+		{CreatedAt: now.Add(-30 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/responses", Method: "POST", Status: 200, LatencyMs: 100, TTFBMs: 20, CaptureOutcome: "captured", ModelReturned: "gpt-5.4"},
+		{CreatedAt: now.Add(-20 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/responses", Method: "POST", Status: 500, LatencyMs: 300, TTFBMs: 60, CaptureOutcome: "failed", CaptureReason: "parse_error", Error: "upstream failed", ModelReturned: "gpt-5.4"},
+		{CreatedAt: now.Add(-10 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/chat/completions", Method: "POST", Status: 429, LatencyMs: 200, TTFBMs: 40, CaptureOutcome: "skipped", CaptureReason: "rate_limited", Error: "rate limited", ModelRequested: "gpt-4o"},
+	}
+	if err := d.InsertBatch(records); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	row, err := d.Activity(now.Add(-1 * time.Hour))
+	if err != nil {
+		t.Fatalf("Activity: %v", err)
+	}
+	if row.SampleSize != 3 || row.SuccessCount != 1 || row.FailedCount != 2 {
+		t.Fatalf("activity counts = %+v, want sample=3 success=1 failed=2", row)
+	}
+	if row.AvgLatencyMs != 200 || row.P95LatencyMs != 300 {
+		t.Fatalf("latency = avg %d p95 %d, want 200/300", row.AvgLatencyMs, row.P95LatencyMs)
+	}
+	if row.AvgTTFBMs != 40 || row.P95TTFBMs != 60 {
+		t.Fatalf("ttfb = avg %d p95 %d, want 40/60", row.AvgTTFBMs, row.P95TTFBMs)
+	}
+	if row.CaptureCaptured != 1 || row.CaptureFailed != 1 || row.CaptureSkipped != 1 {
+		t.Fatalf("capture counts = %+v, want 1/1/1", row)
+	}
+	if row.LatestErrorStatus != 429 || row.LatestErrorEndpoint != "/v1/chat/completions" || row.LatestErrorModel != "gpt-4o" {
+		t.Fatalf("latest error = %+v, want 429 chat completions gpt-4o", row)
+	}
+}
+
+func TestActivityUsesBoundedRecentSample(t *testing.T) {
+	d := newTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	records := make([]UsageRecord, 0, activitySampleLimit+5)
+	for i := 0; i < activitySampleLimit+5; i++ {
+		status := 200
+		if i == 0 {
+			status = 500
+		}
+		records = append(records, UsageRecord{
+			CreatedAt: now.Add(time.Duration(i) * time.Second).Format(time.RFC3339),
+			Endpoint:  "/v1/responses",
+			Method:    "POST",
+			Status:    status,
+			LatencyMs: int64(i + 1),
+			TTFBMs:    int64(i + 1),
+		})
+	}
+	if err := d.InsertBatch(records); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	row, err := d.Activity(now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("Activity: %v", err)
+	}
+	if row.SampleSize != activitySampleLimit {
+		t.Fatalf("sample size = %d, want bounded sample %d", row.SampleSize, activitySampleLimit)
+	}
+	if row.FailedCount != 0 || row.LatestErrorStatus != 0 {
+		t.Fatalf("activity should ignore errors outside recent sample, got %+v", row)
 	}
 }
 
@@ -418,6 +488,44 @@ func TestHealthMetrics(t *testing.T) {
 	}
 	if len(rows) != 1 {
 		t.Errorf("expected 1 error timeline row, got %d", len(rows))
+	}
+	if len(rows) == 1 && (rows[0].DroppedEvents != 10 || rows[0].ParseErrors != 2 || rows[0].DBErrors != 1) {
+		t.Errorf("error deltas = %+v, want dropped=10 parse=2 db=1", rows[0])
+	}
+	if err := d.InsertHealthMetric(ts(-5*time.Minute), 5, 12, 2, 5, 0); err != nil {
+		t.Fatalf("InsertHealthMetric second: %v", err)
+	}
+	rows, err = d.ErrorTimeline(time.Now().Add(-24 * time.Hour))
+	if err != nil {
+		t.Fatalf("ErrorTimeline second: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 error timeline rows, got %d", len(rows))
+	}
+	if rows[1].DroppedEvents != 2 || rows[1].ParseErrors != 0 || rows[1].DBErrors != 4 {
+		t.Errorf("second error deltas = %+v, want dropped=2 parse=0 db=4", rows[1])
+	}
+}
+
+func TestErrorTimelineHandlesCounterReset(t *testing.T) {
+	d := newTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := d.InsertHealthMetric(now.Add(-2*time.Hour).Format(time.RFC3339), 0, 10, 20, 30, 0); err != nil {
+		t.Fatalf("InsertHealthMetric previous: %v", err)
+	}
+	if err := d.InsertHealthMetric(now.Add(-30*time.Minute).Format(time.RFC3339), 0, 1, 2, 3, 0); err != nil {
+		t.Fatalf("InsertHealthMetric reset: %v", err)
+	}
+
+	rows, err := d.ErrorTimeline(now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("ErrorTimeline: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected one in-range row, got %d", len(rows))
+	}
+	if rows[0].DroppedEvents != 1 || rows[0].ParseErrors != 2 || rows[0].DBErrors != 3 {
+		t.Fatalf("reset delta = %+v, want dropped=1 parse=2 db=3", rows[0])
 	}
 }
 

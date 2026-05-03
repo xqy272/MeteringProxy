@@ -6,6 +6,7 @@ import (
 	"html"
 	"io/fs"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -63,6 +64,7 @@ func New(database store.ReportStore, pricingData *pricing.Pricing, batchWriter *
 			s.handleIndex(w, r)
 			return
 		}
+		w.Header().Set("Cache-Control", "no-cache")
 		fileServer.ServeHTTP(w, r)
 	})
 
@@ -86,6 +88,8 @@ func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleSummary(w, r)
 	case strings.HasSuffix(path, "/api/timeseries"):
 		s.handleTimeseries(w, r)
+	case strings.HasSuffix(path, "/api/activity"):
+		s.handleActivity(w, r)
 	case strings.HasSuffix(path, "/api/models"):
 		s.handleModels(w, r)
 	case strings.HasSuffix(path, "/api/keys"):
@@ -110,7 +114,9 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	apiBase := html.EscapeString(s.basePath + "/api/")
+	staticBase := html.EscapeString(s.basePath)
 	injected := strings.ReplaceAll(string(htmlBytes), "__METERING_API_BASE__", apiBase)
+	injected = strings.ReplaceAll(injected, "__METERING_BASE__", staticBase)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Write([]byte(injected))
@@ -183,6 +189,16 @@ func (s *Server) handleTimeseries(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, report)
 }
 
+func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
+	since, _ := parseRange(r)
+	row, err := s.db.Activity(since)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, event.ActivityFromDB(row))
+}
+
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	since, _ := parseRange(r)
 	rows, err := s.db.Models(since)
@@ -253,19 +269,29 @@ func (s *Server) handleErrors(w http.ResponseWriter, r *http.Request) {
 	since, _ := parseRange(r)
 
 	type errorResp struct {
-		Timeline      []event.ErrorTimelineReport `json:"timeline"`
-		Source        string                      `json:"source"`
-		QueueDepth    int64                       `json:"queue_depth"`
-		ParseErrors   int64                       `json:"parse_errors"`
-		DBErrors      int64                       `json:"db_errors"`
-		DroppedEvents int64                       `json:"dropped_events"`
+		Timeline           []event.ErrorTimelineReport `json:"timeline"`
+		Source             string                      `json:"source"`
+		BucketCount        int                         `json:"bucket_count"`
+		NonzeroBucketCount int                         `json:"nonzero_bucket_count"`
+		QueueDepth         int64                       `json:"queue_depth"`
+		ParseErrors        int64                       `json:"parse_errors"`
+		DBErrors           int64                       `json:"db_errors"`
+		DroppedEvents      int64                       `json:"dropped_events"`
 	}
 
 	writeErrResp := func(source string, timeline []event.ErrorTimelineReport) {
 		latestHealth, _ := s.db.LatestHealth()
+		bucketCount := len(timeline)
+		nonzeroTimeline := filterNonzeroErrors(timeline)
+		nonzeroBucketCount := len(nonzeroTimeline)
+		if r.URL.Query().Get("nonzero") == "true" {
+			timeline = nonzeroTimeline
+		}
 		resp := errorResp{
-			Timeline: timeline,
-			Source:   source,
+			Timeline:           timeline,
+			Source:             source,
+			BucketCount:        bucketCount,
+			NonzeroBucketCount: nonzeroBucketCount,
 		}
 		if latestHealth != nil {
 			resp.QueueDepth = latestHealth.QueueDepth
@@ -279,14 +305,69 @@ func (s *Server) handleErrors(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, resp)
 	}
 
+	var sources []string
+	var timelines [][]event.ErrorTimelineReport
 	healthRows, err := s.db.ErrorTimeline(since)
-	if err != nil || len(healthRows) == 0 {
-		reqErrorRows, _ := s.db.ErrorTimelineFromRequests(since)
-		writeErrResp("request_usage_fallback", event.ErrorTimelineFromDB(reqErrorRows))
-		return
+	if err == nil && len(healthRows) > 0 {
+		sources = append(sources, "health_metrics")
+		timelines = append(timelines, event.ErrorTimelineFromDB(healthRows))
 	}
 
-	writeErrResp("health_metrics", event.ErrorTimelineFromDB(healthRows))
+	reqErrorRows, err := s.db.ErrorTimelineFromRequests(since)
+	if err == nil && len(reqErrorRows) > 0 {
+		sources = append(sources, "request_usage")
+		timelines = append(timelines, event.ErrorTimelineFromDB(reqErrorRows))
+	}
+
+	source := "request_usage"
+	if len(sources) > 0 {
+		source = strings.Join(sources, "+")
+	}
+	writeErrResp(source, combineErrorTimelines(timelines...))
+}
+
+func filterNonzeroErrors(rows []event.ErrorTimelineReport) []event.ErrorTimelineReport {
+	if len(rows) == 0 {
+		return []event.ErrorTimelineReport{}
+	}
+	filtered := make([]event.ErrorTimelineReport, 0, len(rows))
+	for _, r := range rows {
+		if r.Count+r.ParseErrors+r.DBErrors+r.DroppedEvents > 0 {
+			filtered = append(filtered, r)
+		}
+	}
+	return filtered
+}
+
+func combineErrorTimelines(groups ...[]event.ErrorTimelineReport) []event.ErrorTimelineReport {
+	byTimestamp := map[string]*event.ErrorTimelineReport{}
+	for _, rows := range groups {
+		for _, row := range rows {
+			key := row.Timestamp
+			if key == "" {
+				key = "unknown"
+			}
+			existing := byTimestamp[key]
+			if existing == nil {
+				copy := row
+				byTimestamp[key] = &copy
+				continue
+			}
+			existing.Count += row.Count
+			existing.ParseErrors += row.ParseErrors
+			existing.DBErrors += row.DBErrors
+			existing.DroppedEvents += row.DroppedEvents
+		}
+	}
+
+	combined := make([]event.ErrorTimelineReport, 0, len(byTimestamp))
+	for _, row := range byTimestamp {
+		combined = append(combined, *row)
+	}
+	sort.Slice(combined, func(i, j int) bool {
+		return combined[i].Timestamp < combined[j].Timestamp
+	})
+	return combined
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

@@ -137,6 +137,31 @@ func TestAPIHealth(t *testing.T) {
 	}
 }
 
+func TestAPIActivity(t *testing.T) {
+	s, database := newTestServer(t, "/metering")
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := database.InsertBatch([]db.UsageRecord{
+		{CreatedAt: now.Add(-time.Hour).Format(time.RFC3339), Endpoint: "/v1/responses", Method: "POST", Status: 200, LatencyMs: 100, TTFBMs: 20, CaptureOutcome: "captured"},
+		{CreatedAt: now.Add(-30 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/responses", Method: "POST", Status: 500, LatencyMs: 300, TTFBMs: 60, CaptureOutcome: "failed", Error: "upstream"},
+	}); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/metering/api/activity?range=24h", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("GET /metering/api/activity: status %d, want 200", rec.Code)
+	}
+	var data event.ActivityReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &data); err != nil {
+		t.Fatalf("unmarshal activity: %v", err)
+	}
+	if data.SampleSize != 2 || data.FailedCount != 1 || data.P95LatencyMs != 300 || data.LatestErrorStatus != 500 {
+		t.Fatalf("activity response = %+v, want sample=2 failed=1 p95=300 latest=500", data)
+	}
+}
+
 func TestAPIMetadata(t *testing.T) {
 	s, _ := newTestServer(t, "/metering")
 	req := httptest.NewRequest("GET", "/metering/api/metadata", nil)
@@ -190,20 +215,29 @@ func TestCustomBasePath(t *testing.T) {
 		t.Errorf("custom basePath not injected into page; body does not contain expected string")
 		t.Logf("body snippet: %.200s", body)
 	}
-	if strings.Contains(body, "__METERING_API_BASE__") {
+	if !strings.Contains(body, `href="/stats/styles.css"`) {
+		t.Errorf("custom basePath not injected into stylesheet URL")
+	}
+	if !strings.Contains(body, `src="/stats/app.js"`) {
+		t.Errorf("custom basePath not injected into script URL")
+	}
+	if strings.Contains(body, "__METERING_API_BASE__") || strings.Contains(body, "__METERING_BASE__") {
 		t.Errorf("api base placeholder was not replaced")
 	}
 }
 
 func TestIndexUsesMetadataDrivenFilters(t *testing.T) {
 	s, _ := newTestServer(t, "/metering")
-	req := httptest.NewRequest("GET", "/metering", nil)
+	req := httptest.NewRequest("GET", "/metering/app.js", nil)
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, req)
 
 	body := rec.Body.String()
 	if !strings.Contains(body, "fetchJSON('metadata')") {
 		t.Fatal("index should load metadata API")
+	}
+	if !strings.Contains(body, "fetchJSON('activity?range='") {
+		t.Fatal("index should load activity API")
 	}
 	if !strings.Contains(body, "Promise.allSettled") {
 		t.Fatal("index should tolerate partial API failures")
@@ -216,7 +250,7 @@ func TestIndexUsesMetadataDrivenFilters(t *testing.T) {
 	}
 	if strings.Contains(body, `<option value="/v1/chat/completions">`) ||
 		strings.Contains(body, `<option value="/v1/responses">`) {
-		t.Fatal("endpoint filters should not be hardcoded in index")
+		t.Fatal("endpoint filters should not be hardcoded in app script")
 	}
 }
 
@@ -233,11 +267,16 @@ func TestCustomBasePathAPI(t *testing.T) {
 
 func TestStaticFileServed(t *testing.T) {
 	s, _ := newTestServer(t, "/metering")
-	req := httptest.NewRequest("GET", "/metering/", nil)
-	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Errorf("status %d, want 200", rec.Code)
+	for _, path := range []string{"/metering/", "/metering/styles.css", "/metering/app.js"} {
+		req := httptest.NewRequest("GET", path, nil)
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Errorf("%s status %d, want 200", path, rec.Code)
+		}
+		if path != "/metering/" && rec.Header().Get("Cache-Control") != "no-cache" {
+			t.Errorf("%s Cache-Control = %q, want no-cache", path, rec.Header().Get("Cache-Control"))
+		}
 	}
 }
 
@@ -334,14 +373,16 @@ func TestAPIErrorsSource(t *testing.T) {
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, req)
 	var resp struct {
-		Source   string                      `json:"source"`
-		Timeline []event.ErrorTimelineReport `json:"timeline"`
+		Source             string                      `json:"source"`
+		BucketCount        int                         `json:"bucket_count"`
+		NonzeroBucketCount int                         `json:"nonzero_bucket_count"`
+		Timeline           []event.ErrorTimelineReport `json:"timeline"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal fallback errors: %v", err)
 	}
-	if resp.Source != "request_usage_fallback" || len(resp.Timeline) != 1 {
-		t.Fatalf("fallback response = %+v, want request_usage_fallback with one row", resp)
+	if resp.Source != "request_usage" || len(resp.Timeline) != 1 {
+		t.Fatalf("fallback response = %+v, want request_usage with one row", resp)
 	}
 
 	if err := database.InsertHealthMetric(now.Format(time.RFC3339), 1, 2, 3, 4, 0); err != nil {
@@ -353,8 +394,24 @@ func TestAPIErrorsSource(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal health errors: %v", err)
 	}
-	if resp.Source != "health_metrics" || len(resp.Timeline) != 1 {
-		t.Fatalf("health response = %+v, want health_metrics with one row", resp)
+	if resp.Source != "health_metrics+request_usage" || len(resp.Timeline) != 2 {
+		t.Fatalf("health response = %+v, want combined health and request rows", resp)
+	}
+	if resp.BucketCount != 2 || resp.NonzeroBucketCount != 2 {
+		t.Fatalf("health bucket counts = %+v, want 2/2", resp)
+	}
+
+	if err := database.InsertHealthMetric(now.Add(time.Minute).Format(time.RFC3339), 1, 2, 3, 4, 0); err != nil {
+		t.Fatalf("InsertHealthMetric no-change: %v", err)
+	}
+	req = httptest.NewRequest("GET", "/metering/api/errors?range=24h&nonzero=true", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal nonzero errors: %v", err)
+	}
+	if len(resp.Timeline) != 2 || resp.BucketCount != 3 || resp.NonzeroBucketCount != 2 {
+		t.Fatalf("nonzero health response = %+v, want request error plus one nonzero health bucket", resp)
 	}
 }
 

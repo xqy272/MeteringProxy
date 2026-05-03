@@ -100,14 +100,43 @@ func TimeseriesFromDB(rows []db.TimeseriesRow) []TimeseriesReport {
 	result := make([]TimeseriesReport, len(rows))
 	for i, r := range rows {
 		result[i] = TimeseriesReport{
-			Timestamp:    r.Timestamp,
-			Count:        r.Count,
-			InputTokens:  r.InputTokens,
-			OutputTokens: r.OutputTokens,
-			TotalTokens:  r.TotalTokens,
+			Timestamp:       r.Timestamp,
+			Count:           r.Count,
+			FailedCount:     r.FailedCount,
+			InputTokens:     r.InputTokens,
+			OutputTokens:    r.OutputTokens,
+			ReasoningTokens: r.ReasoningTokens,
+			CachedTokens:    r.CachedTokens,
+			TotalTokens:     r.TotalTokens,
+			AvgLatencyMs:    r.AvgLatencyMs,
+			AvgTTFBMs:       r.AvgTTFBMs,
 		}
 	}
 	return result
+}
+
+func ActivityFromDB(row *db.ActivityRow) ActivityReport {
+	if row == nil {
+		return ActivityReport{}
+	}
+	return ActivityReport{
+		SampleSize:          row.SampleSize,
+		SuccessCount:        row.SuccessCount,
+		FailedCount:         row.FailedCount,
+		FailureRate:         row.FailureRate,
+		AvgLatencyMs:        row.AvgLatencyMs,
+		P95LatencyMs:        row.P95LatencyMs,
+		AvgTTFBMs:           row.AvgTTFBMs,
+		P95TTFBMs:           row.P95TTFBMs,
+		CaptureCaptured:     row.CaptureCaptured,
+		CaptureFailed:       row.CaptureFailed,
+		CaptureSkipped:      row.CaptureSkipped,
+		LatestErrorStatus:   row.LatestErrorStatus,
+		LatestErrorAt:       row.LatestErrorAt,
+		LatestError:         row.LatestError,
+		LatestErrorEndpoint: row.LatestErrorEndpoint,
+		LatestErrorModel:    row.LatestErrorModel,
+	}
 }
 
 // RequestsFromDB converts db.RequestRow slice to domain RequestReport slice.

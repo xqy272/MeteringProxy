@@ -36,11 +36,35 @@ type KeyReport struct {
 }
 
 type TimeseriesReport struct {
-	Timestamp   string `json:"timestamp"`
-	Count       int64  `json:"count"`
-	InputTokens int64  `json:"input_tokens"`
-	OutputTokens int64 `json:"output_tokens"`
-	TotalTokens int64  `json:"total_tokens"`
+	Timestamp       string `json:"timestamp"`
+	Count           int64  `json:"count"`
+	FailedCount     int64  `json:"failed_count"`
+	InputTokens     int64  `json:"input_tokens"`
+	OutputTokens    int64  `json:"output_tokens"`
+	ReasoningTokens int64  `json:"reasoning_tokens"`
+	CachedTokens    int64  `json:"cached_tokens"`
+	TotalTokens     int64  `json:"total_tokens"`
+	AvgLatencyMs    int64  `json:"avg_latency_ms"`
+	AvgTTFBMs       int64  `json:"avg_ttfb_ms"`
+}
+
+type ActivityReport struct {
+	SampleSize          int64   `json:"sample_size"`
+	SuccessCount        int64   `json:"success_count"`
+	FailedCount         int64   `json:"failed_count"`
+	FailureRate         float64 `json:"failure_rate"`
+	AvgLatencyMs        int64   `json:"avg_latency_ms"`
+	P95LatencyMs        int64   `json:"p95_latency_ms"`
+	AvgTTFBMs           int64   `json:"avg_ttfb_ms"`
+	P95TTFBMs           int64   `json:"p95_ttfb_ms"`
+	CaptureCaptured     int64   `json:"capture_captured"`
+	CaptureFailed       int64   `json:"capture_failed"`
+	CaptureSkipped      int64   `json:"capture_skipped"`
+	LatestErrorStatus   int     `json:"latest_error_status"`
+	LatestErrorAt       string  `json:"latest_error_at"`
+	LatestError         string  `json:"latest_error"`
+	LatestErrorEndpoint string  `json:"latest_error_endpoint"`
+	LatestErrorModel    string  `json:"latest_error_model"`
 }
 
 type RequestReport struct {
