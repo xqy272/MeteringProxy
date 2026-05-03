@@ -1,7 +1,7 @@
-listen: "127.0.0.1:8320"
-upstream: "http://127.0.0.1:8317"
-database: "/opt/ai-gateway/metering/usage.sqlite"
-salt_file: "/opt/ai-gateway/metering/salt"
+listen: "0.0.0.0:8320"
+upstream: "http://host.docker.internal:8317"
+database: "/data/usage.sqlite"
+salt_file: "/data/salt"
 queue_capacity: 1000
 batch_size: 50
 flush_interval: "1s"
@@ -10,4 +10,4 @@ metering_enabled: true
 webui:
   enabled: true
   base_path: "/metering"
-pricing_file: "/opt/ai-gateway/metering/pricing.yaml"
+pricing_file: "/data/pricing.yaml"
