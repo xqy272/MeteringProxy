@@ -31,6 +31,9 @@ type Event struct {
 	CachedTokens    int64
 	TotalTokens     int64
 
+	// Billable fields are reserved for future event-time pricing.
+	// Currently cost is computed at query time via pricing.Cost() in the WebUI;
+	// these fields are always zero and stored as zero in the database.
 	BillableInput  float64
 	BillableOutput float64
 	BillableTotal  float64

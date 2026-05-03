@@ -40,7 +40,8 @@ func ExtractChatUsage(data []byte) (*UsageInfo, error) {
 	if err := json.Unmarshal(resp.Usage, &usage); err != nil {
 		return nil, err
 	}
-	if usage.InputTokens > 0 && usage.PromptTokens == 0 {
+	// Reject responses-format usage: has input_tokens/output_tokens but no chat-format fields.
+	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.InputTokens > 0 {
 		return nil, nil
 	}
 	info := chatUsageToInfo(resp.Model, &usage)

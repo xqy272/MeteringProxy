@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bytes"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -365,4 +364,3 @@ func BenchmarkGolden_StreamForwarding(b *testing.B) {
 	}
 }
 
-var _ = io.ReadAll
