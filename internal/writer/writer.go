@@ -24,10 +24,10 @@ type BatchWriter struct {
 	stopCh      chan struct{}
 	wg          sync.WaitGroup
 
-	QueueDepth    int64
-	ParseErrors   int64
-	DBWriteErrors int64
-	DroppedEvents int64
+	queueDepth    int64
+	parseErrors   int64
+	dbWriteErrors int64
+	droppedEvents int64
 }
 
 func New(database store.EventSink, queueCapacity, batchSize int, flushInterval time.Duration) *BatchWriter {
@@ -54,11 +54,11 @@ func (bw *BatchWriter) Stop() {
 func (bw *BatchWriter) Enqueue(ev StatsEvent) bool {
 	select {
 	case bw.queue <- ev:
-		atomic.AddInt64(&bw.QueueDepth, 1)
-		metrics.SetQueueDepth(atomic.LoadInt64(&bw.QueueDepth))
+		atomic.AddInt64(&bw.queueDepth, 1)
+		metrics.SetQueueDepth(atomic.LoadInt64(&bw.queueDepth))
 		return true
 	default:
-		atomic.AddInt64(&bw.DroppedEvents, 1)
+		atomic.AddInt64(&bw.droppedEvents, 1)
 		metrics.AddDroppedEvents(1)
 		return false
 	}
@@ -75,13 +75,13 @@ func (bw *BatchWriter) loop() {
 		if err := bw.db.InsertEvents(batch); err != nil {
 			time.Sleep(100 * time.Millisecond)
 			if err2 := bw.db.InsertEvents(batch); err2 != nil {
-				atomic.AddInt64(&bw.DBWriteErrors, 1)
+				atomic.AddInt64(&bw.dbWriteErrors, 1)
 				metrics.AddDBWriteErrors(1)
 				log.Printf("batch insert error (after retry): %v", err2)
 			}
 		}
-		atomic.AddInt64(&bw.QueueDepth, -int64(len(batch)))
-		metrics.SetQueueDepth(atomic.LoadInt64(&bw.QueueDepth))
+		atomic.AddInt64(&bw.queueDepth, -int64(len(batch)))
+		metrics.SetQueueDepth(atomic.LoadInt64(&bw.queueDepth))
 		batch = batch[:0]
 	}
 
@@ -112,13 +112,13 @@ func (bw *BatchWriter) loop() {
 }
 
 func (bw *BatchWriter) Snapshot() (queueDepth, dropped, parseErrors, dbErrors int64) {
-	return atomic.LoadInt64(&bw.QueueDepth),
-		atomic.LoadInt64(&bw.DroppedEvents),
-		atomic.LoadInt64(&bw.ParseErrors),
-		atomic.LoadInt64(&bw.DBWriteErrors)
+	return atomic.LoadInt64(&bw.queueDepth),
+		atomic.LoadInt64(&bw.droppedEvents),
+		atomic.LoadInt64(&bw.parseErrors),
+		atomic.LoadInt64(&bw.dbWriteErrors)
 }
 
 func (bw *BatchWriter) IncrParseErrors() {
-	atomic.AddInt64(&bw.ParseErrors, 1)
+	atomic.AddInt64(&bw.parseErrors, 1)
 	metrics.AddParseErrors(1)
 }

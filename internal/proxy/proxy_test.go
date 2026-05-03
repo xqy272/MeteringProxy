@@ -13,6 +13,7 @@ import (
 
 	"ai-gateway-metering-proxy/internal/event"
 	"ai-gateway-metering-proxy/internal/hash"
+	"ai-gateway-metering-proxy/internal/metrics"
 	"ai-gateway-metering-proxy/internal/writer"
 )
 
@@ -440,6 +441,7 @@ func TestProxyStreaming_LongLineDoesNotBlockForwarding(t *testing.T) {
 
 	rw := &testRW{}
 	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	beforeSkips := metrics.SSELineSkips()
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"stream":true}`))
 	req.Header.Set("Accept", "text/event-stream")
@@ -452,8 +454,8 @@ func TestProxyStreaming_LongLineDoesNotBlockForwarding(t *testing.T) {
 	if len(rw.events) == 0 || lastEvent(rw).InputTokens != 5 {
 		t.Error("usage extraction should still work for subsequent normal-sized line")
 	}
-	if p.SSELineSkips != 1 {
-		t.Errorf("SSELineSkips = %d, want 1 for oversized line", p.SSELineSkips)
+	if got := metrics.SSELineSkips() - beforeSkips; got != 1 {
+		t.Errorf("SSELineSkips delta = %d, want 1 for oversized line", got)
 	}
 }
 
@@ -476,6 +478,7 @@ func TestProxyStreaming_LongLineAcrossChunksCountsOneSkip(t *testing.T) {
 
 	rw := &testRW{}
 	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	beforeSkips := metrics.SSELineSkips()
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"stream":true}`))
 	req.Header.Set("Accept", "text/event-stream")
@@ -485,8 +488,8 @@ func TestProxyStreaming_LongLineAcrossChunksCountsOneSkip(t *testing.T) {
 	if rec.Body.String() != stream {
 		t.Error("stream response body modified")
 	}
-	if p.SSELineSkips != 1 {
-		t.Errorf("SSELineSkips = %d, want 1 for one oversized fragmented line", p.SSELineSkips)
+	if got := metrics.SSELineSkips() - beforeSkips; got != 1 {
+		t.Errorf("SSELineSkips delta = %d, want 1 for one oversized fragmented line", got)
 	}
 	if len(rw.events) == 0 || lastEvent(rw).InputTokens != 5 || lastEvent(rw).OutputTokens != 3 {
 		t.Error("usage extraction should continue after oversized fragmented line")
@@ -504,8 +507,14 @@ func TestProxyRequest_UpstreamError(t *testing.T) {
 	if rec.Code != 502 {
 		t.Errorf("status = %d, want 502", rec.Code)
 	}
+	if strings.Contains(rec.Body.String(), "127.0.0.1") || strings.Contains(rec.Body.String(), "connect") {
+		t.Fatalf("client error body leaked upstream detail: %q", rec.Body.String())
+	}
 	if len(rw.events) == 0 || lastEvent(rw).Error == "" {
 		t.Error("error event should be recorded with error string")
+	}
+	if lastEvent(rw).Error != event.ReasonUpstreamError {
+		t.Errorf("event error = %q, want %q", lastEvent(rw).Error, event.ReasonUpstreamError)
 	}
 }
 

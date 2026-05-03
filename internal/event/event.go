@@ -52,8 +52,8 @@ type Event struct {
 
 // Capture mode constants.
 const (
-	CapturePassthrough = "passthrough"
-	CaptureRequestOnly = "request_only"
+	CapturePassthrough  = "passthrough"
+	CaptureRequestOnly  = "request_only"
 	CaptureUsageMetered = "usage_metered"
 )
 
@@ -77,12 +77,13 @@ const (
 
 // Capture reason constants.
 const (
-	ReasonCaptureDisabled            = "capture_disabled"
-	ReasonProfilePassthrough         = "profile_passthrough"
-	ReasonRequestOnlyProfile         = "request_only_profile"
-	ReasonUsageNotPresent            = "usage_not_present"
-	ReasonSampleLimitExceeded        = "sample_limit_exceeded"
-	ReasonStreamProtocolUnsupported  = "stream_protocol_unsupported"
-	ReasonParseError                 = "parse_error"
-	ReasonWriterQueueFull            = "writer_queue_full"
+	ReasonCaptureDisabled           = "capture_disabled"
+	ReasonProfilePassthrough        = "profile_passthrough"
+	ReasonRequestOnlyProfile        = "request_only_profile"
+	ReasonUsageNotPresent           = "usage_not_present"
+	ReasonSampleLimitExceeded       = "sample_limit_exceeded"
+	ReasonStreamProtocolUnsupported = "stream_protocol_unsupported"
+	ReasonParseError                = "parse_error"
+	ReasonWriterQueueFull           = "writer_queue_full"
+	ReasonUpstreamError             = "upstream_error"
 )

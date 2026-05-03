@@ -68,11 +68,12 @@ func TestEnqueueDropsWhenQueueFull(t *testing.T) {
 	if bw.Enqueue(StatsEvent{}) {
 		t.Fatal("second enqueue should be dropped")
 	}
-	if got := atomic.LoadInt64(&bw.DroppedEvents); got != 1 {
-		t.Fatalf("DroppedEvents = %d, want 1", got)
+	qd, dropped, _, _ := bw.Snapshot()
+	if dropped != 1 {
+		t.Fatalf("DroppedEvents = %d, want 1", dropped)
 	}
-	if got := atomic.LoadInt64(&bw.QueueDepth); got != 1 {
-		t.Fatalf("QueueDepth = %d, want 1", got)
+	if qd != 1 {
+		t.Fatalf("QueueDepth = %d, want 1", qd)
 	}
 }
 

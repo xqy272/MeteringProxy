@@ -3,7 +3,6 @@ package extractor
 import (
 	"bytes"
 	"encoding/json"
-	"io"
 	"strings"
 )
 
@@ -77,12 +76,10 @@ func ExtractResponsesUsage(data []byte) (*UsageInfo, error) {
 
 // ---------- non-streaming extraction ----------
 
-var errNoUsage = io.EOF // sentinel: valid JSON but no usage field
-
 // ExtractNonStreaming parses a complete JSON response body for usage.
 // endpoint is used to prefer the correct parser for the API.
 // Returns (nil, nil) when there is no usage field in valid JSON.
-// Returns (nil, err) on JSON parse failure (err is never io.EOF in that case).
+// Returns (nil, err) on JSON parse failure.
 func ExtractNonStreaming(body []byte, endpoint string) (*UsageInfo, error) {
 	body = bytes.TrimSpace(body)
 

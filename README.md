@@ -370,6 +370,8 @@ pricing:
 
 `scripts/backup.sh` 使用 SQLite 备份 API 对运行中的 WAL 数据库进行在线备份，先执行 `PRAGMA integrity_check`，确认结果为 `ok` 后再写入压缩文件。
 
+该脚本面向宿主机或裸机 systemd 环境运行，要求 `bash` 和支持 `-printf` 的 GNU `find`。Docker 运行镜像不复制该脚本，也不安装 bash；Docker 部署请使用下面的 `docker exec sqlite3` 备份命令，或在宿主机上对挂载目录运行脚本。
+
 **Docker 环境中运行备份：**
 
 ```bash

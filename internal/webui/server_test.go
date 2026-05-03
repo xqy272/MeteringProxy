@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"ai-gateway-metering-proxy/internal/db"
+	"ai-gateway-metering-proxy/internal/event"
 	"ai-gateway-metering-proxy/internal/pricing"
 	"ai-gateway-metering-proxy/internal/profile"
 	"ai-gateway-metering-proxy/internal/store"
@@ -230,7 +231,7 @@ func TestAPIRequestsStatusCategories(t *testing.T) {
 		if rec.Code != 200 {
 			t.Fatalf("status %s: HTTP %d, want 200", tc.status, rec.Code)
 		}
-		var rows []db.RequestRow
+		var rows []event.RequestReport
 		if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
 			t.Fatalf("status %s: unmarshal: %v", tc.status, err)
 		}
@@ -261,7 +262,7 @@ func TestAPIRequestsRangeAndTTFB(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("24h HTTP %d, want 200", rec.Code)
 	}
-	var rows []db.RequestRow
+	var rows []event.RequestReport
 	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
 		t.Fatalf("unmarshal 24h: %v", err)
 	}
@@ -293,8 +294,8 @@ func TestAPIErrorsSource(t *testing.T) {
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, req)
 	var resp struct {
-		Source   string                `json:"source"`
-		Timeline []db.ErrorTimelineRow `json:"timeline"`
+		Source   string                      `json:"source"`
+		Timeline []event.ErrorTimelineReport `json:"timeline"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal fallback errors: %v", err)

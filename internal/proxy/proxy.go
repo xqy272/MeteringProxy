@@ -3,13 +3,11 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"mime"
 	"net/http"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"ai-gateway-metering-proxy/internal/event"
@@ -34,11 +32,9 @@ type Proxy struct {
 	meteringEnabled bool
 	registry        *profile.Registry
 	transport       *http.Transport
-	SSELineSkips    int64
 }
 
 func New(upstream string, hasher *hash.Hasher, rw RecordWriter, maxSample int64) *Proxy {
-	metrics.SetMeteringEnabled(true)
 	return &Proxy{
 		upstream:        upstream,
 		hasher:          hasher,
@@ -284,7 +280,6 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 	lineOverflow := false
 	buf := make([]byte, 32*1024)
 	recordLineSkip := func() {
-		atomic.AddInt64(&p.SSELineSkips, 1)
 		metrics.AddSSELineSkips(1)
 	}
 
@@ -570,13 +565,14 @@ func (p *Proxy) writeError(w http.ResponseWriter, start time.Time, ttfb time.Dur
 		status = http.StatusBadGateway
 	}
 	w.Header().Set("X-Metering-Proxy", "1")
-	http.Error(w, fmt.Sprintf("upstream error: %v", err), status)
+	http.Error(w, "upstream error", status)
+	log.Printf("upstream request error: endpoint=%q method=%q status=%d error=%v", endpoint, method, status, err)
 
 	captureOutcome := event.OutcomeFailed
 
 	p.recordUsage(start, ttfb, prof, endpoint, method, "", status, false,
-		clientIPHash, apiKeyHash, modelRequested, nil, requestBytes, 0, err.Error(),
-		captureOutcome, err.Error())
+		clientIPHash, apiKeyHash, modelRequested, nil, requestBytes, 0, event.ReasonUpstreamError,
+		captureOutcome, event.ReasonUpstreamError)
 }
 
 // ---------- helpers ----------
