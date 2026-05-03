@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"ai-gateway-metering-proxy/internal/db"
@@ -41,6 +42,69 @@ func TestNewDoesNotPanic(t *testing.T) {
 	s2, _ := newTestServer(t, "/stats")
 	_ = s1
 	_ = s2
+}
+
+func TestNewWithStaticFS_ServesIndexFromInjectedFS(t *testing.T) {
+	database, err := db.Open(t.TempDir() + "/test.sqlite")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	pricingData := pricing.NewPricing()
+	bw := writer.New(store.NewEventSink(database), 100, 10, time.Nanosecond)
+	bw.Start()
+	t.Cleanup(func() { bw.Stop() })
+
+	registry := profile.NewRegistry()
+
+	staticFS := fstest.MapFS{
+		"index.html": &fstest.MapFile{
+			Data: []byte(`<meta name="api-base" content="__METERING_API_BASE__"><script src="__METERING_BASE__/app.js"></script>`),
+		},
+		"app.js": &fstest.MapFile{
+			Data: []byte(`console.log("hello");`),
+		},
+	}
+
+	s := NewWithStaticFS(database, pricingData, bw, registry, "/metering", staticFS)
+
+	// Index: placeholder injection.
+	req := httptest.NewRequest("GET", "/metering", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("index status %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "__METERING_API_BASE__") {
+		t.Fatal("placeholder __METERING_API_BASE__ was not replaced")
+	}
+	if strings.Contains(body, "__METERING_BASE__") {
+		t.Fatal("placeholder __METERING_BASE__ was not replaced")
+	}
+	if !strings.Contains(body, `content="/metering/api/"`) {
+		t.Fatal("api-base not injected into meta tag")
+	}
+	if !strings.Contains(body, `src="/metering/app.js"`) {
+		t.Fatal("base path not injected into script URL")
+	}
+
+	// Static file: fileServer branch.
+	req = httptest.NewRequest("GET", "/metering/app.js", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("app.js status %d, want 200", rec.Code)
+	}
+	if rec.Body.String() != `console.log("hello");` {
+		t.Fatal("app.js body mismatch")
+	}
+	if rec.Header().Get("Cache-Control") != "no-cache" {
+		t.Fatalf("app.js Cache-Control = %q, want no-cache", rec.Header().Get("Cache-Control"))
+	}
 }
 
 func TestMeteringExactPath(t *testing.T) {

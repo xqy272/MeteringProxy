@@ -472,6 +472,23 @@ systemd/ai-gateway-metering-proxy.service systemd 单元示例
 
 </details>
 
+## 本地 WebUI 开发
+
+开发 WebUI 时无需每次 Docker 部署，通过 `--dev-static` 直接从磁盘加载静态文件，改完刷新浏览器即可看到变化：
+
+```bash
+# 首次（带演示数据）：
+go run . --config config.dev.yaml --dev-static --seed-demo
+
+# 后续（数据库已有数据）：
+go run . --config config.dev.yaml --dev-static
+```
+
+- `--dev-static`：静态文件从 `internal/webui/static/` 磁盘路径加载，非内嵌文件系统。
+- `--seed-demo`：向数据库插入约 220 条模拟记录。要求同时传 `--dev-static`，且数据库文件名必须以 `.dev.sqlite` 结尾、不可用绝对路径。
+- `config.dev.yaml`：本地开发配置，监听 `127.0.0.1:8320`，使用本地 `salt`、`pricing.yaml` 及 `usage.dev.sqlite`。已加入 `.gitignore`。
+- 两个 flag 默认均为 `false`，不传时生产行为完全不变。
+
 ## 构建
 
 CI 通过 GitHub Actions 自动完成测试、构建和镜像推送。本地构建：

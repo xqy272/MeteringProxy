@@ -1,7 +1,9 @@
 *.exe
 ai-gateway-metering-proxy
 usage.sqlite*
+usage.dev.sqlite*
 salt
 .claude/
 .gocache/
 .gomodcache/
+config.dev.yaml

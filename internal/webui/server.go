@@ -30,10 +30,24 @@ type Server struct {
 	apiPrefix string
 	mux       *http.ServeMux
 
+	staticFS        fs.FS
 	meteringEnabled func() bool
 }
 
+// New creates a Server that serves static files from the embedded filesystem.
 func New(database store.ReportStore, pricingData *pricing.Pricing, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string) *Server {
+	staticFS, _ := fs.Sub(staticFiles, "static")
+	return newServer(database, pricingData, batchWriter, registry, basePath, staticFS)
+}
+
+// NewWithStaticFS creates a Server that serves static files from the given
+// filesystem. Use this for local development (os.DirFS on the static/ directory)
+// or testing with custom asset sets.
+func NewWithStaticFS(database store.ReportStore, pricingData *pricing.Pricing, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string, staticFS fs.FS) *Server {
+	return newServer(database, pricingData, batchWriter, registry, basePath, staticFS)
+}
+
+func newServer(database store.ReportStore, pricingData *pricing.Pricing, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string, staticFS fs.FS) *Server {
 	basePath = strings.TrimRight(basePath, "/")
 	apiPrefix := basePath + "/api/"
 
@@ -44,13 +58,13 @@ func New(database store.ReportStore, pricingData *pricing.Pricing, batchWriter *
 		registry:        registry,
 		basePath:        basePath,
 		apiPrefix:       apiPrefix,
+		staticFS:        staticFS,
 		meteringEnabled: func() bool { return true },
 		mux:             http.NewServeMux(),
 	}
 
 	s.mux.HandleFunc(basePath, s.handleIndex)
 
-	staticFS, _ := fs.Sub(staticFiles, "static")
 	fileServer := http.StripPrefix(basePath, http.FileServer(http.FS(staticFS)))
 
 	subtreePattern := basePath + "/"
@@ -108,7 +122,7 @@ func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	htmlBytes, err := staticFiles.ReadFile("static/index.html")
+	htmlBytes, err := fs.ReadFile(s.staticFS, "index.html")
 	if err != nil {
 		http.Error(w, "index not found", 500)
 		return

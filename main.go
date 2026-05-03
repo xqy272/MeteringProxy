@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,11 +28,25 @@ const walSizeThreshold = 128 * 1024 * 1024 // 128 MiB
 
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to config file")
+	devStatic := flag.Bool("dev-static", false, "serve WebUI static files from disk (internal/webui/static/) for local development")
+	seedDemo := flag.Bool("seed-demo", false, "insert demo data into the database for local WebUI testing")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
+	}
+
+	// --seed-demo guard runs before any DB access to prevent touching the wrong database.
+	if *seedDemo {
+		if !*devStatic {
+			log.Fatalf("--seed-demo requires --dev-static (refusing to seed without dev mode)")
+		}
+		dbPath := cfg.Database
+		if filepath.IsAbs(dbPath) || strings.HasPrefix(dbPath, "/") || strings.HasPrefix(dbPath, `\`) ||
+				!strings.HasSuffix(filepath.Base(dbPath), ".dev.sqlite") {
+			log.Fatalf("--seed-demo refused: database %q is not a relative *.dev.sqlite path", dbPath)
+		}
 	}
 
 	// Startup self-checks (fail-fast).
@@ -55,6 +71,13 @@ func main() {
 	pricingData, err := pricing.Load(cfg.PricingFile)
 	if err != nil {
 		log.Fatalf("Failed to load pricing file: %v", err)
+	}
+
+	if *seedDemo {
+		if err := db.SeedDemo(database); err != nil {
+			log.Fatalf("Failed to seed demo data: %v", err)
+		}
+		log.Printf("Demo data seeded successfully")
 	}
 
 	log.Printf("Startup self-check passed: salt=%s db=%s pricing=%s metering_enabled=%v",
@@ -127,7 +150,12 @@ func main() {
 	mux.Handle("/metrics", metrics.Handler())
 
 	if cfg.WebUI.Enabled {
-		webuiServer := webui.New(reportStore, pricingData, batchWriter, proxyHandler.Registry(), cfg.WebUI.BasePath)
+		var webuiServer *webui.Server
+		if *devStatic {
+			webuiServer = webui.NewWithStaticFS(reportStore, pricingData, batchWriter, proxyHandler.Registry(), cfg.WebUI.BasePath, os.DirFS("internal/webui/static"))
+		} else {
+			webuiServer = webui.New(reportStore, pricingData, batchWriter, proxyHandler.Registry(), cfg.WebUI.BasePath)
+		}
 		webuiServer.SetMeteringEnabledFunc(func() bool { return cfg.MeteringEnabled })
 		mux.Handle(cfg.WebUI.BasePath, webuiServer)
 		mux.Handle(cfg.WebUI.BasePath+"/", webuiServer)

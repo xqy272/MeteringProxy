@@ -76,6 +76,23 @@ go vet ./...
 go build -o ai-gateway-metering-proxy.exe .
 ```
 
+## Local WebUI Development
+
+Two flags support local frontend iteration without Docker redeploy:
+
+```bash
+# First run: start with demo data
+go run . --config config.dev.yaml --dev-static --seed-demo
+
+# Subsequent runs (DB already has data):
+go run . --config config.dev.yaml --dev-static
+```
+
+- `--dev-static` serves static files from `internal/webui/static/` on disk instead of the embedded FS. Edit and refresh — no rebuild needed.
+- `--seed-demo` inserts ~220 realistic records into the database. Requires `--dev-static` and a `*.dev.sqlite` database path (refuses absolute paths and non-dev filenames).
+- Both flags default to `false`. Production behavior is unchanged when they are omitted.
+- `config.dev.yaml` points to `127.0.0.1:8320`, `usage.dev.sqlite`, and local `salt`/`pricing.yaml` files. It is gitignored.
+
 For shell script edits:
 
 ```bash
