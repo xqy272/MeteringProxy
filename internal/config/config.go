@@ -18,6 +18,7 @@ type Config struct {
 	BatchSize               int           `yaml:"batch_size"`
 	FlushInterval           time.Duration `yaml:"flush_interval"`
 	MaxNonstreamSampleBytes int64         `yaml:"max_nonstream_sample_bytes"`
+	MeteringEnabled         bool          `yaml:"metering_enabled"`
 	WebUI                   WebUIConfig   `yaml:"webui"`
 	PricingFile             string        `yaml:"pricing_file"`
 }
@@ -41,6 +42,7 @@ func Load(path string) (*Config, error) {
 		BatchSize:               50,
 		FlushInterval:           1 * time.Second,
 		MaxNonstreamSampleBytes: 2 * 1024 * 1024,
+		MeteringEnabled:         true,
 		PricingFile:             "/opt/ai-gateway/metering/pricing.yaml",
 		WebUI: WebUIConfig{
 			Enabled:  true,

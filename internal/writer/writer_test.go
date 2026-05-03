@@ -7,18 +7,18 @@ import (
 	"testing"
 	"time"
 
-	"ai-gateway-metering-proxy/internal/db"
+	"ai-gateway-metering-proxy/internal/event"
 )
 
 type fakeInserter struct {
 	mu        sync.Mutex
 	failures  int
 	calls     int
-	inserted  []db.UsageRecord
+	inserted  []event.Event
 	callReady chan struct{}
 }
 
-func (f *fakeInserter) InsertBatch(records []db.UsageRecord) error {
+func (f *fakeInserter) InsertEvents(events []event.Event) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
@@ -33,7 +33,7 @@ func (f *fakeInserter) InsertBatch(records []db.UsageRecord) error {
 		f.failures--
 		return errors.New("temporary insert failure")
 	}
-	f.inserted = append(f.inserted, records...)
+	f.inserted = append(f.inserted, events...)
 	return nil
 }
 
@@ -41,6 +41,15 @@ func (f *fakeInserter) snapshot() (calls int, inserted int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls, len(f.inserted)
+}
+
+func evWithTime(ts string) StatsEvent {
+	return StatsEvent{Event: event.Event{
+		Timestamp: time.Now().UTC(),
+		Path:      "/v1/responses",
+		Method:    "POST",
+		Status:    200,
+	}}
 }
 
 func TestEnqueueDropsWhenQueueFull(t *testing.T) {
@@ -79,7 +88,7 @@ func TestStopDrainsQueue(t *testing.T) {
 	bw.Start()
 
 	for i := 0; i < 3; i++ {
-		if !bw.Enqueue(StatsEvent{Record: db.UsageRecord{CreatedAt: time.Now().UTC().Format(time.RFC3339), Endpoint: "/v1/responses", Method: "POST", Status: 200}}) {
+		if !bw.Enqueue(evWithTime("")) {
 			t.Fatalf("enqueue %d dropped", i)
 		}
 	}
@@ -106,7 +115,7 @@ func TestFlushRetriesOnceOnInsertFailure(t *testing.T) {
 	bw.Start()
 	defer bw.Stop()
 
-	if !bw.Enqueue(StatsEvent{Record: db.UsageRecord{CreatedAt: time.Now().UTC().Format(time.RFC3339), Endpoint: "/v1/responses", Method: "POST", Status: 200}}) {
+	if !bw.Enqueue(evWithTime("")) {
 		t.Fatal("enqueue dropped")
 	}
 
@@ -144,7 +153,7 @@ func TestFlushCountsDBErrorAfterRetryFailure(t *testing.T) {
 	bw.Start()
 	defer bw.Stop()
 
-	if !bw.Enqueue(StatsEvent{Record: db.UsageRecord{CreatedAt: time.Now().UTC().Format(time.RFC3339), Endpoint: "/v1/responses", Method: "POST", Status: 200}}) {
+	if !bw.Enqueue(evWithTime("")) {
 		t.Fatal("enqueue dropped")
 	}
 

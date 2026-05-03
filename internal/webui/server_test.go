@@ -10,6 +10,8 @@ import (
 
 	"ai-gateway-metering-proxy/internal/db"
 	"ai-gateway-metering-proxy/internal/pricing"
+	"ai-gateway-metering-proxy/internal/profile"
+	"ai-gateway-metering-proxy/internal/store"
 	"ai-gateway-metering-proxy/internal/writer"
 )
 
@@ -22,18 +24,18 @@ func newTestServer(t *testing.T, basePath string) (*Server, *db.DB) {
 	}
 	t.Cleanup(func() { database.Close() })
 
-	pricingData := &pricing.Pricing{}
-	bw := writer.New(database, 100, 10, time.Nanosecond)
+	pricingData := pricing.NewPricing()
+	bw := writer.New(store.NewEventSink(database), 100, 10, time.Nanosecond)
 	bw.Start()
 	t.Cleanup(func() { bw.Stop() })
 
-	s := New(database, pricingData, bw, basePath)
+	registry := profile.NewRegistry()
+
+	s := New(database, pricingData, bw, registry, basePath)
 	return s, database
 }
 
 func TestNewDoesNotPanic(t *testing.T) {
-	// Verify that constructing a second Server with the same basePath does not
-	// panic due to duplicate mux registration (regression test).
 	s1, _ := newTestServer(t, "/metering")
 	s2, _ := newTestServer(t, "/stats")
 	_ = s1
@@ -94,6 +96,44 @@ func TestAPIHealth(t *testing.T) {
 	if rec.Code != 200 {
 		t.Errorf("GET /metering/api/health: status %d, want 200", rec.Code)
 	}
+	var data map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &data); err != nil {
+		t.Fatalf("unmarshal health: %v", err)
+	}
+	if _, ok := data["metering_enabled"]; !ok {
+		t.Error("health response missing metering_enabled field")
+	}
+	if _, ok := data["capture_disabled"]; !ok {
+		t.Error("health response missing capture_disabled field")
+	}
+}
+
+func TestAPIMetadata(t *testing.T) {
+	s, _ := newTestServer(t, "/metering")
+	req := httptest.NewRequest("GET", "/metering/api/metadata", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("GET /metering/api/metadata: status %d, want 200", rec.Code)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &data); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	if _, ok := data["endpoints"]; !ok {
+		t.Error("metadata response missing endpoints")
+	}
+	if _, ok := data["ranges"]; !ok {
+		t.Error("metadata response missing ranges")
+	}
+	if _, ok := data["buckets"]; !ok {
+		t.Error("metadata response missing buckets")
+	}
+	endpoints, _ := data["endpoints"].([]interface{})
+	if len(endpoints) == 0 {
+		t.Error("metadata endpoints list is empty")
+	}
 }
 
 func TestAPINotFound(t *testing.T) {
@@ -123,6 +163,22 @@ func TestCustomBasePath(t *testing.T) {
 	}
 }
 
+func TestIndexUsesMetadataDrivenFilters(t *testing.T) {
+	s, _ := newTestServer(t, "/metering")
+	req := httptest.NewRequest("GET", "/metering", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "fetchJSON('metadata')") {
+		t.Fatal("index should load metadata API")
+	}
+	if strings.Contains(body, `<option value="/v1/chat/completions">`) ||
+		strings.Contains(body, `<option value="/v1/responses">`) {
+		t.Fatal("endpoint filters should not be hardcoded in index")
+	}
+}
+
 func TestCustomBasePathAPI(t *testing.T) {
 	s, _ := newTestServer(t, "/stats")
 	req := httptest.NewRequest("GET", "/stats/api/health", nil)
@@ -135,8 +191,6 @@ func TestCustomBasePathAPI(t *testing.T) {
 }
 
 func TestStaticFileServed(t *testing.T) {
-	// The embedded index.html is served; static file requests that don't match API
-	// should still return something (HTML or 200).
 	s, _ := newTestServer(t, "/metering")
 	req := httptest.NewRequest("GET", "/metering/", nil)
 	rec := httptest.NewRecorder()

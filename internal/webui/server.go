@@ -11,7 +11,10 @@ import (
 	"time"
 
 	"ai-gateway-metering-proxy/internal/db"
+	"ai-gateway-metering-proxy/internal/event"
 	"ai-gateway-metering-proxy/internal/pricing"
+	"ai-gateway-metering-proxy/internal/profile"
+	"ai-gateway-metering-proxy/internal/store"
 	"ai-gateway-metering-proxy/internal/writer"
 )
 
@@ -19,59 +22,63 @@ import (
 var staticFiles embed.FS
 
 type Server struct {
-	db        *db.DB
+	db        store.ReportStore
 	pricing   *pricing.Pricing
 	writer    *writer.BatchWriter
-	basePath  string // e.g. "/metering"
-	apiPrefix string // e.g. "/metering/api/"
+	registry  *profile.Registry
+	basePath  string
+	apiPrefix string
 	mux       *http.ServeMux
+
+	meteringEnabled func() bool
 }
 
-func New(database *db.DB, pricingData *pricing.Pricing, batchWriter *writer.BatchWriter, basePath string) *Server {
-	// Normalize: no trailing slash in basePath, slash in apiPrefix and subtreePrefix.
+func New(database store.ReportStore, pricingData *pricing.Pricing, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string) *Server {
 	basePath = strings.TrimRight(basePath, "/")
 	apiPrefix := basePath + "/api/"
-	subtreePattern := basePath + "/"
 
 	s := &Server{
-		db:        database,
-		pricing:   pricingData,
-		writer:    batchWriter,
-		basePath:  basePath,
-		apiPrefix: apiPrefix,
-		mux:       http.NewServeMux(),
+		db:              database,
+		pricing:         pricingData,
+		writer:          batchWriter,
+		registry:        registry,
+		basePath:        basePath,
+		apiPrefix:       apiPrefix,
+		meteringEnabled: func() bool { return true },
+		mux:             http.NewServeMux(),
 	}
 
-	// Exact match for /metering (without trailing slash): serve index.
 	s.mux.HandleFunc(basePath, s.handleIndex)
 
-	// Subtree for /metering/* dispatches API, static files, and the index.
 	staticFS, _ := fs.Sub(staticFiles, "static")
 	fileServer := http.StripPrefix(basePath, http.FileServer(http.FS(staticFS)))
 
+	subtreePattern := basePath + "/"
 	s.mux.HandleFunc(subtreePattern, func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 		if strings.HasPrefix(path, apiPrefix) {
 			s.routeAPI(w, r)
 			return
 		}
-		// /metering/ with no sub-path serves index.
 		if path == subtreePattern || path == basePath {
 			s.handleIndex(w, r)
 			return
 		}
-		// Everything else is served as a static file.
 		fileServer.ServeHTTP(w, r)
 	})
 
 	return s
 }
 
+// SetMeteringEnabledFunc sets the callback used to report metering state.
+func (s *Server) SetMeteringEnabledFunc(fn func() bool) {
+	s.meteringEnabled = fn
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
-// routeAPI dispatches to the correct API handler.
 func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	switch {
@@ -89,6 +96,8 @@ func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleErrors(w, r)
 	case strings.HasSuffix(path, "/api/health"):
 		s.handleHealth(w, r)
+	case strings.HasSuffix(path, "/api/metadata"):
+		s.handleMetadata(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -283,12 +292,48 @@ func (s *Server) handleErrors(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	queueDepth, dropped, parseErrors, dbErrors := s.writer.Snapshot()
 	latestHealth, _ := s.db.LatestHealth()
+	meteringEnabled := s.meteringEnabled()
 	resp := map[string]any{
-		"queue_depth":     queueDepth,
-		"dropped_events":  dropped,
-		"parse_errors":    parseErrors,
-		"db_write_errors": dbErrors,
-		"latest_health":   latestHealth,
+		"queue_depth":      queueDepth,
+		"dropped_events":   dropped,
+		"parse_errors":     parseErrors,
+		"db_write_errors":  dbErrors,
+		"latest_health":    latestHealth,
+		"metering_enabled": meteringEnabled,
+		"capture_disabled": !meteringEnabled,
 	}
 	writeJSON(w, resp)
+}
+
+func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
+	meta := event.MetadataReport{
+		Ranges: []event.RangeMeta{
+			{Key: "24h", Label: "Last 24 Hours", Bucket: "10m"},
+			{Key: "today", Label: "Today", Bucket: "10m"},
+			{Key: "7d", Label: "Last 7 Days", Bucket: "1h"},
+			{Key: "30d", Label: "Last 30 Days", Bucket: "1d"},
+		},
+		Buckets: []event.BucketMeta{
+			{Key: "10m", Label: "10 Minutes"},
+			{Key: "1h", Label: "1 Hour"},
+			{Key: "1d", Label: "1 Day"},
+		},
+		MeteringKinds: []string{
+			event.MeteringLLMTokens,
+			event.MeteringNone,
+		},
+		CaptureModes: []string{
+			event.CaptureUsageMetered,
+			event.CapturePassthrough,
+			event.CaptureRequestOnly,
+		},
+	}
+
+	if s.registry != nil {
+		for _, p := range s.registry.Profiles() {
+			meta.Endpoints = append(meta.Endpoints, p.ToEndpointMeta())
+		}
+	}
+
+	writeJSON(w, meta)
 }

@@ -45,6 +45,12 @@ func ts(d time.Duration) string {
 
 func TestOpenAndMigrate(t *testing.T) {
 	d := newTestDB(t)
+	if d.read == nil {
+		t.Fatal("read connection is nil")
+	}
+	if d.read == d.sql {
+		t.Fatal("read and write connections should be independent")
+	}
 	var count int
 	err := d.sql.QueryRow("SELECT COUNT(*) FROM request_usage").Scan(&count)
 	if err != nil {

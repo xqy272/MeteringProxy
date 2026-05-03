@@ -5,39 +5,47 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	"ai-gateway-metering-proxy/internal/db"
+	"ai-gateway-metering-proxy/internal/event"
 	"ai-gateway-metering-proxy/internal/extractor"
 	"ai-gateway-metering-proxy/internal/hash"
+	"ai-gateway-metering-proxy/internal/metrics"
+	"ai-gateway-metering-proxy/internal/profile"
 	"ai-gateway-metering-proxy/internal/writer"
 )
 
-// RecordWriter is the interface the proxy uses to enqueue usage records.
+// RecordWriter is the interface the proxy uses to enqueue usage events.
 type RecordWriter interface {
 	Enqueue(event writer.StatsEvent) bool
 	IncrParseErrors()
 }
 
 type Proxy struct {
-	upstream     string
-	hasher       *hash.Hasher
-	writer       RecordWriter
-	maxSample    int64
-	transport    *http.Transport
-	SSELineSkips int64
+	upstream        string
+	hasher          *hash.Hasher
+	writer          RecordWriter
+	maxSample       int64
+	meteringEnabled bool
+	registry        *profile.Registry
+	transport       *http.Transport
+	SSELineSkips    int64
 }
 
 func New(upstream string, hasher *hash.Hasher, rw RecordWriter, maxSample int64) *Proxy {
+	metrics.SetMeteringEnabled(true)
 	return &Proxy{
-		upstream:  upstream,
-		hasher:    hasher,
-		writer:    rw,
-		maxSample: maxSample,
+		upstream:        upstream,
+		hasher:          hasher,
+		writer:          rw,
+		maxSample:       maxSample,
+		meteringEnabled: true,
+		registry:        profile.NewRegistry(),
 		transport: &http.Transport{
 			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 20,
@@ -46,11 +54,31 @@ func New(upstream string, hasher *hash.Hasher, rw RecordWriter, maxSample int64)
 	}
 }
 
+func (p *Proxy) SetMeteringEnabled(enabled bool) {
+	p.meteringEnabled = enabled
+	metrics.SetMeteringEnabled(enabled)
+}
+
+func (p *Proxy) Registry() *profile.Registry {
+	return p.registry
+}
+
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
-	// Read a small prefix of the body for model detection only.
-	// The full body is forwarded upstream through a counting reader.
+	prof, err := p.registry.Match(r.Method, r.URL.Path)
+	if err != nil {
+		http.Error(w, "internal error", 500)
+		return
+	}
+
+	endpoint := r.URL.Path
+
+	if !p.meteringEnabled || !prof.IsMetered() {
+		p.forwardTransparent(w, r)
+		return
+	}
+
 	var bodyPrefix []byte
 	if r.Body != nil {
 		bodyPrefix, _ = io.ReadAll(io.LimitReader(r.Body, 4096))
@@ -66,18 +94,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	apiKeyHash := p.hasher.Hash(bearerToken(r.Header.Get("Authorization")))
 
 	modelRequested := extractModel(bodyPrefix)
-
-	// Best-effort stream hint from the request, used only as a fallback
-	// when the response Content-Type is missing or unparseable.
 	requestSuggestsStream := r.URL.Query().Get("stream") == "true" ||
 		streamFromJSON(bodyPrefix) ||
 		isSSEMediaType(r.Header.Get("Accept"))
 
-	endpoint := r.URL.Path
-
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, p.upstream+r.URL.RequestURI(), r.Body)
 	if err != nil {
-		p.writeError(w, start, 0, endpoint, r.Method, clientIPHash, apiKeyHash, modelRequested, cr.bytesRead, 502, err)
+		p.writeError(w, start, 0, prof, endpoint, r.Method, clientIPHash, apiKeyHash, modelRequested, cr.bytesRead, 502, err)
 		return
 	}
 	upstreamReq.ContentLength = r.ContentLength
@@ -91,7 +114,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	resp, err := p.transport.RoundTrip(upstreamReq)
 	ttfb := time.Since(start)
 	if err != nil {
-		p.writeError(w, start, ttfb, endpoint, r.Method, clientIPHash, apiKeyHash, modelRequested, cr.bytesRead, 502, err)
+		p.writeError(w, start, ttfb, prof, endpoint, r.Method, clientIPHash, apiKeyHash, modelRequested, cr.bytesRead, 502, err)
 		return
 	}
 	defer resp.Body.Close()
@@ -108,18 +131,72 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 
 	if isStream {
-		p.handleStream(w, r, resp, start, ttfb, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested, cr)
+		p.handleStream(w, r, resp, start, ttfb, prof, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested, cr)
 	} else {
-		p.handleNonStream(w, r, resp, start, ttfb, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested, cr)
+		p.handleNonStream(w, r, resp, start, ttfb, prof, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested, cr)
+	}
+}
+
+// forwardTransparent forwards the request without body prefix read or metering.
+func (p *Proxy) forwardTransparent(w http.ResponseWriter, r *http.Request) {
+	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, p.upstream+r.URL.RequestURI(), r.Body)
+	if err != nil {
+		http.Error(w, "upstream error", 502)
+		return
+	}
+	upstreamReq.ContentLength = r.ContentLength
+	for k, vs := range r.Header {
+		for _, v := range vs {
+			upstreamReq.Header.Add(k, v)
+		}
+	}
+
+	resp, err := p.transport.RoundTrip(upstreamReq)
+	if err != nil {
+		http.Error(w, "upstream error", 502)
+		return
+	}
+	defer resp.Body.Close()
+
+	for k, vs := range resp.Header {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.Header().Set("X-Metering-Proxy", "1")
+	status := resp.StatusCode
+	if status == 0 {
+		status = 200
+	}
+	w.WriteHeader(status)
+	if responseIndicatesStream(resp.Header.Get("Content-Type"), isSSEMediaType(r.Header.Get("Accept"))) {
+		copyAndFlush(w, resp.Body)
+		return
+	}
+	io.Copy(w, resp.Body)
+}
+
+func copyAndFlush(w http.ResponseWriter, r io.Reader) {
+	flusher, _ := w.(http.Flusher)
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if err != nil {
+			return
+		}
 	}
 }
 
 // ---------- countingReader ----------
 
-// countingReader wraps a ReadCloser and tracks the total bytes read.
-// This is used for request bodies so request_bytes reflects the actual
-// bytes consumed during upstream forwarding, which is accurate even for
-// chunked or HTTP/2 requests where ContentLength is -1.
 type countingReader struct {
 	r         io.ReadCloser
 	bytesRead int64
@@ -162,10 +239,10 @@ func (r *replayReader) Close() error {
 	return nil
 }
 
-// ---------- streaming path (byte-transparent) ----------
+// ---------- streaming path ----------
 
 func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.Response, start time.Time, ttfb time.Duration,
-	endpoint, requestID, clientIPHash, apiKeyHash, modelRequested string, cr *countingReader) {
+	prof *profile.EndpointProfile, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested string, cr *countingReader) {
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -174,8 +251,11 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 		if err != nil {
 			errStr = err.Error()
 		}
-		p.recordUsage(start, ttfb, endpoint, r.Method, requestID, resp.StatusCode, true,
-			clientIPHash, apiKeyHash, modelRequested, nil, cr.bytesRead, written, errStr)
+		captureOutcome := event.OutcomeSkipped
+		captureReason := event.ReasonUsageNotPresent
+		p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, resp.StatusCode, true,
+			clientIPHash, apiKeyHash, modelRequested, nil, cr.bytesRead, written, errStr,
+			captureOutcome, captureReason)
 		return
 	}
 
@@ -183,7 +263,6 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 	var totalBytes int64
 	var sseParseErrs int64
 
-	// reportParseErrors flushes accumulated SSE parse error count to the writer.
 	reportParseErrors := func() {
 		for i := int64(0); i < sseParseErrs; i++ {
 			p.writer.IncrParseErrors()
@@ -191,7 +270,10 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 		sseParseErrs = 0
 	}
 
-	const maxLine = 256 * 1024
+	maxLine := 256 * 1024
+	if prof != nil && prof.StreamProtocol.MaxLineSize > 0 {
+		maxLine = prof.StreamProtocol.MaxLineSize
+	}
 	lineBuf := make([]byte, 0, 4096)
 	buf := make([]byte, 32*1024)
 
@@ -203,8 +285,15 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 			if err := r.Context().Err(); err != nil {
 				errStr = err.Error()
 			}
-			p.recordUsage(start, ttfb, endpoint, r.Method, requestID, resp.StatusCode, true,
-				clientIPHash, apiKeyHash, modelRequested, lastUsage, cr.bytesRead, totalBytes, errStr)
+			captureOutcome := event.OutcomeCaptured
+			captureReason := ""
+			if lastUsage == nil {
+				captureOutcome = event.OutcomeSkipped
+				captureReason = event.ReasonUsageNotPresent
+			}
+			p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, resp.StatusCode, true,
+				clientIPHash, apiKeyHash, modelRequested, lastUsage, cr.bytesRead, totalBytes, errStr,
+				captureOutcome, captureReason)
 			return
 		default:
 		}
@@ -215,8 +304,15 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 
 			if _, werr := w.Write(buf[:n]); werr != nil {
 				reportParseErrors()
-				p.recordUsage(start, ttfb, endpoint, r.Method, requestID, resp.StatusCode, true,
-					clientIPHash, apiKeyHash, modelRequested, lastUsage, cr.bytesRead, totalBytes, werr.Error())
+				captureOutcome := event.OutcomeCaptured
+				captureReason := ""
+				if lastUsage == nil {
+					captureOutcome = event.OutcomeSkipped
+					captureReason = event.ReasonUsageNotPresent
+				}
+				p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, resp.StatusCode, true,
+					clientIPHash, apiKeyHash, modelRequested, lastUsage, cr.bytesRead, totalBytes, werr.Error(),
+					captureOutcome, captureReason)
 				return
 			}
 			flusher.Flush()
@@ -236,6 +332,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 						line = append(lineBuf, chunk[:nl]...)
 					} else {
 						atomic.AddInt64(&p.SSELineSkips, 1)
+						metrics.AddSSELineSkips(1)
 					}
 					lineBuf = lineBuf[:0]
 				} else {
@@ -246,7 +343,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 				chunk = chunk[nl+1:]
 
 				if len(line) > 0 {
-					u, err := p.tryExtractSSEUsage(line, endpoint)
+					u, err := p.tryExtractSSEUsage(line, prof)
 					if err != nil {
 						sseParseErrs++
 					} else if u != nil {
@@ -262,27 +359,38 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 				errStr = readErr.Error()
 			}
 			reportParseErrors()
-			p.recordUsage(start, ttfb, endpoint, r.Method, requestID, resp.StatusCode, true,
-				clientIPHash, apiKeyHash, modelRequested, lastUsage, cr.bytesRead, totalBytes, errStr)
+			captureOutcome := event.OutcomeCaptured
+			captureReason := ""
+			if lastUsage == nil {
+				captureOutcome = event.OutcomeSkipped
+				captureReason = event.ReasonUsageNotPresent
+			}
+			p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, resp.StatusCode, true,
+				clientIPHash, apiKeyHash, modelRequested, lastUsage, cr.bytesRead, totalBytes, errStr,
+				captureOutcome, captureReason)
 			return
 		}
 	}
 }
 
-func (p *Proxy) tryExtractSSEUsage(line []byte, endpoint string) (*extractor.UsageInfo, error) {
+func (p *Proxy) tryExtractSSEUsage(line []byte, prof *profile.EndpointProfile) (*extractor.UsageInfo, error) {
 	trimmed := bytes.TrimSpace(line)
 	if !bytes.HasPrefix(trimmed, []byte("data:")) {
 		return nil, nil
 	}
 	data := bytes.TrimSpace(trimmed[5:])
-	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+	if len(data) == 0 {
 		return nil, nil
 	}
-	if strings.Contains(endpoint, "chat/completions") {
-		return extractor.ExtractChatUsage(trimmed)
+	if prof != nil && prof.StreamProtocol.CompletionMarker != "" {
+		if bytes.Equal(data, []byte(prof.StreamProtocol.CompletionMarker)) {
+			return nil, nil
+		}
+	} else if bytes.Equal(data, []byte("[DONE]")) {
+		return nil, nil
 	}
-	if strings.Contains(endpoint, "responses") {
-		return extractor.ExtractResponsesUsage(trimmed)
+	if prof != nil && prof.StreamExtractor != nil {
+		return prof.StreamExtractor(trimmed)
 	}
 	return nil, nil
 }
@@ -314,78 +422,135 @@ func (lb *limitedBuffer) Bytes() []byte {
 }
 
 func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, resp *http.Response, start time.Time, ttfb time.Duration,
-	endpoint, requestID, clientIPHash, apiKeyHash, modelRequested string, cr *countingReader) {
+	prof *profile.EndpointProfile, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested string, cr *countingReader) {
 
 	lb := &limitedBuffer{max: int(p.maxSample)}
 	reader := io.TeeReader(resp.Body, lb)
 	written, copyErr := io.Copy(w, reader)
 
 	var usage *extractor.UsageInfo
+	captureOutcome := event.OutcomeCaptured
+	captureReason := ""
+
 	sample := lb.Bytes()
 	if len(sample) > 0 {
-		u, err := extractor.ExtractNonStreaming(sample, endpoint)
-		if err != nil {
-			// Count parse error only when the sample is complete (not truncated).
-			if !lb.overflow {
-				p.writer.IncrParseErrors()
+		if prof != nil && prof.NonStreamExtractor != nil {
+			u, err := prof.NonStreamExtractor(sample, endpoint)
+			if err != nil {
+				if !lb.overflow {
+					p.writer.IncrParseErrors()
+				}
+				if lb.overflow {
+					captureReason = event.ReasonSampleLimitExceeded
+				} else {
+					captureReason = event.ReasonParseError
+					captureOutcome = event.OutcomeFailed
+				}
+			} else {
+				usage = u
 			}
-		} else {
-			usage = u
 		}
+	}
+	if usage == nil && captureOutcome == event.OutcomeCaptured && captureReason == "" {
+		captureReason = event.ReasonUsageNotPresent
+		captureOutcome = event.OutcomeSkipped
 	}
 
 	errStr := ""
 	if copyErr != nil {
 		errStr = copyErr.Error()
 	}
-	p.recordUsage(start, ttfb, endpoint, r.Method, requestID, resp.StatusCode, false,
-		clientIPHash, apiKeyHash, modelRequested, usage, cr.bytesRead, written, errStr)
+	p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, resp.StatusCode, false,
+		clientIPHash, apiKeyHash, modelRequested, usage, cr.bytesRead, written, errStr,
+		captureOutcome, captureReason)
 }
 
 // ---------- recording ----------
 
-func (p *Proxy) recordUsage(start time.Time, ttfb time.Duration, endpoint, method, requestID string, status int, stream bool,
+func (p *Proxy) recordUsage(start time.Time, ttfb time.Duration, prof *profile.EndpointProfile, endpoint, method, requestID string, status int, stream bool,
 	clientIPHash, apiKeyHash, modelRequested string, usage *extractor.UsageInfo,
-	requestBytes, responseBytes int64, errStr string) {
+	requestBytes, responseBytes int64, errStr string,
+	captureOutcome, captureReason string) {
 
 	if requestBytes < 0 {
 		requestBytes = 0
 	}
 
-	record := db.UsageRecord{
-		CreatedAt:      start.UTC().Format(time.RFC3339),
-		RequestID:      requestID,
-		Endpoint:       endpoint,
-		Method:         method,
-		Status:         status,
-		LatencyMs:      time.Since(start).Milliseconds(),
-		TTFBMs:         ttfb.Milliseconds(),
-		Stream:         stream,
-		ClientIPHash:   clientIPHash,
-		APIKeyHash:     apiKeyHash,
+	profileName := ""
+	captureMode := event.CapturePassthrough
+	meteringKind := event.MeteringNone
+	if prof != nil {
+		profileName = prof.Name
+		captureMode = prof.CaptureMode
+		meteringKind = prof.MeteringKind
+	}
+
+	latencyMs := time.Since(start).Milliseconds()
+	metrics.ObserveRequest(latencyMs, ttfb.Milliseconds())
+
+	ev := event.Event{
+		ID:        requestID,
+		Timestamp: start,
+
+		EndpointProfile: profileName,
+		CaptureMode:     captureMode,
+		MeteringKind:    meteringKind,
+
+		Method:    method,
+		Path:      endpoint,
+		Status:    status,
+		Stream:    stream,
+		LatencyMs: latencyMs,
+		TTFBMs:    ttfb.Milliseconds(),
+
+		APIKeyHash:   apiKeyHash,
+		ClientIPHash: clientIPHash,
+
 		ModelRequested: modelRequested,
-		RequestBytes:   requestBytes,
-		ResponseBytes:  responseBytes,
-		Error:          errStr,
+
+		RequestBytes:  requestBytes,
+		ResponseBytes: responseBytes,
+		Error:         errStr,
+
+		CaptureOutcome: captureOutcome,
+		CaptureReason:  captureReason,
 	}
 
 	if usage != nil {
-		record.ModelReturned = usage.Model
-		record.InputTokens = usage.InputTokens
-		record.OutputTokens = usage.OutputTokens
-		record.ReasoningTokens = usage.ReasoningTokens
-		record.CachedTokens = usage.CachedTokens
-		record.TotalTokens = usage.TotalTokens
+		ev.ModelReturned = usage.Model
+		ev.InputTokens = usage.InputTokens
+		ev.OutputTokens = usage.OutputTokens
+		ev.ReasoningTokens = usage.ReasoningTokens
+		ev.CachedTokens = usage.CachedTokens
+		ev.TotalTokens = usage.TotalTokens
+		ev.UsageRawJSON, ev.UsageRawTruncated = truncateUsageRawJSON(usage.UsageRawJSON)
+		if ev.CaptureOutcome == "" {
+			ev.CaptureOutcome = event.OutcomeCaptured
+		}
 	}
 
-	p.writer.Enqueue(writer.StatsEvent{Record: record})
+	if !p.writer.Enqueue(writer.StatsEvent{Event: ev}) {
+		log.Printf("usage event dropped: request_id=%q endpoint=%q reason=%s", ev.ID, ev.Path, event.ReasonWriterQueueFull)
+	}
 }
 
-func (p *Proxy) writeError(w http.ResponseWriter, start time.Time, ttfb time.Duration, endpoint, method, clientIPHash, apiKeyHash, modelRequested string, requestBytes int64, status int, err error) {
+func truncateUsageRawJSON(raw string) (string, bool) {
+	const maxUsageRawJSONBytes = 4 * 1024
+	if len(raw) <= maxUsageRawJSONBytes {
+		return raw, false
+	}
+	return raw[:maxUsageRawJSONBytes], true
+}
+
+func (p *Proxy) writeError(w http.ResponseWriter, start time.Time, ttfb time.Duration, prof *profile.EndpointProfile, endpoint, method, clientIPHash, apiKeyHash, modelRequested string, requestBytes int64, status int, err error) {
 	w.Header().Set("X-Metering-Proxy", "1")
 	http.Error(w, fmt.Sprintf("upstream error: %v", err), status)
-	p.recordUsage(start, ttfb, endpoint, method, "", status, false,
-		clientIPHash, apiKeyHash, modelRequested, nil, requestBytes, 0, err.Error())
+
+	captureOutcome := event.OutcomeFailed
+
+	p.recordUsage(start, ttfb, prof, endpoint, method, "", status, false,
+		clientIPHash, apiKeyHash, modelRequested, nil, requestBytes, 0, err.Error(),
+		captureOutcome, err.Error())
 }
 
 // ---------- helpers ----------
@@ -403,8 +568,6 @@ func extractModel(body []byte) string {
 	return ""
 }
 
-// isSSEMediaType returns true if the Content-Type or Accept header value
-// indicates text/event-stream, using case-insensitive MIME type matching.
 func isSSEMediaType(headerValue string) bool {
 	if headerValue == "" {
 		return false

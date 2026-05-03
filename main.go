@@ -14,8 +14,10 @@ import (
 	"ai-gateway-metering-proxy/internal/config"
 	"ai-gateway-metering-proxy/internal/db"
 	"ai-gateway-metering-proxy/internal/hash"
+	"ai-gateway-metering-proxy/internal/metrics"
 	"ai-gateway-metering-proxy/internal/pricing"
 	"ai-gateway-metering-proxy/internal/proxy"
+	"ai-gateway-metering-proxy/internal/store"
 	"ai-gateway-metering-proxy/internal/webui"
 	"ai-gateway-metering-proxy/internal/writer"
 )
@@ -29,7 +31,8 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	// Ensure salt exists
+	// Startup self-checks (fail-fast).
+
 	if _, err := os.Stat(cfg.SaltFile); os.IsNotExist(err) {
 		log.Fatalf("Salt file not found at %s. Generate one:\n  python3 -c \"import secrets; print(secrets.token_hex(32))\" > %s", cfg.SaltFile, cfg.SaltFile)
 	}
@@ -39,26 +42,28 @@ func main() {
 		log.Fatalf("Failed to load salt: %v", err)
 	}
 
-	// Open database
+	// Check SQLite path is writable.
 	database, err := db.Open(cfg.Database)
 	if err != nil {
 		log.Fatalf("Failed to open database: %v", err)
 	}
 	defer database.Close()
 
-	// Load pricing
+	// Check pricing file is parseable.
 	pricingData, err := pricing.Load(cfg.PricingFile)
 	if err != nil {
-		log.Printf("Warning: failed to load pricing file: %v (cost display will be limited)", err)
-		pricingData = &pricing.Pricing{Models: make(map[string]pricing.ModelPrice)}
+		log.Fatalf("Failed to load pricing file: %v", err)
 	}
 
-	// Start batch writer
-	batchWriter := writer.New(database, cfg.QueueCapacity, cfg.BatchSize, cfg.FlushInterval)
+	log.Printf("Startup self-check passed: salt=%s db=%s pricing=%s metering_enabled=%v",
+		cfg.SaltFile, cfg.Database, cfg.PricingFile, cfg.MeteringEnabled)
+
+	// Start batch writer.
+	batchWriter := writer.New(store.NewEventSink(database), cfg.QueueCapacity, cfg.BatchSize, cfg.FlushInterval)
 	batchWriter.Start()
 	defer batchWriter.Stop()
 
-	// Health metrics reporter (every 60s)
+	// Health metrics reporter (every 60s).
 	stopHealth := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(60 * time.Second)
@@ -77,19 +82,24 @@ func main() {
 	}()
 	defer close(stopHealth)
 
-	// Create proxy handler
+	// Create proxy handler.
 	proxyHandler := proxy.New(cfg.Upstream, hasher, batchWriter, cfg.MaxNonstreamSampleBytes)
+	proxyHandler.SetMeteringEnabled(cfg.MeteringEnabled)
 
-	// Set up mux
+	// Set up mux.
 	mux := http.NewServeMux()
 
+	// /metrics endpoint for Prometheus.
+	mux.Handle("/metrics", metrics.Handler())
+
 	if cfg.WebUI.Enabled {
-		webuiServer := webui.New(database, pricingData, batchWriter, cfg.WebUI.BasePath)
+		webuiServer := webui.New(database, pricingData, batchWriter, proxyHandler.Registry(), cfg.WebUI.BasePath)
+		webuiServer.SetMeteringEnabledFunc(func() bool { return cfg.MeteringEnabled })
 		mux.Handle(cfg.WebUI.BasePath, webuiServer)
 		mux.Handle(cfg.WebUI.BasePath+"/", webuiServer)
 	}
 
-	// All other traffic goes to the proxy
+	// All other traffic goes to the proxy.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		proxyHandler.ServeHTTP(w, r)
 	})
@@ -102,7 +112,7 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	// Graceful shutdown
+	// Graceful shutdown.
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -120,6 +130,7 @@ func main() {
 	fmt.Printf("Upstream: %s\n", cfg.Upstream)
 	fmt.Printf("Database: %s\n", cfg.Database)
 	fmt.Printf("WebUI: %s\n", cfg.WebUI.BasePath)
+	fmt.Printf("Metering: %v\n", cfg.MeteringEnabled)
 
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("Server error: %v", err)

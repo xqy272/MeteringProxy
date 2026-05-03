@@ -14,6 +14,7 @@ type UsageInfo struct {
 	ReasoningTokens int64  `json:"reasoning_tokens"`
 	CachedTokens    int64  `json:"cached_tokens"`
 	TotalTokens     int64  `json:"total_tokens"`
+	UsageRawJSON    string `json:"usage_raw_json,omitempty"`
 }
 
 // ---------- SSE extraction (used by streaming path) ----------
@@ -26,19 +27,25 @@ func ExtractChatUsage(data []byte) (*UsageInfo, error) {
 	}
 
 	var resp struct {
-		Model string     `json:"model"`
-		Usage *chatUsage `json:"usage"`
+		Model string          `json:"model"`
+		Usage json.RawMessage `json:"usage"`
 	}
 	if err := json.Unmarshal([]byte(text), &resp); err != nil {
 		return nil, err
 	}
-	if resp.Usage == nil {
+	if len(resp.Usage) == 0 {
 		return nil, nil
 	}
-	if resp.Usage.InputTokens > 0 && resp.Usage.PromptTokens == 0 {
+	var usage chatUsage
+	if err := json.Unmarshal(resp.Usage, &usage); err != nil {
+		return nil, err
+	}
+	if usage.InputTokens > 0 && usage.PromptTokens == 0 {
 		return nil, nil
 	}
-	return chatUsageToInfo(resp.Model, resp.Usage), nil
+	info := chatUsageToInfo(resp.Model, &usage)
+	info.UsageRawJSON = rawUsageString(resp.Usage)
+	return info, nil
 }
 
 // ExtractResponsesUsage parses an SSE "data:" line from a responses stream.
@@ -55,10 +62,16 @@ func ExtractResponsesUsage(data []byte) (*UsageInfo, error) {
 	if err := json.Unmarshal([]byte(text), &event); err != nil {
 		return nil, err
 	}
-	if event.Type != "response.completed" || event.Response == nil || event.Response.Usage == nil {
+	if event.Type != "response.completed" || event.Response == nil || len(event.Response.Usage) == 0 {
 		return nil, nil
 	}
-	return responsesUsageToInfo(event.Response.Model, event.Response.Usage), nil
+	var usage responsesUsage
+	if err := json.Unmarshal(event.Response.Usage, &usage); err != nil {
+		return nil, err
+	}
+	info := responsesUsageToInfo(event.Response.Model, &usage)
+	info.UsageRawJSON = rawUsageString(event.Response.Usage)
+	return info, nil
 }
 
 // ---------- non-streaming extraction ----------
@@ -90,8 +103,8 @@ func ExtractNonStreaming(body []byte, endpoint string) (*UsageInfo, error) {
 
 	// Generic fallback
 	var generic struct {
-		Model string     `json:"model"`
-		Usage *chatUsage `json:"usage"`
+		Model string          `json:"model"`
+		Usage json.RawMessage `json:"usage"`
 	}
 	if err := decodeJSON(body, &generic); err != nil {
 		// Check if it's a real parse error vs trailing-garbage after good JSON.
@@ -99,8 +112,16 @@ func ExtractNonStreaming(body []byte, endpoint string) (*UsageInfo, error) {
 		// syntax error indicates the JSON itself is broken.
 		return nil, err
 	}
-	if generic.Usage != nil && (generic.Usage.PromptTokens > 0 || generic.Usage.TotalTokens > 0) {
-		return chatUsageToInfo(generic.Model, generic.Usage), nil
+	if len(generic.Usage) > 0 {
+		var usage chatUsage
+		if err := json.Unmarshal(generic.Usage, &usage); err != nil {
+			return nil, err
+		}
+		if usage.PromptTokens > 0 || usage.TotalTokens > 0 {
+			info := chatUsageToInfo(generic.Model, &usage)
+			info.UsageRawJSON = rawUsageString(generic.Usage)
+			return info, nil
+		}
 	}
 
 	return nil, nil
@@ -108,36 +129,48 @@ func ExtractNonStreaming(body []byte, endpoint string) (*UsageInfo, error) {
 
 func tryChatFormat(body []byte) (*UsageInfo, error) {
 	var resp struct {
-		Model string     `json:"model"`
-		Usage *chatUsage `json:"usage"`
+		Model string          `json:"model"`
+		Usage json.RawMessage `json:"usage"`
 	}
 	if err := decodeJSON(body, &resp); err != nil {
 		return nil, err
 	}
-	if resp.Usage == nil {
+	if len(resp.Usage) == 0 {
 		return nil, nil
 	}
-	if resp.Usage.PromptTokens == 0 && resp.Usage.CompletionTokens == 0 && resp.Usage.InputTokens > 0 {
+	var usage chatUsage
+	if err := json.Unmarshal(resp.Usage, &usage); err != nil {
+		return nil, err
+	}
+	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.InputTokens > 0 {
 		return nil, nil
 	}
-	return chatUsageToInfo(resp.Model, resp.Usage), nil
+	info := chatUsageToInfo(resp.Model, &usage)
+	info.UsageRawJSON = rawUsageString(resp.Usage)
+	return info, nil
 }
 
 func tryResponsesFormat(body []byte) (*UsageInfo, error) {
 	var resp struct {
 		Model string          `json:"model"`
-		Usage *responsesUsage `json:"usage"`
+		Usage json.RawMessage `json:"usage"`
 	}
 	if err := decodeJSON(body, &resp); err != nil {
 		return nil, err
 	}
-	if resp.Usage == nil {
+	if len(resp.Usage) == 0 {
 		return nil, nil
 	}
-	if resp.Usage.InputTokens == 0 && resp.Usage.OutputTokens == 0 {
+	var usage responsesUsage
+	if err := json.Unmarshal(resp.Usage, &usage); err != nil {
+		return nil, err
+	}
+	if usage.InputTokens == 0 && usage.OutputTokens == 0 {
 		return nil, nil
 	}
-	return responsesUsageToInfo(resp.Model, resp.Usage), nil
+	info := responsesUsageToInfo(resp.Model, &usage)
+	info.UsageRawJSON = rawUsageString(resp.Usage)
+	return info, nil
 }
 
 // decodeJSON decodes the first JSON value from data, tolerating trailing non-JSON bytes.
@@ -156,6 +189,18 @@ func stripSSEPrefix(text string) string {
 		return ""
 	}
 	return text
+}
+
+func rawUsageString(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return ""
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, raw); err == nil {
+		return compact.String()
+	}
+	return string(raw)
 }
 
 func chatUsageToInfo(model string, u *chatUsage) *UsageInfo {
@@ -211,7 +256,7 @@ type completionTokensDetails struct {
 
 type responsesResponse struct {
 	Model string          `json:"model"`
-	Usage *responsesUsage `json:"usage"`
+	Usage json.RawMessage `json:"usage"`
 }
 
 type responsesUsage struct {

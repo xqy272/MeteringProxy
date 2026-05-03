@@ -6,6 +6,7 @@ queue_capacity: 1000
 batch_size: 50
 flush_interval: "1s"
 max_nonstream_sample_bytes: 2097152
+metering_enabled: true
 webui:
   enabled: true
   base_path: "/metering"

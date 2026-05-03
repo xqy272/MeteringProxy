@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"ai-gateway-metering-proxy/internal/event"
 	"ai-gateway-metering-proxy/internal/hash"
 	"ai-gateway-metering-proxy/internal/writer"
 )
@@ -19,13 +20,21 @@ type testRW struct {
 	parseErrors int64
 }
 
-func (t *testRW) Enqueue(event writer.StatsEvent) bool {
-	t.events = append(t.events, event)
+func (t *testRW) Enqueue(ev writer.StatsEvent) bool {
+	t.events = append(t.events, ev)
 	return true
 }
 
 func (t *testRW) IncrParseErrors() {
 	t.parseErrors++
+}
+
+// helper to get the domain event from the last recorded StatsEvent
+func lastEvent(rw *testRW) event.Event {
+	if len(rw.events) == 0 {
+		return event.Event{}
+	}
+	return rw.events[len(rw.events)-1].Event
 }
 
 func TestReplayReader_FullBodyForwarded(t *testing.T) {
@@ -135,7 +144,6 @@ func TestStreamFromJSON(t *testing.T) {
 	if streamFromJSON([]byte(`{}`)) {
 		t.Error("expected false for empty")
 	}
-	// stream:true inside nested content should NOT match (top-level only)
 	if streamFromJSON([]byte(`{"messages":[{"content":"stream:true"}]}`)) {
 		t.Error("stream:true in nested content should not match")
 	}
@@ -194,18 +202,24 @@ func TestProxyNonStreaming_SmallResponse(t *testing.T) {
 	if len(rw.events) == 0 {
 		t.Fatal("no usage event recorded")
 	}
-	rec2 := rw.events[0].Record
-	if rec2.InputTokens != 100 || rec2.OutputTokens != 200 {
-		t.Errorf("tokens: input=%d output=%d, want 100/200", rec2.InputTokens, rec2.OutputTokens)
+	ev := lastEvent(rw)
+	if ev.InputTokens != 100 || ev.OutputTokens != 200 {
+		t.Errorf("tokens: input=%d output=%d, want 100/200", ev.InputTokens, ev.OutputTokens)
 	}
-	if rec2.APIKeyHash == "" || rec2.APIKeyHash == "sk-test-key" {
+	if ev.APIKeyHash == "" || ev.APIKeyHash == "sk-test-key" {
 		t.Error("api_key_hash should be hashed, not empty or plaintext")
 	}
-	if rec2.APIKeyHash != hasher.Hash("sk-test-key") {
+	if ev.APIKeyHash != hasher.Hash("sk-test-key") {
 		t.Error("api_key_hash should hash the bearer token case-insensitively")
 	}
-	if rec2.RequestID != "req_upstream" {
-		t.Errorf("request_id = %q, want upstream request id", rec2.RequestID)
+	if ev.ID != "req_upstream" {
+		t.Errorf("request_id = %q, want upstream request id", ev.ID)
+	}
+	if ev.EndpointProfile != "chat_completions" {
+		t.Errorf("endpoint_profile = %q, want chat_completions", ev.EndpointProfile)
+	}
+	if ev.CaptureMode != event.CaptureUsageMetered {
+		t.Errorf("capture_mode = %q, want usage_metered", ev.CaptureMode)
 	}
 }
 
@@ -227,12 +241,12 @@ func TestProxyRecordsTTFBSeparatelyFromTotalLatency(t *testing.T) {
 	if len(rw.events) == 0 {
 		t.Fatal("no usage event recorded")
 	}
-	record := rw.events[0].Record
-	if record.TTFBMs <= 0 {
-		t.Fatalf("TTFBMs = %d, want > 0", record.TTFBMs)
+	ev := lastEvent(rw)
+	if ev.TTFBMs <= 0 {
+		t.Fatalf("TTFBMs = %d, want > 0", ev.TTFBMs)
 	}
-	if record.LatencyMs < record.TTFBMs {
-		t.Fatalf("LatencyMs = %d, want >= TTFBMs %d", record.LatencyMs, record.TTFBMs)
+	if ev.LatencyMs < ev.TTFBMs {
+		t.Fatalf("LatencyMs = %d, want >= TTFBMs %d", ev.LatencyMs, ev.TTFBMs)
 	}
 }
 
@@ -258,19 +272,15 @@ func TestProxyNonStreaming_LargeResponseNotTruncated(t *testing.T) {
 	if rec.Body.Len() != len(fullResp) {
 		t.Errorf("response length = %d, want %d; body was truncated", rec.Body.Len(), len(fullResp))
 	}
-	// Usage in prefix parsed; trailing x's are ignored by json.Decoder.
-	if len(rw.events) == 0 || rw.events[0].Record.InputTokens == 0 {
+	if len(rw.events) == 0 || lastEvent(rw).InputTokens == 0 {
 		t.Error("usage extraction failed for large response")
 	}
-	// The sample is truncated, so no parse error should be recorded
 	if rw.parseErrors > 0 {
 		t.Errorf("parseErrors = %d, want 0; truncated sample should not count as parse error", rw.parseErrors)
 	}
 }
 
 func TestProxyNonStreaming_TruncatedJSONNoParseError(t *testing.T) {
-	// A large JSON response where the usage block is beyond the sample window.
-	// The sample is a truncated JSON prefix, so this should not be a parse error.
 	largeJSON := `{"model":"gpt-4o","choices":[{"message":{"content":"` + strings.Repeat("x", 5000) + `"}}],"usage":{"prompt_tokens":100,"completion_tokens":200,"total_tokens":300}}`
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -279,7 +289,7 @@ func TestProxyNonStreaming_TruncatedJSONNoParseError(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 512) // sample < JSON size
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 512)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader("{}"))
 	rec := httptest.NewRecorder()
@@ -288,14 +298,12 @@ func TestProxyNonStreaming_TruncatedJSONNoParseError(t *testing.T) {
 	if rec.Body.Len() != len(largeJSON) {
 		t.Errorf("response length = %d, want %d", rec.Body.Len(), len(largeJSON))
 	}
-	// The sample is truncated (512 bytes < full JSON) so no parse error
 	if rw.parseErrors > 0 {
 		t.Errorf("parseErrors = %d, want 0; truncated JSON sample should not count as parse error", rw.parseErrors)
 	}
 }
 
 func TestProxyStreaming_ByteTransparent(t *testing.T) {
-	// Verify raw bytes pass through unchanged (no newline normalization).
 	rawLines := "data: {\"x\":\"a\"}\r\ndata: [DONE]\r\n"
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -346,9 +354,9 @@ func TestProxyStreaming_SSEAcrossChunks(t *testing.T) {
 	if len(rw.events) == 0 {
 		t.Fatal("no usage event recorded; cross-chunk SSE parse failed")
 	}
-	r := rw.events[0].Record
-	if r.InputTokens != 10 || r.OutputTokens != 2 {
-		t.Errorf("input=%d output=%d, want 10/2", r.InputTokens, r.OutputTokens)
+	ev := lastEvent(rw)
+	if ev.InputTokens != 10 || ev.OutputTokens != 2 {
+		t.Errorf("input=%d output=%d, want 10/2", ev.InputTokens, ev.OutputTokens)
 	}
 }
 
@@ -381,8 +389,7 @@ func TestProxyStreaming_ContextCancellationRecords(t *testing.T) {
 }
 
 func TestProxyStreaming_LongLineDoesNotBlockForwarding(t *testing.T) {
-	// A single SSE line longer than our reassembly buffer; verified we still forward.
-	longContent := strings.Repeat("x", 300*1024) // 300KB line
+	longContent := strings.Repeat("x", 300*1024)
 	stream := "data: {\"choices\":[{\"delta\":{\"content\":\"" + longContent + "\"}}]}\n" +
 		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":300,\"total_tokens\":305}}\n" +
 		"data: [DONE]\n"
@@ -401,12 +408,10 @@ func TestProxyStreaming_LongLineDoesNotBlockForwarding(t *testing.T) {
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 
-	// Full response must be forwarded unchanged
 	if rec.Body.Len() != len(stream) {
 		t.Errorf("response length = %d, want %d; long line blocked forwarding", rec.Body.Len(), len(stream))
 	}
-	// Usage from the second SSE line is still captured
-	if len(rw.events) == 0 || rw.events[0].Record.InputTokens != 5 {
+	if len(rw.events) == 0 || lastEvent(rw).InputTokens != 5 {
 		t.Error("usage extraction should still work for subsequent normal-sized line")
 	}
 }
@@ -422,7 +427,7 @@ func TestProxyRequest_UpstreamError(t *testing.T) {
 	if rec.Code != 502 {
 		t.Errorf("status = %d, want 502", rec.Code)
 	}
-	if len(rw.events) == 0 || rw.events[0].Record.Error == "" {
+	if len(rw.events) == 0 || lastEvent(rw).Error == "" {
 		t.Error("error event should be recorded with error string")
 	}
 }
@@ -447,9 +452,12 @@ func TestProxyResponsesAPI_NonStreaming(t *testing.T) {
 	if len(rw.events) == 0 {
 		t.Fatal("no event recorded")
 	}
-	r := rw.events[0].Record
-	if r.InputTokens != 371 || r.OutputTokens != 43 {
-		t.Errorf("input=%d output=%d, want 371/43", r.InputTokens, r.OutputTokens)
+	ev := lastEvent(rw)
+	if ev.InputTokens != 371 || ev.OutputTokens != 43 {
+		t.Errorf("input=%d output=%d, want 371/43", ev.InputTokens, ev.OutputTokens)
+	}
+	if ev.EndpointProfile != "responses" {
+		t.Errorf("endpoint_profile = %q, want responses", ev.EndpointProfile)
 	}
 }
 
@@ -472,8 +480,6 @@ func TestCountingReader(t *testing.T) {
 }
 
 func TestStreamDetection_ResponseContentType(t *testing.T) {
-	// Request does NOT have stream indicators, but response Content-Type is text/event-stream
-	// with mixed case. The proxy should use the response path.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "Text/Event-Stream; charset=utf-8")
 		w.Write([]byte("data: {}\n"))
@@ -490,16 +496,14 @@ func TestStreamDetection_ResponseContentType(t *testing.T) {
 	if len(rw.events) == 0 {
 		t.Fatal("no event recorded")
 	}
-	if !rw.events[0].Record.Stream {
+	if !lastEvent(rw).Stream {
 		t.Error("stream should be true; response Content-Type was text/event-stream")
 	}
 }
 
 func TestProxyNonStreaming_ParseErrorIncremented(t *testing.T) {
-	// A response with broken JSON within the sample window should increment parse errors.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		// Truncated/broken JSON within sample limit
 		w.Write([]byte(`{"model":"gpt-4o","usage":{"prompt_to`))
 	}))
 	defer upstream.Close()
@@ -517,7 +521,6 @@ func TestProxyNonStreaming_ParseErrorIncremented(t *testing.T) {
 }
 
 func TestProxyNonStreaming_NoParseErrorOnValidJSONNoUsage(t *testing.T) {
-	// Valid JSON without usage field: no error, no parseError increment.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"choices":[{"message":{"content":"hello"}}]}`))
@@ -537,7 +540,6 @@ func TestProxyNonStreaming_NoParseErrorOnValidJSONNoUsage(t *testing.T) {
 }
 
 func TestStreamDetection_UsesJSON(t *testing.T) {
-	// stream:true at top level in JSON should trigger streaming path
 	rw := &testRW{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -548,22 +550,18 @@ func TestStreamDetection_UsesJSON(t *testing.T) {
 	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o","stream":true}`))
-	// No Accept: text/event-stream header; detection must use JSON parsing.
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 
-	// Should be recorded as stream=true
 	if len(rw.events) == 0 {
 		t.Fatal("no event recorded")
 	}
-	if !rw.events[0].Record.Stream {
+	if !lastEvent(rw).Stream {
 		t.Error("stream should be true; JSON-based detection failed")
 	}
 }
 
 func TestStreamDetection_ResponseJSONOverridesStreamTrue(t *testing.T) {
-	// Request has stream:true, but upstream returns application/json.
-	// Response Content-Type is authoritative: non-stream path.
 	upstreamResp := `{"model":"gpt-4o","usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -584,14 +582,12 @@ func TestStreamDetection_ResponseJSONOverridesStreamTrue(t *testing.T) {
 	if len(rw.events) == 0 {
 		t.Fatal("no event recorded")
 	}
-	if rw.events[0].Record.Stream {
-		t.Error("stream should be false; response Content-Type is application/json, which overrides request stream:true")
+	if lastEvent(rw).Stream {
+		t.Error("stream should be false; response Content-Type is application/json")
 	}
 }
 
 func TestStreamDetection_ResponseSSEPriority(t *testing.T) {
-	// Request has no stream hints, upstream returns Text/Event-Stream; charset=utf-8.
-	// Response Content-Type is authoritative: stream path.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "Text/Event-Stream; charset=utf-8")
 		w.Write([]byte("data: {}\n"))
@@ -602,14 +598,13 @@ func TestStreamDetection_ResponseSSEPriority(t *testing.T) {
 	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
-	// No Accept header, no stream:true in body
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 
 	if len(rw.events) == 0 {
 		t.Fatal("no event recorded")
 	}
-	if !rw.events[0].Record.Stream {
+	if !lastEvent(rw).Stream {
 		t.Error("stream should be true; response Content-Type is text/event-stream")
 	}
 }
@@ -643,32 +638,28 @@ func TestProxyStreaming_ResponsesAPIAcrossChunks(t *testing.T) {
 	if len(rw.events) == 0 {
 		t.Fatal("no usage event recorded; Responses SSE parse failed")
 	}
-	r := rw.events[0].Record
-	if r.InputTokens != 371 {
-		t.Errorf("input_tokens = %d, want 371", r.InputTokens)
+	ev := lastEvent(rw)
+	if ev.InputTokens != 371 {
+		t.Errorf("input_tokens = %d, want 371", ev.InputTokens)
 	}
-	if r.OutputTokens != 43 {
-		t.Errorf("output_tokens = %d, want 43", r.OutputTokens)
+	if ev.OutputTokens != 43 {
+		t.Errorf("output_tokens = %d, want 43", ev.OutputTokens)
 	}
-	if r.ReasoningTokens != 5 {
-		t.Errorf("reasoning_tokens = %d, want 5", r.ReasoningTokens)
+	if ev.ReasoningTokens != 5 {
+		t.Errorf("reasoning_tokens = %d, want 5", ev.ReasoningTokens)
 	}
-	if r.CachedTokens != 10 {
-		t.Errorf("cached_tokens = %d, want 10", r.CachedTokens)
+	if ev.CachedTokens != 10 {
+		t.Errorf("cached_tokens = %d, want 10", ev.CachedTokens)
 	}
-	if r.TotalTokens != 414 {
-		t.Errorf("total_tokens = %d, want 414", r.TotalTokens)
+	if ev.TotalTokens != 414 {
+		t.Errorf("total_tokens = %d, want 414", ev.TotalTokens)
 	}
-	if r.ModelReturned != "gpt-5.4-mini-2026-03-17" {
-		t.Errorf("model_returned = %q, want gpt-5.4-mini-2026-03-17", r.ModelReturned)
+	if ev.ModelReturned != "gpt-5.4-mini-2026-03-17" {
+		t.Errorf("model_returned = %q, want gpt-5.4-mini-2026-03-17", ev.ModelReturned)
 	}
 }
 
 func TestStreamDetection_EmptyContentTypeFallsBack(t *testing.T) {
-	// Unparseable Content-Type falls back to request heuristic. stream:true wins.
-	//
-	// Note: httptest.Server auto-detects Content-Type from the body, so we
-	// use an explicitly garbled Content-Type to trigger the fallback path.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", ",,,garbled--not/valid,,,")
 		w.Write([]byte("ok"))
@@ -685,7 +676,226 @@ func TestStreamDetection_EmptyContentTypeFallsBack(t *testing.T) {
 	if len(rw.events) == 0 {
 		t.Fatal("no event recorded")
 	}
-	if !rw.events[0].Record.Stream {
+	if !lastEvent(rw).Stream {
 		t.Error("stream should be true; unparseable Content-Type falls back to request stream:true")
+	}
+}
+
+func TestKillSwitch_DisablesMetering(t *testing.T) {
+	upstreamResp := `{"model":"gpt-4o","usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(upstreamResp))
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p.SetMeteringEnabled(false)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+	if rec.Body.String() != upstreamResp {
+		t.Error("response body modified under kill switch")
+	}
+	if len(rw.events) != 0 {
+		t.Errorf("expected 0 events under kill switch, got %d", len(rw.events))
+	}
+}
+
+func TestKillSwitch_StillForwards(t *testing.T) {
+	upstreamResp := `{"model":"gpt-4o","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(upstreamResp))
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p.SetMeteringEnabled(false)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+	if rec.Header().Get("X-Metering-Proxy") != "1" {
+		t.Error("X-Metering-Proxy header should still be set under kill switch")
+	}
+	if len(rw.events) != 0 {
+		t.Error("no events should be recorded when metering is disabled")
+	}
+}
+
+func TestKillSwitch_StreamPathFlushes(t *testing.T) {
+	streamBody := "data: {\"x\":1}\n\ndata: [DONE]\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(streamBody))
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p.SetMeteringEnabled(false)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"stream":true}`))
+	req.Header.Set("Accept", "text/event-stream")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Body.String() != streamBody {
+		t.Error("stream response body modified under kill switch")
+	}
+	if !rec.Flushed {
+		t.Error("stream response was not flushed under kill switch")
+	}
+	if len(rw.events) != 0 {
+		t.Error("no events should be recorded when metering is disabled")
+	}
+}
+
+func TestPassthroughProfile_NoMetering(t *testing.T) {
+	upstreamResp := `{"data":"ok"}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(upstreamResp))
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+
+	// GET /v1/models is passthrough
+	req := httptest.NewRequest("GET", "/v1/models", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+	if len(rw.events) != 0 {
+		t.Errorf("expected 0 events for passthrough, got %d", len(rw.events))
+	}
+}
+
+func TestCaptureOutcome_Failed_OnParseError(t *testing.T) {
+	// Non-streaming response with broken JSON within sample limit.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`not json at all`))
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 10*1024)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if len(rw.events) == 0 {
+		t.Fatal("no event recorded")
+	}
+	ev := lastEvent(rw)
+	if ev.CaptureOutcome != event.OutcomeFailed {
+		t.Errorf("capture_outcome = %q, want %q", ev.CaptureOutcome, event.OutcomeFailed)
+	}
+	if ev.CaptureReason != event.ReasonParseError {
+		t.Errorf("capture_reason = %q, want %q", ev.CaptureReason, event.ReasonParseError)
+	}
+}
+
+func TestCaptureOutcome_Skipped_WhenNoUsageInResponse(t *testing.T) {
+	// Non-streaming response with valid JSON but no usage field.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"content":"hello"}}]}`))
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 10*1024)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if len(rw.events) == 0 {
+		t.Fatal("no event recorded")
+	}
+	ev := lastEvent(rw)
+	if ev.CaptureOutcome != event.OutcomeSkipped {
+		t.Errorf("capture_outcome = %q, want %q", ev.CaptureOutcome, event.OutcomeSkipped)
+	}
+	if ev.CaptureReason != event.ReasonUsageNotPresent {
+		t.Errorf("capture_reason = %q, want %q", ev.CaptureReason, event.ReasonUsageNotPresent)
+	}
+}
+
+func TestCaptureOutcome_Skipped_StreamWithoutUsage(t *testing.T) {
+	// SSE stream that has data but no usage block.
+	streamBody := "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\ndata: [DONE]\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(streamBody))
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"stream":true}`))
+	req.Header.Set("Accept", "text/event-stream")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if len(rw.events) == 0 {
+		t.Fatal("no event recorded")
+	}
+	ev := lastEvent(rw)
+	if ev.CaptureOutcome != event.OutcomeSkipped {
+		t.Errorf("capture_outcome = %q, want %q (no usage in stream)", ev.CaptureOutcome, event.OutcomeSkipped)
+	}
+	if ev.CaptureReason != event.ReasonUsageNotPresent {
+		t.Errorf("capture_reason = %q, want %q", ev.CaptureReason, event.ReasonUsageNotPresent)
+	}
+}
+
+func TestUsageRawJSON_TruncatedInEvent(t *testing.T) {
+	largeUsage := `{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"debug":"` + strings.Repeat("x", 6000) + `"}`
+	upstreamResp := `{"model":"gpt-4o","usage":` + largeUsage + `}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(upstreamResp))
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 16*1024)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if len(rw.events) == 0 {
+		t.Fatal("no event recorded")
+	}
+	ev := lastEvent(rw)
+	if !ev.UsageRawTruncated {
+		t.Fatal("UsageRawTruncated = false, want true")
+	}
+	if len(ev.UsageRawJSON) != 4*1024 {
+		t.Fatalf("UsageRawJSON length = %d, want 4096", len(ev.UsageRawJSON))
+	}
+	if !strings.Contains(ev.UsageRawJSON, `"prompt_tokens":10`) {
+		t.Errorf("UsageRawJSON does not contain usage subset prefix: %.80q", ev.UsageRawJSON)
 	}
 }

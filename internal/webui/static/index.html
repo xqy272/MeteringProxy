@@ -63,12 +63,7 @@ tr:hover { background: var(--bg3); }
 <header>
   <h1>Metering Proxy</h1>
   <nav>
-    <select id="range-select">
-      <option value="24h" selected>Last 24h</option>
-      <option value="today">Today</option>
-      <option value="7d">Last 7 days</option>
-      <option value="30d">Last 30 days</option>
-    </select>
+    <select id="range-select"></select>
     <button onclick="refresh()" id="refresh-btn">Refresh</button>
   </nav>
 </header>
@@ -139,8 +134,6 @@ tr:hover { background: var(--bg3); }
       <input id="filter-model" placeholder="Model name..." onchange="loadRequests()">
       <select id="filter-endpoint" onchange="loadRequests()">
         <option value="">All Endpoints</option>
-        <option value="/v1/chat/completions">/v1/chat/completions</option>
-        <option value="/v1/responses">/v1/responses</option>
       </select>
     </div>
     <div style="overflow-x:auto">
@@ -154,6 +147,7 @@ tr:hover { background: var(--bg3); }
 
 <script>
 const BASE = '/metering/api/';
+let metadata = null;
 
 function esc(s) {
   if (s == null) return '';
@@ -186,6 +180,37 @@ async function fetchJSON(path) {
   const res = await fetch(BASE + path);
   if (!res.ok) throw new Error(res.statusText);
   return res.json();
+}
+
+async function loadMetadata() {
+  metadata = await fetchJSON('metadata');
+
+  const rangeSelect = document.getElementById('range-select');
+  const currentRange = rangeSelect.value;
+  rangeSelect.innerHTML = (metadata.ranges || []).map(r =>
+    `<option value="${esc(r.key)}">${esc(r.label)}</option>`
+  ).join('');
+  if ([...rangeSelect.options].some(o => o.value === currentRange)) {
+    rangeSelect.value = currentRange;
+  } else if (rangeSelect.options.length) {
+    rangeSelect.value = rangeSelect.options[0].value;
+  }
+
+  const endpointSelect = document.getElementById('filter-endpoint');
+  const currentEndpoint = endpointSelect.value;
+  const endpointOptions = (metadata.endpoints || [])
+    .filter(e => e.capture_mode !== 'passthrough')
+    .map(e => `<option value="${esc(e.path)}">${esc(e.display_name || e.path)}</option>`)
+    .join('');
+  endpointSelect.innerHTML = '<option value="">All Endpoints</option>' + endpointOptions;
+  if ([...endpointSelect.options].some(o => o.value === currentEndpoint)) {
+    endpointSelect.value = currentEndpoint;
+  }
+}
+
+function bucketForRange(range) {
+  const item = metadata && (metadata.ranges || []).find(r => r.key === range);
+  return item && item.bucket ? item.bucket : '';
 }
 
 async function loadSummary() {
@@ -257,7 +282,7 @@ async function loadRequests() {
 
 async function loadTimeseries() {
   const range = getRange();
-  const bucket = range === '30d' ? '1d' : range === '7d' ? '1h' : '10m';
+  const bucket = bucketForRange(range);
   const data = await fetchJSON('timeseries?range='+range+'&bucket='+bucket);
   const chart = document.getElementById('timeseries-chart');
   if (!data.length) { chart.innerHTML = '<div class="empty">No data</div>'; return; }
@@ -280,13 +305,17 @@ async function refresh() {
   const btn = document.getElementById('refresh-btn');
   btn.textContent = '...'; btn.disabled = true;
   try {
+    if (!metadata) await loadMetadata();
     await Promise.all([loadSummary(), loadModels(), loadKeys(), loadRequests(), loadTimeseries(), loadHealth()]);
   } catch(e) { console.error(e); }
   btn.textContent = 'Refresh'; btn.disabled = false;
 }
 
 document.getElementById('range-select').addEventListener('change', refresh);
-document.addEventListener('DOMContentLoaded', refresh);
+document.addEventListener('DOMContentLoaded', async () => {
+  await loadMetadata();
+  await refresh();
+});
 </script>
 </body>
 </html>

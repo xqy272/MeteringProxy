@@ -31,6 +31,19 @@ type UsageRecord struct {
 	RequestBytes    int64
 	ResponseBytes   int64
 	Error           string
+
+	// W3 extended fields
+	EndpointProfile   string
+	CaptureMode       string
+	MeteringKind      string
+	UsageRawJSON      string
+	UsageRawTruncated bool
+	BillableInput     float64
+	BillableOutput    float64
+	BillableTotal     float64
+	BillableUnit      string
+	CaptureOutcome    string
+	CaptureReason     string
 }
 
 type SummaryRow struct {
@@ -93,6 +106,11 @@ type RequestRow struct {
 	RequestBytes    int64  `json:"request_bytes"`
 	ResponseBytes   int64  `json:"response_bytes"`
 	Error           string `json:"error"`
+	EndpointProfile string `json:"endpoint_profile"`
+	CaptureMode     string `json:"capture_mode"`
+	MeteringKind    string `json:"metering_kind"`
+	CaptureOutcome  string `json:"capture_outcome"`
+	CaptureReason   string `json:"capture_reason"`
 }
 
 type HealthRow struct {
@@ -112,10 +130,11 @@ type ErrorTimelineRow struct {
 }
 
 type DB struct {
-	sql *sql.DB
+	sql  *sql.DB
+	read *sql.DB
 }
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 func Open(path string) (*DB, error) {
 	dir := filepath.Dir(path)
@@ -136,13 +155,11 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 
-	// Restrict permissions on the main database file.
 	if err := os.Chmod(path, 0600); err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("chmod db: %w", err)
 	}
 
-	// Trigger WAL/SHM sidecar creation so we can lock them down too.
 	if _, err := sqlDB.Exec("CREATE TABLE IF NOT EXISTS _init (x)"); err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("init sidecar trigger: %w", err)
@@ -166,53 +183,66 @@ func Open(path string) (*DB, error) {
 		}
 	}
 
-	return &DB{sql: sqlDB}, nil
+	readDB, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000")
+	if err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("open read db: %w", err)
+	}
+	readDB.SetMaxOpenConns(1)
+	readDB.SetMaxIdleConns(1)
+	if _, err := readDB.Exec("PRAGMA query_only = ON"); err != nil {
+		readDB.Close()
+		sqlDB.Close()
+		return nil, fmt.Errorf("configure read db: %w", err)
+	}
+
+	return &DB{sql: sqlDB, read: readDB}, nil
 }
 
 func migrate(sqlDB *sql.DB) error {
 	schema := `
-	PRAGMA journal_mode = WAL;
-	PRAGMA synchronous = NORMAL;
+		PRAGMA journal_mode = WAL;
+		PRAGMA synchronous = NORMAL;
 
-	CREATE TABLE IF NOT EXISTS request_usage (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		created_at TEXT NOT NULL,
-		created_at_unix INTEGER DEFAULT 0,
-		request_id TEXT,
-		endpoint TEXT NOT NULL,
-		method TEXT NOT NULL,
-		status INTEGER NOT NULL,
-		latency_ms INTEGER NOT NULL,
-		stream INTEGER NOT NULL,
-		client_ip_hash TEXT,
-		api_key_hash TEXT,
-		model_requested TEXT,
-		model_returned TEXT,
-		input_tokens INTEGER DEFAULT 0,
-		output_tokens INTEGER DEFAULT 0,
-		reasoning_tokens INTEGER DEFAULT 0,
-		cached_tokens INTEGER DEFAULT 0,
-		total_tokens INTEGER DEFAULT 0,
-		request_bytes INTEGER DEFAULT 0,
-		response_bytes INTEGER DEFAULT 0,
-		error TEXT
-	);
+		CREATE TABLE IF NOT EXISTS request_usage (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at TEXT NOT NULL,
+			created_at_unix INTEGER DEFAULT 0,
+			request_id TEXT,
+			endpoint TEXT NOT NULL,
+			method TEXT NOT NULL,
+			status INTEGER NOT NULL,
+			latency_ms INTEGER NOT NULL,
+			stream INTEGER NOT NULL,
+			client_ip_hash TEXT,
+			api_key_hash TEXT,
+			model_requested TEXT,
+			model_returned TEXT,
+			input_tokens INTEGER DEFAULT 0,
+			output_tokens INTEGER DEFAULT 0,
+			reasoning_tokens INTEGER DEFAULT 0,
+			cached_tokens INTEGER DEFAULT 0,
+			total_tokens INTEGER DEFAULT 0,
+			request_bytes INTEGER DEFAULT 0,
+			response_bytes INTEGER DEFAULT 0,
+			error TEXT
+		);
 
-	CREATE TABLE IF NOT EXISTS health_metrics (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		timestamp TEXT NOT NULL,
-		timestamp_unix INTEGER DEFAULT 0,
-		queue_depth INTEGER DEFAULT 0,
-		dropped_events_total INTEGER DEFAULT 0,
-		parse_error_total INTEGER DEFAULT 0,
-		db_write_error_total INTEGER DEFAULT 0
-	);
+		CREATE TABLE IF NOT EXISTS health_metrics (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			timestamp TEXT NOT NULL,
+			timestamp_unix INTEGER DEFAULT 0,
+			queue_depth INTEGER DEFAULT 0,
+			dropped_events_total INTEGER DEFAULT 0,
+			parse_error_total INTEGER DEFAULT 0,
+			db_write_error_total INTEGER DEFAULT 0
+		);
 
-	CREATE TABLE IF NOT EXISTS schema_migrations (
-		version INTEGER PRIMARY KEY,
-		applied_at TEXT NOT NULL
-	);
-	`
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version INTEGER PRIMARY KEY,
+			applied_at TEXT NOT NULL
+		);
+		`
 	if _, err := sqlDB.Exec(schema); err != nil {
 		return err
 	}
@@ -229,9 +259,9 @@ func migrate(sqlDB *sql.DB) error {
 		return err
 	}
 	if _, err := sqlDB.Exec(`
-		INSERT OR IGNORE INTO schema_migrations (version, applied_at)
-		VALUES (?, ?)
-	`, schemaVersion, time.Now().UTC().Format(time.RFC3339)); err != nil {
+			INSERT OR IGNORE INTO schema_migrations (version, applied_at)
+			VALUES (?, ?)
+		`, schemaVersion, time.Now().UTC().Format(time.RFC3339)); err != nil {
 		return err
 	}
 	_, err := sqlDB.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion))
@@ -245,6 +275,8 @@ func createIndexes(sqlDB *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_request_usage_model ON request_usage(model_returned)`,
 		`CREATE INDEX IF NOT EXISTS idx_request_usage_key ON request_usage(api_key_hash)`,
 		`CREATE INDEX IF NOT EXISTS idx_request_usage_status ON request_usage(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_request_usage_endpoint_profile ON request_usage(endpoint_profile)`,
+		`CREATE INDEX IF NOT EXISTS idx_request_usage_capture_outcome ON request_usage(capture_outcome)`,
 		`CREATE INDEX IF NOT EXISTS idx_health_metrics_timestamp ON health_metrics(timestamp)`,
 		`CREATE INDEX IF NOT EXISTS idx_health_metrics_timestamp_unix ON health_metrics(timestamp_unix)`,
 	}
@@ -283,6 +315,17 @@ func requestUsageColumns() []columnSpec {
 		{"request_bytes", "request_bytes INTEGER DEFAULT 0"},
 		{"response_bytes", "response_bytes INTEGER DEFAULT 0"},
 		{"error", "error TEXT"},
+		{"endpoint_profile", "endpoint_profile TEXT DEFAULT ''"},
+		{"capture_mode", "capture_mode TEXT DEFAULT ''"},
+		{"metering_kind", "metering_kind TEXT DEFAULT ''"},
+		{"usage_raw_json", "usage_raw_json TEXT DEFAULT ''"},
+		{"usage_raw_truncated", "usage_raw_truncated INTEGER DEFAULT 0"},
+		{"billable_input", "billable_input REAL DEFAULT 0.0"},
+		{"billable_output", "billable_output REAL DEFAULT 0.0"},
+		{"billable_total", "billable_total REAL DEFAULT 0.0"},
+		{"billable_unit", "billable_unit TEXT DEFAULT ''"},
+		{"capture_outcome", "capture_outcome TEXT DEFAULT ''"},
+		{"capture_reason", "capture_reason TEXT DEFAULT ''"},
 	}
 }
 
@@ -350,6 +393,18 @@ func runBackfills(sqlDB *sql.DB) error {
 		`UPDATE health_metrics SET dropped_events_total = COALESCE(dropped_events_total, 0) WHERE dropped_events_total IS NULL`,
 		`UPDATE health_metrics SET parse_error_total = COALESCE(parse_error_total, 0) WHERE parse_error_total IS NULL`,
 		`UPDATE health_metrics SET db_write_error_total = COALESCE(db_write_error_total, 0) WHERE db_write_error_total IS NULL`,
+		// W3: Normalize new columns
+		`UPDATE request_usage SET endpoint_profile = COALESCE(endpoint_profile, '') WHERE endpoint_profile IS NULL`,
+		`UPDATE request_usage SET capture_mode = COALESCE(capture_mode, '') WHERE capture_mode IS NULL`,
+		`UPDATE request_usage SET metering_kind = COALESCE(metering_kind, '') WHERE metering_kind IS NULL`,
+		`UPDATE request_usage SET usage_raw_json = COALESCE(usage_raw_json, '') WHERE usage_raw_json IS NULL`,
+		`UPDATE request_usage SET usage_raw_truncated = COALESCE(usage_raw_truncated, 0) WHERE usage_raw_truncated IS NULL`,
+		`UPDATE request_usage SET billable_input = COALESCE(billable_input, 0.0) WHERE billable_input IS NULL`,
+		`UPDATE request_usage SET billable_output = COALESCE(billable_output, 0.0) WHERE billable_output IS NULL`,
+		`UPDATE request_usage SET billable_total = COALESCE(billable_total, 0.0) WHERE billable_total IS NULL`,
+		`UPDATE request_usage SET billable_unit = COALESCE(billable_unit, '') WHERE billable_unit IS NULL`,
+		`UPDATE request_usage SET capture_outcome = COALESCE(capture_outcome, '') WHERE capture_outcome IS NULL`,
+		`UPDATE request_usage SET capture_reason = COALESCE(capture_reason, '') WHERE capture_reason IS NULL`,
 	}
 	for _, stmt := range statements {
 		if _, err := sqlDB.Exec(stmt); err != nil {
@@ -360,7 +415,16 @@ func runBackfills(sqlDB *sql.DB) error {
 }
 
 func (db *DB) Close() error {
-	return db.sql.Close()
+	var err error
+	if db.read != nil {
+		err = db.read.Close()
+	}
+	if db.sql != nil {
+		if closeErr := db.sql.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	return err
 }
 
 func (db *DB) InsertBatch(records []UsageRecord) error {
@@ -375,8 +439,13 @@ func (db *DB) InsertBatch(records []UsageRecord) error {
 			created_at, created_at_unix, request_id, endpoint, method, status, latency_ms, ttfb_ms, stream,
 			client_ip_hash, api_key_hash, model_requested, model_returned,
 			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
-			request_bytes, response_bytes, error
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			request_bytes, response_bytes, error,
+			endpoint_profile, capture_mode, metering_kind,
+			usage_raw_json, usage_raw_truncated,
+			billable_input, billable_output, billable_total, billable_unit,
+			capture_outcome, capture_reason
+		) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
+		          ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32)
 	`)
 	if err != nil {
 		return err
@@ -389,6 +458,12 @@ func (db *DB) InsertBatch(records []UsageRecord) error {
 		}
 		return 0
 	}
+	truncatedInt := func(b bool) int {
+		if b {
+			return 1
+		}
+		return 0
+	}
 
 	for _, r := range records {
 		_, err := stmt.Exec(
@@ -396,6 +471,10 @@ func (db *DB) InsertBatch(records []UsageRecord) error {
 			r.ClientIPHash, r.APIKeyHash, r.ModelRequested, r.ModelReturned,
 			r.InputTokens, r.OutputTokens, r.ReasoningTokens, r.CachedTokens, r.TotalTokens,
 			r.RequestBytes, r.ResponseBytes, r.Error,
+			r.EndpointProfile, r.CaptureMode, r.MeteringKind,
+			r.UsageRawJSON, truncatedInt(r.UsageRawTruncated),
+			r.BillableInput, r.BillableOutput, r.BillableTotal, r.BillableUnit,
+			r.CaptureOutcome, r.CaptureReason,
 		)
 		if err != nil {
 			return err
@@ -423,7 +502,7 @@ func unixFromTimestamp(ts string) int64 {
 
 func (db *DB) Summary(since time.Time) (*SummaryRow, error) {
 	row := &SummaryRow{}
-	err := db.sql.QueryRow(`
+	err := db.read.QueryRow(`
 		SELECT
 			COUNT(*),
 			COUNT(CASE WHEN status >= 400 THEN 1 END),
@@ -442,7 +521,7 @@ func (db *DB) Summary(since time.Time) (*SummaryRow, error) {
 }
 
 func (db *DB) Models(since time.Time) ([]ModelRow, error) {
-	rows, err := db.sql.Query(`
+	rows, err := db.read.Query(`
 		SELECT
 			COALESCE(NULLIF(TRIM(model_returned), ''), 'unknown'),
 			COUNT(*),
@@ -471,7 +550,7 @@ func (db *DB) Models(since time.Time) ([]ModelRow, error) {
 }
 
 func (db *DB) Keys(since time.Time) ([]KeyRow, error) {
-	rows, err := db.sql.Query(`
+	rows, err := db.read.Query(`
 		SELECT
 			COALESCE(NULLIF(TRIM(api_key_hash), ''), 'unknown'),
 			COUNT(*),
@@ -502,16 +581,13 @@ func (db *DB) Timeseries(since time.Time, bucketMin int) ([]TimeseriesRow, error
 	if bucketMin <= 0 {
 		bucketMin = 10
 	}
-	// Bucket by truncating created_at to the nearest bucketMin-minute boundary.
-	// Use Unix epoch arithmetic: floor(unixepoch / (bucketMin*60)) * (bucketMin*60)
-	// Then convert back to an ISO timestamp for display.
 	bucketSec := int64(bucketMin) * 60
 	bucketExpr := fmt.Sprintf(
 		`strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', (created_at_unix / %d) * %d, 'unixepoch')`,
 		bucketSec, bucketSec,
 	)
 
-	rows, err := db.sql.Query(`
+	rows, err := db.read.Query(`
 		SELECT
 			`+bucketExpr+`,
 			COUNT(*),
@@ -538,7 +614,7 @@ func (db *DB) Timeseries(since time.Time, bucketMin int) ([]TimeseriesRow, error
 }
 
 func (db *DB) Requests(limit int, statusMin, statusMax int, model, endpoint string, since time.Time) ([]RequestRow, error) {
-	query := "SELECT id, COALESCE(created_at, ''), COALESCE(request_id, ''), COALESCE(endpoint, ''), COALESCE(method, ''), COALESCE(status, 0), COALESCE(latency_ms, 0), COALESCE(ttfb_ms, 0), COALESCE(stream, 0), COALESCE(client_ip_hash, ''), COALESCE(api_key_hash, ''), COALESCE(model_requested, ''), COALESCE(model_returned, ''), COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), COALESCE(reasoning_tokens, 0), COALESCE(cached_tokens, 0), COALESCE(total_tokens, 0), COALESCE(request_bytes, 0), COALESCE(response_bytes, 0), COALESCE(error, '') FROM request_usage WHERE 1=1"
+	query := "SELECT id, COALESCE(created_at, ''), COALESCE(request_id, ''), COALESCE(endpoint, ''), COALESCE(method, ''), COALESCE(status, 0), COALESCE(latency_ms, 0), COALESCE(ttfb_ms, 0), COALESCE(stream, 0), COALESCE(client_ip_hash, ''), COALESCE(api_key_hash, ''), COALESCE(model_requested, ''), COALESCE(model_returned, ''), COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), COALESCE(reasoning_tokens, 0), COALESCE(cached_tokens, 0), COALESCE(total_tokens, 0), COALESCE(request_bytes, 0), COALESCE(response_bytes, 0), COALESCE(error, ''), COALESCE(endpoint_profile, ''), COALESCE(capture_mode, ''), COALESCE(metering_kind, ''), COALESCE(capture_outcome, ''), COALESCE(capture_reason, '') FROM request_usage WHERE 1=1"
 	var args []any
 
 	if !since.IsZero() {
@@ -565,7 +641,7 @@ func (db *DB) Requests(limit int, statusMin, statusMax int, model, endpoint stri
 	query += " ORDER BY id DESC LIMIT ?"
 	args = append(args, limit)
 
-	rows, err := db.sql.Query(query, args...)
+	rows, err := db.read.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -574,7 +650,7 @@ func (db *DB) Requests(limit int, statusMin, statusMax int, model, endpoint stri
 	var result []RequestRow
 	for rows.Next() {
 		var r RequestRow
-		if err := rows.Scan(&r.ID, &r.CreatedAt, &r.RequestID, &r.Endpoint, &r.Method, &r.Status, &r.LatencyMs, &r.TTFBMs, &r.Stream, &r.ClientIPHash, &r.APIKeyHash, &r.ModelRequested, &r.ModelReturned, &r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens, &r.TotalTokens, &r.RequestBytes, &r.ResponseBytes, &r.Error); err != nil {
+		if err := rows.Scan(&r.ID, &r.CreatedAt, &r.RequestID, &r.Endpoint, &r.Method, &r.Status, &r.LatencyMs, &r.TTFBMs, &r.Stream, &r.ClientIPHash, &r.APIKeyHash, &r.ModelRequested, &r.ModelReturned, &r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens, &r.TotalTokens, &r.RequestBytes, &r.ResponseBytes, &r.Error, &r.EndpointProfile, &r.CaptureMode, &r.MeteringKind, &r.CaptureOutcome, &r.CaptureReason); err != nil {
 			return nil, err
 		}
 		result = append(result, r)
@@ -582,10 +658,8 @@ func (db *DB) Requests(limit int, statusMin, statusMax int, model, endpoint stri
 	return result, rows.Err()
 }
 
-// ErrorTimeline returns health_metrics snapshots over time (the real health data
-// written by the periodic health reporter).
 func (db *DB) ErrorTimeline(since time.Time) ([]ErrorTimelineRow, error) {
-	rows, err := db.sql.Query(`
+	rows, err := db.read.Query(`
 		SELECT
 			timestamp,
 			0,
@@ -611,10 +685,9 @@ func (db *DB) ErrorTimeline(since time.Time) ([]ErrorTimelineRow, error) {
 	return result, rows.Err()
 }
 
-// LatestHealth returns the most recent health_metrics snapshot.
 func (db *DB) LatestHealth() (*HealthRow, error) {
 	row := &HealthRow{}
-	err := db.sql.QueryRow(`
+	err := db.read.QueryRow(`
 		SELECT COALESCE(timestamp, ''),
 			COALESCE(queue_depth, 0),
 			COALESCE(dropped_events_total, 0),
@@ -628,9 +701,8 @@ func (db *DB) LatestHealth() (*HealthRow, error) {
 	return row, err
 }
 
-// ErrorTimelineFromRequests returns a timeline of non-2xx status codes (for API compatibility).
 func (db *DB) ErrorTimelineFromRequests(since time.Time) ([]ErrorTimelineRow, error) {
-	rows, err := db.sql.Query(`
+	rows, err := db.read.Query(`
 		SELECT
 			strftime('%Y-%m-%dT%H:00:00Z', created_at_unix, 'unixepoch'),
 			COUNT(*),

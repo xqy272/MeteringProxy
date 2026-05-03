@@ -2,6 +2,7 @@ package extractor
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -26,6 +27,9 @@ func TestExtractChatUsage_StreamingFinalChunk(t *testing.T) {
 	}
 	if u.ReasoningTokens != 11 {
 		t.Errorf("reasoning_tokens = %d, want 11", u.ReasoningTokens)
+	}
+	if u.UsageRawJSON == "" || !strings.Contains(u.UsageRawJSON, `"prompt_tokens":361`) {
+		t.Errorf("UsageRawJSON = %q, want compact usage subset", u.UsageRawJSON)
 	}
 }
 
