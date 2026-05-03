@@ -50,12 +50,18 @@ config.yaml                              示例配置文件
 pricing.yaml                             示例模型定价表
 internal/config                          YAML 配置默认值与校验
 internal/db                              SQLite 表结构、迁移、查询
+internal/event                           领域事件模型与报告类型
 internal/extractor                       从 JSON 和 SSE 中提取用量信息
 internal/hash                            API Key 和 IP 的加盐哈希
-internal/pricing                         成本估算
+internal/metrics                         Prometheus 指标暴露
+internal/pricing                         成本估算与模型别名
+internal/profile                         Endpoint Profile 注册与匹配
 internal/proxy                           反向代理与用量采集
+internal/store                           写入/查询接口边界
+internal/streamproto                     流协议抽象（SSE 等）
 internal/webui                           仪表盘 API 及内嵌静态界面
 internal/writer                          异步批量写入与计数器
+testdata/                                测试 fixture 与 golden 文件
 scripts/backup.sh                        SQLite 备份脚本
 systemd/ai-gateway-metering-proxy.service systemd 单元示例
 ```
@@ -92,6 +98,7 @@ queue_capacity: 1000
 batch_size: 50
 flush_interval: "1s"
 max_nonstream_sample_bytes: 2097152
+metering_enabled: true
 webui:
   enabled: true
   base_path: "/metering"
@@ -108,6 +115,7 @@ pricing_file: "/opt/ai-gateway/metering/pricing.yaml"
 - `batch_size`：每次 SQLite 批量插入的最大记录数。
 - `flush_interval`：刷新部分批次前的最大等待时间。
 - `max_nonstream_sample_bytes`：非流式响应用于用量提取的最大采样前缀字节数。
+- `metering_enabled`：计量开关。设为 `false` 时继续透明转发，但跳过所有计量相关代码路径（请求体读取、用量提取、事件生成与写入）。用于运维快速回退计量而不影响 LLM 转发。
 - `webui.base_path`：仪表盘的非根路径，请勿设置为 `/`。
 - `pricing_file`：用于估算成本的 YAML 价格表。
 
@@ -175,6 +183,10 @@ https://<域名>/metering
 - `GET /metering/api/requests?range=24h|today|7d|30d&limit=100&status=success|4xx|5xx&model=&endpoint=`
 - `GET /metering/api/errors?range=24h|today|7d|30d`
 - `GET /metering/api/health`
+- `GET /metering/api/metadata`
+- `GET /metrics`（Prometheus 文本格式）
+
+`/api/health` 返回队列深度、丢弃事件、解析错误、数据库写入错误、计量开关状态和最新健康快照。`/api/metadata` 返回 profile 列表、支持的 time range 和 bucket 等前端动态渲染所需信息。
 
 健康状态计数器为进程生命期计数器。服务重启后，`parse_errors`、`db_write_errors` 和 `dropped_events` 从零重新开始计数。
 
@@ -192,7 +204,25 @@ https://<域名>/metering
 
 ## 定价逻辑
 
-价格表仅为估算，不具备计费效力。
+价格表仅为估算，不具备计费效力。匹配链路为：
+
+```text
+精确匹配 -> 显式别名 -> 规范化形式（去除日期后缀） -> unknown
+```
+
+模型名称规范化仅用于定价查找，不会更改持久化存储的 `model_returned` 值。不支持隐式前缀匹配、模糊匹配或版本后缀自动截断。
+
+在 `pricing.yaml` 中通过 `aliases` 字段定义显式别名：
+
+```yaml
+pricing:
+  gpt-4o:
+    input_per_1m: 2.50
+    cached_input_per_1m: 1.25
+    output_per_1m: 10.00
+    aliases:
+      - gpt-4o-latest
+```
 
 当配置了 `reasoning_per_1m` 时，推理 token 被视为输出 token 的子集：
 
