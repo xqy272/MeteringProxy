@@ -88,6 +88,34 @@ func TestAPISummary(t *testing.T) {
 	}
 }
 
+func TestAPIResponsesAreNotCacheable(t *testing.T) {
+	s, _ := newTestServer(t, "/metering")
+	req := httptest.NewRequest("GET", "/metering/api/summary?range=24h", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Cache-Control"); got != "no-store, no-cache, must-revalidate" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+	if got := rec.Header().Get("Pragma"); got != "no-cache" {
+		t.Errorf("Pragma = %q, want no-cache", got)
+	}
+	if got := rec.Header().Get("Expires"); got != "0" {
+		t.Errorf("Expires = %q, want 0", got)
+	}
+}
+
+func TestIndexRequiresRevalidation(t *testing.T) {
+	s, _ := newTestServer(t, "/metering")
+	req := httptest.NewRequest("GET", "/metering", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Cache-Control"); got != "no-cache" {
+		t.Errorf("Cache-Control = %q, want no-cache", got)
+	}
+}
+
 func TestAPIHealth(t *testing.T) {
 	s, _ := newTestServer(t, "/metering")
 	req := httptest.NewRequest("GET", "/metering/api/health", nil)
@@ -158,9 +186,12 @@ func TestCustomBasePath(t *testing.T) {
 		t.Errorf("GET /stats/: status %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, `const BASE = "/stats/api/";`) {
+	if !strings.Contains(body, `content="/stats/api/"`) {
 		t.Errorf("custom basePath not injected into page; body does not contain expected string")
 		t.Logf("body snippet: %.200s", body)
+	}
+	if strings.Contains(body, "__METERING_API_BASE__") {
+		t.Errorf("api base placeholder was not replaced")
 	}
 }
 
@@ -173,6 +204,15 @@ func TestIndexUsesMetadataDrivenFilters(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, "fetchJSON('metadata')") {
 		t.Fatal("index should load metadata API")
+	}
+	if !strings.Contains(body, "Promise.allSettled") {
+		t.Fatal("index should tolerate partial API failures")
+	}
+	if !strings.Contains(body, "cache: 'no-store'") {
+		t.Fatal("index fetches should bypass browser cache")
+	}
+	if !strings.Contains(body, `meta[name="api-base"]`) {
+		t.Fatal("index should read API base from injected metadata")
 	}
 	if strings.Contains(body, `<option value="/v1/chat/completions">`) ||
 		strings.Contains(body, `<option value="/v1/responses">`) {

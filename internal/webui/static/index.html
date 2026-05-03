@@ -3,317 +3,1179 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Metering Proxy - Statistics</title>
+<title>Metering Proxy</title>
+<meta name="api-base" content="__METERING_API_BASE__">
 <style>
 :root {
-  --bg: #0d1117;
-  --bg2: #161b22;
-  --bg3: #21262d;
-  --border: #30363d;
-  --text: #c9d1d9;
-  --text2: #8b949e;
-  --green: #3fb950;
-  --red: #f85149;
-  --blue: #58a6ff;
-  --yellow: #d2991d;
-  --purple: #a371f7;
+  color-scheme: dark;
+  --bg: #101112;
+  --surface: #17191c;
+  --surface-2: #1f2226;
+  --surface-3: #272b30;
+  --border: #363b42;
+  --border-soft: #2a2e33;
+  --text: #f0f2f4;
+  --muted: #9aa3ad;
+  --muted-2: #727b85;
+  --green: #43c47a;
+  --green-bg: #123322;
+  --red: #f36b6b;
+  --red-bg: #3a1717;
+  --amber: #e0a84b;
+  --amber-bg: #392b13;
+  --cyan: #57c7d4;
+  --cyan-bg: #123238;
+  --violet: #a98bf8;
+  --violet-bg: #2b2146;
+  --shadow: 0 16px 40px rgba(0, 0, 0, 0.26);
 }
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
-header { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; justify-content: space-between; align-items: center; position: sticky; top:0; z-index: 10; }
-header h1 { font-size: 1.2em; }
-nav { display: flex; gap: 8px; }
-nav button, nav select { background: var(--bg3); color: var(--text); border: 1px solid var(--border); padding: 6px 16px; border-radius: 6px; cursor: pointer; font-size: 0.9em; }
-nav button:hover, nav button.active { background: var(--border); }
-main { max-width: 1400px; margin: 0 auto; padding: 20px; }
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
-.card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
-.card .label { font-size: 0.8em; color: var(--text2); margin-bottom: 4px; }
-.card .value { font-size: 1.8em; font-weight: 600; }
-.card .sub { font-size: 0.8em; color: var(--text2); margin-top: 4px; }
-.green { color: var(--green); }
-.red { color: var(--red); }
-.blue { color: var(--blue); }
-.purple { color: var(--purple); }
-table { width: 100%; border-collapse: collapse; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
-th, td { padding: 8px 12px; text-align: left; font-size: 0.85em; }
-th { background: var(--bg3); color: var(--text2); font-weight: 600; position: sticky; top: 0; }
-tr { border-bottom: 1px solid var(--border); }
-tr:hover { background: var(--bg3); }
-.section { margin-bottom: 32px; }
-.section h2 { font-size: 1.1em; margin-bottom: 12px; color: var(--text2); }
-.filters { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
-.filters input, .filters select { background: var(--bg3); color: var(--text); border: 1px solid var(--border); padding: 6px 12px; border-radius: 6px; font-size: 0.85em; }
-.chart-container { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
-.bar-chart { display: flex; align-items: flex-end; gap: 2px; height: 120px; overflow-x: auto; }
-.bar { flex: 1; min-width: 8px; background: var(--blue); border-radius: 2px 2px 0 0; position: relative; cursor: help; }
-.bar:hover { background: var(--purple); }
-.bar.error { background: var(--red); }
-.bar.error:hover { background: #ff6b6b; }
-.empty { text-align: center; color: var(--text2); padding: 40px; }
-.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.75em; }
-.badge.ok { background: #1a3a1a; color: var(--green); }
-.badge.err { background: #3a1a1a; color: var(--red); }
-.badge.warn { background: #3a3a1a; color: var(--yellow); }
-.tabs { display: flex; gap: 4px; }
-@media (max-width: 768px) { .cards { grid-template-columns: repeat(2, 1fr); } nav { flex-wrap: wrap; } }
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+button, select, input {
+  font: inherit;
+}
+a { color: inherit; text-decoration: none; }
+
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: rgba(16, 17, 18, 0.94);
+  backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--border-soft);
+}
+.header-inner {
+  max-width: 1500px;
+  margin: 0 auto;
+  padding: 14px 22px;
+  display: grid;
+  grid-template-columns: minmax(230px, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.mark {
+  width: 34px;
+  height: 34px;
+  border: 1px solid #405053;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(180deg, #1f292b, #151819);
+  color: var(--cyan);
+  font-weight: 800;
+  letter-spacing: 0;
+}
+h1 {
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.1;
+  letter-spacing: 0;
+}
+.subtitle {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.control, .button {
+  height: 34px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 0 12px;
+}
+.control {
+  min-width: 150px;
+}
+.button {
+  cursor: pointer;
+  min-width: 82px;
+}
+.button:hover:not(:disabled) {
+  background: var(--surface-3);
+}
+.button:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--muted);
+  padding: 0 10px;
+  user-select: none;
+}
+.toggle input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--cyan);
+}
+
+main {
+  max-width: 1500px;
+  margin: 0 auto;
+  padding: 18px 22px 36px;
+}
+.status-strip {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid var(--border-soft);
+  background: var(--surface);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 16px;
+}
+.status-strip.hidden { display: none; }
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 72px;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+.status-pill.ok { background: var(--green-bg); color: var(--green); }
+.status-pill.warn { background: var(--amber-bg); color: var(--amber); }
+.status-pill.err { background: var(--red-bg); color: var(--red); }
+.status-text {
+  min-width: 0;
+}
+.status-title {
+  font-weight: 650;
+}
+.status-detail {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.last-refresh {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.grid {
+  display: grid;
+  gap: 16px;
+}
+.overview-grid {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  margin-bottom: 16px;
+}
+.panel-grid {
+  grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.55fr);
+  margin-bottom: 16px;
+}
+.section-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.card, .panel {
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+.metric {
+  min-height: 112px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+.metric-label {
+  color: var(--muted);
+  font-size: 12px;
+}
+.metric-value {
+  margin-top: 8px;
+  font-size: 28px;
+  line-height: 1;
+  font-weight: 760;
+  letter-spacing: 0;
+}
+.metric-sub {
+  margin-top: 9px;
+  color: var(--muted);
+  font-size: 12px;
+  min-height: 18px;
+}
+.metric.accent-cyan .metric-value { color: var(--cyan); }
+.metric.accent-green .metric-value { color: var(--green); }
+.metric.accent-amber .metric-value { color: var(--amber); }
+.metric.accent-violet .metric-value { color: var(--violet); }
+.metric.accent-red .metric-value { color: var(--red); }
+
+.panel {
+  overflow: hidden;
+}
+.panel-header {
+  min-height: 48px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-soft);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.panel-title {
+  margin: 0;
+  font-size: 14px;
+  letter-spacing: 0;
+}
+.panel-subtitle {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 2px;
+}
+.panel-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.panel-body {
+  padding: 14px;
+}
+
+.chart {
+  height: 210px;
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  overflow-x: auto;
+  padding: 8px 0 0;
+}
+.bar-wrap {
+  min-width: 9px;
+  flex: 1 0 9px;
+  display: flex;
+  align-items: flex-end;
+}
+.bar {
+  width: 100%;
+  min-height: 2px;
+  border-radius: 3px 3px 0 0;
+  background: linear-gradient(180deg, #69d5df, #298690);
+  cursor: help;
+}
+.bar:hover { background: linear-gradient(180deg, #a98bf8, #6f50c8); }
+.chart-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 10px;
+}
+
+.health-list {
+  display: grid;
+  gap: 10px;
+}
+.health-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: center;
+  min-height: 44px;
+  border: 1px solid var(--border-soft);
+  background: var(--surface-2);
+  border-radius: 7px;
+  padding: 9px 10px;
+}
+.health-row .name {
+  color: var(--muted);
+  font-size: 12px;
+}
+.health-row .value {
+  font-weight: 760;
+  font-size: 18px;
+}
+
+.filters {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.filters input, .filters select {
+  height: 32px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 0 10px;
+  min-width: 156px;
+}
+.filters input { min-width: 220px; }
+
+.table-wrap {
+  overflow-x: auto;
+}
+table {
+  width: 100%;
+  min-width: 920px;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+th, td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-soft);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+th {
+  color: var(--muted);
+  background: var(--surface-2);
+  font-size: 12px;
+  font-weight: 700;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+tbody tr:hover td {
+  background: rgba(255, 255, 255, 0.025);
+}
+td {
+  color: #d9dde2;
+  font-size: 13px;
+}
+td.numeric, th.numeric {
+  text-align: right;
+}
+code {
+  color: #c7ccd2;
+  background: var(--surface-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  padding: 2px 5px;
+}
+.model-name {
+  max-width: 280px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.muted { color: var(--muted); }
+.mono { font-variant-numeric: tabular-nums; }
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 52px;
+  height: 22px;
+  border-radius: 999px;
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 700;
+}
+.badge.ok { background: var(--green-bg); color: var(--green); }
+.badge.warn { background: var(--amber-bg); color: var(--amber); }
+.badge.err { background: var(--red-bg); color: var(--red); }
+.badge.neutral { background: var(--surface-2); color: var(--muted); border: 1px solid var(--border-soft); }
+.badge.info { background: var(--cyan-bg); color: var(--cyan); }
+.badge.violet { background: var(--violet-bg); color: var(--violet); }
+
+.progress {
+  width: 108px;
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-3);
+  display: inline-block;
+  vertical-align: middle;
+  margin-right: 8px;
+}
+.progress > span {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--cyan), var(--violet));
+}
+
+.empty {
+  text-align: center;
+  color: var(--muted);
+  padding: 34px 12px;
+}
+.empty strong {
+  display: block;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+.error-line {
+  color: var(--red);
+}
+
+@media (max-width: 1180px) {
+  .overview-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .panel-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 760px) {
+  .header-inner {
+    grid-template-columns: 1fr;
+    padding: 12px 14px;
+  }
+  .controls {
+    justify-content: flex-start;
+  }
+  main {
+    padding: 14px;
+  }
+  .overview-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .status-strip {
+    grid-template-columns: 1fr;
+  }
+  .last-refresh {
+    white-space: normal;
+  }
+  .metric {
+    min-height: 104px;
+  }
+  .metric-value {
+    font-size: 23px;
+  }
+  .filters input, .filters select, .control, .button {
+    width: 100%;
+    min-width: 0;
+  }
+  .toggle {
+    width: 100%;
+  }
+}
 </style>
 </head>
 <body>
-<header>
-  <h1>Metering Proxy</h1>
-  <nav>
-    <select id="range-select"></select>
-    <button onclick="refresh()" id="refresh-btn">Refresh</button>
-  </nav>
+<header class="app-header">
+  <div class="header-inner">
+    <div class="brand">
+      <div class="mark">M</div>
+      <div>
+        <h1>Metering Proxy</h1>
+        <div class="subtitle">AI gateway usage, cost, and capture health</div>
+      </div>
+    </div>
+    <div class="controls">
+      <select id="range-select" class="control" aria-label="Range"></select>
+      <label class="toggle"><input type="checkbox" id="auto-refresh"> Auto 30s</label>
+      <button class="button" id="refresh-btn" type="button">Refresh</button>
+    </div>
+  </div>
 </header>
+
 <main>
-  <!-- Overview Cards -->
-  <section class="section">
-    <div class="cards" id="summary-cards">
-      <div class="card"><div class="label">Requests</div><div class="value" id="total-requests">-</div><div class="sub" id="failed-requests"></div></div>
-      <div class="card"><div class="label">Input Tokens</div><div class="value blue" id="input-tokens">-</div><div class="sub" id="cached-tokens"></div></div>
-      <div class="card"><div class="label">Output Tokens</div><div class="value green" id="output-tokens">-</div><div class="sub" id="reasoning-tokens"></div></div>
-      <div class="card"><div class="label">Total Tokens</div><div class="value purple" id="total-tokens">-</div></div>
-      <div class="card"><div class="label">Est. Cost</div><div class="value" style="color:var(--yellow)" id="total-cost">-</div></div>
+  <div class="status-strip" id="status-strip">
+    <div class="status-pill ok" id="status-pill">Live</div>
+    <div class="status-text">
+      <div class="status-title" id="status-title">Dashboard ready</div>
+      <div class="status-detail" id="status-detail">Waiting for data refresh.</div>
+    </div>
+    <div class="last-refresh" id="last-refresh">Last refresh: never</div>
+  </div>
+
+  <section class="grid overview-grid" aria-label="Overview">
+    <div class="card metric">
+      <div>
+        <div class="metric-label">Requests</div>
+        <div class="metric-value mono" id="total-requests">-</div>
+      </div>
+      <div class="metric-sub" id="failed-requests">-</div>
+    </div>
+    <div class="card metric accent-red">
+      <div>
+        <div class="metric-label">Failure Rate</div>
+        <div class="metric-value mono" id="failure-rate">-</div>
+      </div>
+      <div class="metric-sub" id="failed-count">-</div>
+    </div>
+    <div class="card metric accent-cyan">
+      <div>
+        <div class="metric-label">Input Tokens</div>
+        <div class="metric-value mono" id="input-tokens">-</div>
+      </div>
+      <div class="metric-sub" id="cached-tokens">-</div>
+    </div>
+    <div class="card metric accent-green">
+      <div>
+        <div class="metric-label">Output Tokens</div>
+        <div class="metric-value mono" id="output-tokens">-</div>
+      </div>
+      <div class="metric-sub" id="reasoning-tokens">-</div>
+    </div>
+    <div class="card metric accent-violet">
+      <div>
+        <div class="metric-label">Total Tokens</div>
+        <div class="metric-value mono" id="total-tokens">-</div>
+      </div>
+      <div class="metric-sub" id="avg-tokens">-</div>
+    </div>
+    <div class="card metric accent-amber">
+      <div>
+        <div class="metric-label">Estimated Cost</div>
+        <div class="metric-value mono" id="total-cost">-</div>
+      </div>
+      <div class="metric-sub" id="cost-note">-</div>
     </div>
   </section>
 
-  <!-- Timeseries chart -->
-  <section class="section">
-    <h2>Request Volume</h2>
-    <div class="chart-container">
-      <div class="bar-chart" id="timeseries-chart"></div>
-      <div class="sub" style="margin-top:8px" id="timeseries-label"></div>
+  <section class="grid panel-grid">
+    <div class="panel">
+      <div class="panel-header">
+        <div>
+          <h2 class="panel-title">Request Volume</h2>
+          <div class="panel-subtitle" id="timeseries-label">-</div>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="chart" id="timeseries-chart"></div>
+        <div class="chart-footer">
+          <span id="chart-left">-</span>
+          <span id="chart-right">-</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <div>
+          <h2 class="panel-title">Capture Health</h2>
+          <div class="panel-subtitle" id="health-summary">-</div>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="health-list">
+          <div class="health-row"><span class="name">Queue Depth</span><span class="value mono" id="queue-depth">-</span></div>
+          <div class="health-row"><span class="name">Dropped Events</span><span class="value mono" id="dropped-events">-</span></div>
+          <div class="health-row"><span class="name">Parse Errors</span><span class="value mono" id="parse-errors">-</span></div>
+          <div class="health-row"><span class="name">DB Write Errors</span><span class="value mono" id="db-errors">-</span></div>
+        </div>
+      </div>
     </div>
   </section>
 
-  <!-- Models -->
-  <section class="section">
-    <h2>Models</h2>
-    <div style="overflow-x:auto">
-    <table>
-      <thead><tr><th>Model</th><th>Requests</th><th>Input</th><th>Output</th><th>Reasoning</th><th>Cached</th><th>Total</th><th>Est. Cost</th></tr></thead>
-      <tbody id="models-table"><tr><td colspan="8" class="empty">Loading...</td></tr></tbody>
-    </table>
+  <section class="grid section-grid">
+    <div class="panel">
+      <div class="panel-header">
+        <div>
+          <h2 class="panel-title">Models</h2>
+          <div class="panel-subtitle" id="models-summary">-</div>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Model</th>
+              <th class="numeric">Requests</th>
+              <th class="numeric">Input</th>
+              <th class="numeric">Output</th>
+              <th class="numeric">Cached</th>
+              <th class="numeric">Reasoning</th>
+              <th class="numeric">Avg Tokens</th>
+              <th class="numeric">Cost Share</th>
+              <th class="numeric">Est. Cost</th>
+            </tr>
+          </thead>
+          <tbody id="models-table"><tr><td colspan="9" class="empty">Loading...</td></tr></tbody>
+        </table>
+      </div>
     </div>
-  </section>
 
-  <!-- Keys -->
-  <section class="section">
-    <h2>API Keys</h2>
-    <div style="overflow-x:auto">
-    <table>
-      <thead><tr><th>Key Hash</th><th>Requests</th><th>Failed</th><th>Failure Rate</th><th>Input</th><th>Output</th><th>Total</th></tr></thead>
-      <tbody id="keys-table"><tr><td colspan="7" class="empty">Loading...</td></tr></tbody>
-    </table>
+    <div class="panel">
+      <div class="panel-header">
+        <div>
+          <h2 class="panel-title">Recent Requests</h2>
+          <div class="panel-subtitle" id="requests-summary">-</div>
+        </div>
+        <div class="filters">
+          <select id="filter-status" aria-label="Status">
+            <option value="">All status</option>
+            <option value="success">2xx success</option>
+            <option value="4xx">4xx client</option>
+            <option value="5xx">5xx server</option>
+          </select>
+          <select id="filter-model" aria-label="Model"><option value="">All models</option></select>
+          <select id="filter-endpoint" aria-label="Endpoint"><option value="">All endpoints</option></select>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Status</th>
+              <th>Endpoint</th>
+              <th>Model</th>
+              <th class="numeric">Input</th>
+              <th class="numeric">Output</th>
+              <th class="numeric">Total</th>
+              <th class="numeric">TTFB</th>
+              <th class="numeric">Latency</th>
+              <th>Capture</th>
+              <th>Key Hash</th>
+            </tr>
+          </thead>
+          <tbody id="requests-table"><tr><td colspan="11" class="empty">Loading...</td></tr></tbody>
+        </table>
+      </div>
     </div>
-  </section>
 
-  <!-- Errors -->
-  <section class="section">
-    <h2>Errors &amp; Health <span style="font-size:0.8em;color:var(--text2)">(since process start)</span></h2>
-    <div class="cards" id="health-cards">
-      <div class="card"><div class="label">Queue Depth</div><div class="value" id="queue-depth">-</div></div>
-      <div class="card"><div class="label">Dropped Events</div><div class="value red" id="dropped-events">-</div></div>
-      <div class="card"><div class="label">Parse Errors</div><div class="value" style="color:var(--yellow)" id="parse-errors">-</div></div>
-      <div class="card"><div class="label">DB Write Errors</div><div class="value red" id="db-errors">-</div></div>
+    <div class="panel">
+      <div class="panel-header">
+        <div>
+          <h2 class="panel-title">API Keys</h2>
+          <div class="panel-subtitle" id="keys-summary">-</div>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Key Hash</th>
+              <th class="numeric">Requests</th>
+              <th class="numeric">Failed</th>
+              <th class="numeric">Failure Rate</th>
+              <th class="numeric">Input</th>
+              <th class="numeric">Output</th>
+              <th class="numeric">Total</th>
+            </tr>
+          </thead>
+          <tbody id="keys-table"><tr><td colspan="7" class="empty">Loading...</td></tr></tbody>
+        </table>
+      </div>
     </div>
-  </section>
 
-  <!-- Recent Requests -->
-  <section class="section">
-    <h2>Recent Requests</h2>
-    <div class="filters">
-      <select id="filter-status" onchange="loadRequests()">
-        <option value="">All Status</option>
-        <option value="success">2xx Success</option>
-        <option value="4xx">4xx Client Errors</option>
-        <option value="5xx">5xx Server Errors</option>
-      </select>
-      <input id="filter-model" placeholder="Model name..." onchange="loadRequests()">
-      <select id="filter-endpoint" onchange="loadRequests()">
-        <option value="">All Endpoints</option>
-      </select>
-    </div>
-    <div style="overflow-x:auto">
-    <table>
-      <thead><tr><th>Time</th><th>Endpoint</th><th>Status</th><th>TTFB</th><th>Total</th><th>Model</th><th>Input</th><th>Output</th><th>Total</th><th>Key Hash</th></tr></thead>
-      <tbody id="requests-table"><tr><td colspan="10" class="empty">Loading...</td></tr></tbody>
-    </table>
+    <div class="panel">
+      <div class="panel-header">
+        <div>
+          <h2 class="panel-title">Errors</h2>
+          <div class="panel-subtitle" id="errors-summary">-</div>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Bucket</th>
+              <th class="numeric">Request Errors</th>
+              <th class="numeric">Parse Errors</th>
+              <th class="numeric">DB Errors</th>
+              <th class="numeric">Dropped Events</th>
+            </tr>
+          </thead>
+          <tbody id="errors-table"><tr><td colspan="5" class="empty">Loading...</td></tr></tbody>
+        </table>
+      </div>
     </div>
   </section>
 </main>
 
 <script>
-const BASE = '/metering/api/';
+const apiBaseMeta = document.querySelector('meta[name="api-base"]');
+const BASE = apiBaseMeta && apiBaseMeta.content ? apiBaseMeta.content : '/metering/api/';
+
 let metadata = null;
+let currentModels = [];
+let autoRefreshTimer = null;
+let isRefreshing = false;
+let lastRefreshAt = 0;
+
+const fallbackRanges = [
+  { key: '24h', label: 'Last 24 Hours', bucket: '10m' },
+  { key: 'today', label: 'Today', bucket: '10m' },
+  { key: '7d', label: 'Last 7 Days', bucket: '1h' },
+  { key: '30d', label: 'Last 30 Days', bucket: '1d' }
+];
+
+const $ = id => document.getElementById(id);
 
 function esc(s) {
   if (s == null) return '';
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
-function getRange() { return document.getElementById('range-select').value; }
-
 function formatNum(n) {
-  if (n == null) return '0';
-  if (n >= 1e6) return (n/1e6).toFixed(1)+'M';
-  if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
-  return n.toString();
+  n = Number(n || 0);
+  if (Math.abs(n) >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+  if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(n);
+}
+
+function formatFull(n) {
+  return Number(n || 0).toLocaleString();
 }
 
 function formatCost(c) {
-  if (c == null || c === 0) return '$0.00';
-  if (c < 0.01) return '<$0.01';
-  return '$'+c.toFixed(2);
+  c = Number(c || 0);
+  if (c === 0) return '$0.00';
+  if (c > 0 && c < 0.01) return '<$0.01';
+  return '$' + c.toFixed(2);
+}
+
+function formatPercent(value, total) {
+  value = Number(value || 0);
+  total = Number(total || 0);
+  if (total <= 0) return '0.0%';
+  return (value / total * 100).toFixed(1) + '%';
 }
 
 function formatLat(ms) {
-  if (ms < 1000) return ms+'ms';
-  return (ms/1000).toFixed(1)+'s';
+  ms = Number(ms || 0);
+  if (ms <= 0) return '-';
+  if (ms < 1000) return ms + 'ms';
+  return (ms / 1000).toFixed(1) + 's';
 }
 
-function shortHash(h) { return h ? h.substring(0,12)+'...' : '-'; }
+function formatBytes(bytes) {
+  bytes = Number(bytes || 0);
+  if (bytes >= 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MiB';
+  if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KiB';
+  return bytes + ' B';
+}
+
+function formatTime(value) {
+  if (!value) return '-';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  return d.toLocaleString();
+}
+
+function shortHash(h) {
+  if (!h) return '-';
+  return String(h).slice(0, 12) + '...';
+}
+
+function getRange() {
+  return $('range-select').value || '24h';
+}
+
+function bucketForRange(range) {
+  const ranges = metadata && metadata.ranges ? metadata.ranges : fallbackRanges;
+  const item = ranges.find(r => r.key === range);
+  return item && item.bucket ? item.bucket : '10m';
+}
+
+function setStatus(kind, title, detail) {
+  const pill = $('status-pill');
+  pill.className = 'status-pill ' + (kind === 'error' ? 'err' : kind === 'partial' ? 'warn' : 'ok');
+  pill.textContent = kind === 'error' ? 'Error' : kind === 'partial' ? 'Partial' : 'Live';
+  $('status-title').textContent = title;
+  $('status-detail').textContent = detail || '';
+}
+
+function setLastRefresh(date) {
+  lastRefreshAt = date ? date.getTime() : 0;
+  $('last-refresh').textContent = 'Last refresh: ' + (date ? date.toLocaleString() : 'never');
+}
 
 async function fetchJSON(path) {
-  const res = await fetch(BASE + path);
-  if (!res.ok) throw new Error(res.statusText);
+  const url = BASE + path;
+  const res = await fetch(url, {
+    cache: 'no-store',
+    credentials: 'same-origin',
+    headers: { 'Accept': 'application/json' }
+  });
+  if (!res.ok) {
+    let detail = '';
+    try { detail = await res.text(); } catch (_) {}
+    const err = new Error(url + ' returned HTTP ' + res.status);
+    err.status = res.status;
+    err.detail = detail.slice(0, 180);
+    throw err;
+  }
   return res.json();
 }
 
-async function loadMetadata() {
-  metadata = await fetchJSON('metadata');
+function emptyRow(colspan, title, detail) {
+  return `<tr><td colspan="${colspan}" class="empty"><strong>${esc(title)}</strong>${esc(detail || '')}</td></tr>`;
+}
 
-  const rangeSelect = document.getElementById('range-select');
+function errorRow(colspan, message) {
+  return `<tr><td colspan="${colspan}" class="empty error-line">${esc(message)}</td></tr>`;
+}
+
+function applyMetadata() {
+  const rangeSelect = $('range-select');
   const currentRange = rangeSelect.value;
-  rangeSelect.innerHTML = (metadata.ranges || []).map(r =>
-    `<option value="${esc(r.key)}">${esc(r.label)}</option>`
-  ).join('');
+  const ranges = metadata && metadata.ranges && metadata.ranges.length ? metadata.ranges : fallbackRanges;
+  rangeSelect.innerHTML = ranges.map(r => `<option value="${esc(r.key)}">${esc(r.label)}</option>`).join('');
   if ([...rangeSelect.options].some(o => o.value === currentRange)) {
     rangeSelect.value = currentRange;
-  } else if (rangeSelect.options.length) {
-    rangeSelect.value = rangeSelect.options[0].value;
+  } else {
+    rangeSelect.value = ranges[0].key;
   }
 
-  const endpointSelect = document.getElementById('filter-endpoint');
+  const endpointSelect = $('filter-endpoint');
   const currentEndpoint = endpointSelect.value;
-  const endpointOptions = (metadata.endpoints || [])
+  const endpointOptions = ((metadata && metadata.endpoints) || [])
     .filter(e => e.capture_mode !== 'passthrough')
     .map(e => `<option value="${esc(e.path)}">${esc(e.display_name || e.path)}</option>`)
     .join('');
-  endpointSelect.innerHTML = '<option value="">All Endpoints</option>' + endpointOptions;
+  endpointSelect.innerHTML = '<option value="">All endpoints</option>' + endpointOptions;
   if ([...endpointSelect.options].some(o => o.value === currentEndpoint)) {
     endpointSelect.value = currentEndpoint;
   }
 }
 
-function bucketForRange(range) {
-  const item = metadata && (metadata.ranges || []).find(r => r.key === range);
-  return item && item.bucket ? item.bucket : '';
+function applyModelFilterOptions() {
+  const select = $('filter-model');
+  const current = select.value;
+  const options = currentModels
+    .map(r => r.model || 'unknown')
+    .filter((value, index, arr) => arr.indexOf(value) === index)
+    .map(model => `<option value="${esc(model)}">${esc(model)}</option>`)
+    .join('');
+  select.innerHTML = '<option value="">All models</option>' + options;
+  if ([...select.options].some(o => o.value === current)) {
+    select.value = current;
+  }
+}
+
+async function loadMetadata() {
+  metadata = await fetchJSON('metadata');
+  applyMetadata();
 }
 
 async function loadSummary() {
-  const data = await fetchJSON('summary?range='+getRange());
-  document.getElementById('total-requests').textContent = formatNum(data.total_requests);
-  document.getElementById('failed-requests').textContent = formatNum(data.failed_requests) + ' failed';
-  document.getElementById('input-tokens').textContent = formatNum(data.total_input_tokens);
-  document.getElementById('cached-tokens').textContent = formatNum(data.total_cached_tokens) + ' cached';
-  document.getElementById('output-tokens').textContent = formatNum(data.total_output_tokens);
-  document.getElementById('reasoning-tokens').textContent = formatNum(data.total_reasoning_tokens) + ' reasoning';
-  document.getElementById('total-tokens').textContent = formatNum(data.total_tokens);
+  const data = await fetchJSON('summary?range=' + encodeURIComponent(getRange()));
+  const totalRequests = Number(data.total_requests || 0);
+  const failedRequests = Number(data.failed_requests || 0);
+  const totalTokens = Number(data.total_tokens || 0);
+
+  $('total-requests').textContent = formatNum(totalRequests);
+  $('failed-requests').textContent = formatFull(failedRequests) + ' failed';
+  $('failed-count').textContent = formatFull(failedRequests) + ' of ' + formatFull(totalRequests);
+  $('failure-rate').textContent = formatPercent(failedRequests, totalRequests);
+  $('input-tokens').textContent = formatNum(data.total_input_tokens);
+  $('cached-tokens').textContent = formatFull(data.total_cached_tokens) + ' cached';
+  $('output-tokens').textContent = formatNum(data.total_output_tokens);
+  $('reasoning-tokens').textContent = formatFull(data.total_reasoning_tokens) + ' reasoning';
+  $('total-tokens').textContent = formatNum(totalTokens);
+  $('avg-tokens').textContent = totalRequests ? formatFull(Math.round(totalTokens / totalRequests)) + ' avg/request' : '0 avg/request';
+  $('total-cost').textContent = formatCost(data.total_cost);
+  $('cost-note').textContent = 'query-time pricing';
 }
 
 async function loadModels() {
-  const data = await fetchJSON('models?range='+getRange());
-  const tbody = document.getElementById('models-table');
-  if (!data.length) { tbody.innerHTML = '<tr><td colspan="8" class="empty">No data</td></tr>'; return; }
-  let totalCost = 0;
-  tbody.innerHTML = data.map(r => {
-    const costStr = r.cost_known ? formatCost(r.cost) : '-';
-    if (r.cost_known) totalCost += r.cost;
+  const data = await fetchJSON('models?range=' + encodeURIComponent(getRange()));
+  currentModels = Array.isArray(data) ? data : [];
+  applyModelFilterOptions();
+
+  const tbody = $('models-table');
+  if (!currentModels.length) {
+    tbody.innerHTML = emptyRow(9, 'No model data', 'Captured requests with usage will appear here.');
+    $('models-summary').textContent = '0 models';
+    return;
+  }
+
+  const totalCost = currentModels.reduce((sum, r) => sum + (r.cost_known ? Number(r.cost || 0) : 0), 0);
+  const unknownPricing = currentModels.filter(r => !r.cost_known).length;
+  $('models-summary').textContent = `${currentModels.length} models, ${unknownPricing} without matched pricing`;
+
+  tbody.innerHTML = currentModels.map(r => {
+    const totalTokens = Number(r.total_tokens || 0);
+    const requestCount = Number(r.request_count || 0);
+    const avgTokens = requestCount ? Math.round(totalTokens / requestCount) : 0;
+    const cost = Number(r.cost || 0);
+    const share = r.cost_known && totalCost > 0 ? cost / totalCost * 100 : 0;
+    const costShare = r.cost_known
+      ? `<span class="progress"><span style="width:${Math.max(2, Math.min(100, share)).toFixed(1)}%"></span></span>${share.toFixed(1)}%`
+      : '<span class="badge warn">unknown</span>';
+    const costStr = r.cost_known ? formatCost(cost) : '-';
     return `<tr>
-      <td>${esc(r.model) || 'unknown'}</td><td>${formatNum(r.request_count)}</td>
-      <td>${formatNum(r.input_tokens)}</td><td>${formatNum(r.output_tokens)}</td>
-      <td>${formatNum(r.reasoning_tokens)}</td><td>${formatNum(r.cached_tokens)}</td>
-      <td>${formatNum(r.total_tokens)}</td><td>${costStr}</td>
+      <td><div class="model-name" title="${esc(r.model || 'unknown')}">${esc(r.model || 'unknown')}</div></td>
+      <td class="numeric mono">${formatFull(requestCount)}</td>
+      <td class="numeric mono">${formatNum(r.input_tokens)}</td>
+      <td class="numeric mono">${formatNum(r.output_tokens)}</td>
+      <td class="numeric mono">${formatNum(r.cached_tokens)}</td>
+      <td class="numeric mono">${formatNum(r.reasoning_tokens)}</td>
+      <td class="numeric mono">${formatFull(avgTokens)}</td>
+      <td class="numeric">${costShare}</td>
+      <td class="numeric mono">${costStr}</td>
     </tr>`;
   }).join('');
-  document.getElementById('total-cost').textContent = totalCost > 0 ? formatCost(totalCost) : '-';
 }
 
 async function loadKeys() {
-  const data = await fetchJSON('keys?range='+getRange());
-  const tbody = document.getElementById('keys-table');
-  if (!data.length) { tbody.innerHTML = '<tr><td colspan="7" class="empty">No data</td></tr>'; return; }
-  tbody.innerHTML = data.map(r => `<tr>
-    <td><code>${shortHash(esc(r.key_hash))}</code></td><td>${formatNum(r.request_count)}</td>
-    <td>${formatNum(r.failed_count)}</td>
-    <td>${r.request_count > 0 ? (r.failed_count/r.request_count*100).toFixed(1)+'%' : '-'}</td>
-    <td>${formatNum(r.input_tokens)}</td><td>${formatNum(r.output_tokens)}</td>
-    <td>${formatNum(r.total_tokens)}</td>
-  </tr>`).join('');
+  const data = await fetchJSON('keys?range=' + encodeURIComponent(getRange()));
+  const rows = Array.isArray(data) ? data : [];
+  const tbody = $('keys-table');
+  $('keys-summary').textContent = rows.length + ' keys';
+  if (!rows.length) {
+    tbody.innerHTML = emptyRow(7, 'No API key data', 'Requests with authorization headers will appear here.');
+    return;
+  }
+  tbody.innerHTML = rows.map(r => {
+    const count = Number(r.request_count || 0);
+    const failed = Number(r.failed_count || 0);
+    return `<tr>
+      <td><code>${esc(shortHash(r.key_hash))}</code></td>
+      <td class="numeric mono">${formatFull(count)}</td>
+      <td class="numeric mono">${formatFull(failed)}</td>
+      <td class="numeric mono">${formatPercent(failed, count)}</td>
+      <td class="numeric mono">${formatNum(r.input_tokens)}</td>
+      <td class="numeric mono">${formatNum(r.output_tokens)}</td>
+      <td class="numeric mono">${formatNum(r.total_tokens)}</td>
+    </tr>`;
+  }).join('');
 }
 
 async function loadRequests() {
-  const status = document.getElementById('filter-status').value;
-  const model = document.getElementById('filter-model').value;
-  const endpoint = document.getElementById('filter-endpoint').value;
-  const range = getRange();
-  let url = 'requests?limit=100&range=' + range;
-  if (status) url += '&status=' + status;
-  if (model) url += '&model=' + encodeURIComponent(model);
-  if (endpoint) url += '&endpoint=' + encodeURIComponent(endpoint);
-  const data = await fetchJSON(url);
-  const tbody = document.getElementById('requests-table');
-  if (!data.length) { tbody.innerHTML = '<tr><td colspan="10" class="empty">No data</td></tr>'; return; }
-  tbody.innerHTML = data.map(r => `<tr>
-    <td>${new Date(r.created_at).toLocaleString()}</td>
-    <td>${esc(r.endpoint)}</td>
-    <td><span class="badge ${r.status < 400 ? 'ok' : r.status < 500 ? 'warn' : 'err'}">${r.status}</span></td>
-    <td>${r.ttfb_ms ? formatLat(r.ttfb_ms) : '-'}</td>
-    <td>${formatLat(r.latency_ms)}</td>
-    <td>${esc(r.model_returned) || esc(r.model_requested) || '-'}</td>
-    <td>${formatNum(r.input_tokens)}</td><td>${formatNum(r.output_tokens)}</td>
-    <td>${formatNum(r.total_tokens)}</td>
-    <td><code>${shortHash(esc(r.api_key_hash))}</code></td>
-  </tr>`).join('');
+  const params = new URLSearchParams({ limit: '100', range: getRange() });
+  const status = $('filter-status').value;
+  const model = $('filter-model').value;
+  const endpoint = $('filter-endpoint').value;
+  if (status) params.set('status', status);
+  if (model) params.set('model', model);
+  if (endpoint) params.set('endpoint', endpoint);
+
+  const data = await fetchJSON('requests?' + params.toString());
+  const rows = Array.isArray(data) ? data : [];
+  const tbody = $('requests-table');
+  $('requests-summary').textContent = rows.length + ' latest rows';
+  if (!rows.length) {
+    tbody.innerHTML = emptyRow(11, 'No matching requests', 'Adjust the filters or choose a wider time range.');
+    return;
+  }
+  tbody.innerHTML = rows.map(r => {
+    const statusClass = r.status < 400 ? 'ok' : r.status < 500 ? 'warn' : 'err';
+    const model = r.model_returned || r.model_requested || '-';
+    const capture = captureBadge(r);
+    const endpoint = r.stream ? `${esc(r.endpoint)} <span class="badge info">stream</span>` : esc(r.endpoint);
+    const bytesTitle = `Request: ${formatBytes(r.request_bytes)} / Response: ${formatBytes(r.response_bytes)}`;
+    return `<tr title="${esc(bytesTitle)}">
+      <td class="mono">${esc(formatTime(r.created_at))}</td>
+      <td><span class="badge ${statusClass}">${esc(r.status)}</span></td>
+      <td>${endpoint}</td>
+      <td><div class="model-name" title="${esc(model)}">${esc(model)}</div></td>
+      <td class="numeric mono">${formatNum(r.input_tokens)}</td>
+      <td class="numeric mono">${formatNum(r.output_tokens)}</td>
+      <td class="numeric mono">${formatNum(r.total_tokens)}</td>
+      <td class="numeric mono">${formatLat(r.ttfb_ms)}</td>
+      <td class="numeric mono">${formatLat(r.latency_ms)}</td>
+      <td>${capture}</td>
+      <td><code>${esc(shortHash(r.api_key_hash))}</code></td>
+    </tr>`;
+  }).join('');
+}
+
+function captureBadge(r) {
+  const outcome = r.capture_outcome || '';
+  const reason = r.capture_reason || '';
+  if (outcome === 'captured') return '<span class="badge ok">captured</span>';
+  if (outcome === 'failed') return `<span class="badge err" title="${esc(reason)}">failed</span>`;
+  if (outcome === 'skipped') return `<span class="badge warn" title="${esc(reason)}">skipped</span>`;
+  if (reason) return `<span class="badge neutral" title="${esc(reason)}">${esc(reason)}</span>`;
+  return '<span class="badge neutral">unknown</span>';
 }
 
 async function loadTimeseries() {
   const range = getRange();
   const bucket = bucketForRange(range);
-  const data = await fetchJSON('timeseries?range='+range+'&bucket='+bucket);
-  const chart = document.getElementById('timeseries-chart');
-  if (!data.length) { chart.innerHTML = '<div class="empty">No data</div>'; return; }
-  const maxVal = Math.max(...data.map(d => d.count), 1);
-  chart.innerHTML = data.map(d =>
-    `<div class="bar" style="height:${(d.count/maxVal*100).toFixed(0)}%" title="${esc(d.timestamp)}: ${d.count} requests\nTokens: ${formatNum(d.total_tokens)}"></div>`
-  ).join('');
-  document.getElementById('timeseries-label').textContent = `${data.length} buckets - max: ${formatNum(maxVal)} requests`;
+  const data = await fetchJSON('timeseries?range=' + encodeURIComponent(range) + '&bucket=' + encodeURIComponent(bucket));
+  const rows = Array.isArray(data) ? data : [];
+  const chart = $('timeseries-chart');
+  if (!rows.length) {
+    chart.innerHTML = '<div class="empty"><strong>No chart data</strong>No requests in this range.</div>';
+    $('timeseries-label').textContent = '0 buckets';
+    $('chart-left').textContent = '-';
+    $('chart-right').textContent = '-';
+    return;
+  }
+  const maxCount = Math.max(...rows.map(d => Number(d.count || 0)), 1);
+  const maxTokens = Math.max(...rows.map(d => Number(d.total_tokens || 0)), 0);
+  chart.innerHTML = rows.map(d => {
+    const count = Number(d.count || 0);
+    const height = Math.max(2, count / maxCount * 100);
+    const title = `${d.timestamp}: ${formatFull(count)} requests, ${formatFull(d.total_tokens)} tokens`;
+    return `<div class="bar-wrap"><div class="bar" style="height:${height.toFixed(0)}%" title="${esc(title)}"></div></div>`;
+  }).join('');
+  $('timeseries-label').textContent = `${rows.length} ${bucket} buckets, peak ${formatFull(maxCount)} requests`;
+  $('chart-left').textContent = formatTime(rows[0].timestamp);
+  $('chart-right').textContent = `Peak tokens: ${formatFull(maxTokens)}`;
 }
 
 async function loadHealth() {
   const data = await fetchJSON('health');
-  document.getElementById('queue-depth').textContent = data.queue_depth;
-  document.getElementById('dropped-events').textContent = data.dropped_events;
-  document.getElementById('parse-errors').textContent = data.parse_errors;
-  document.getElementById('db-errors').textContent = data.db_write_errors;
+  $('queue-depth').textContent = formatFull(data.queue_depth);
+  $('dropped-events').textContent = formatFull(data.dropped_events);
+  $('parse-errors').textContent = formatFull(data.parse_errors);
+  $('db-errors').textContent = formatFull(data.db_write_errors);
+
+  const unhealthy = Number(data.dropped_events || 0) + Number(data.parse_errors || 0) + Number(data.db_write_errors || 0);
+  if (data.capture_disabled || !data.metering_enabled) {
+    $('health-summary').innerHTML = '<span class="badge warn">capture off</span>';
+  } else if (unhealthy > 0) {
+    $('health-summary').innerHTML = '<span class="badge warn">attention</span>';
+  } else {
+    $('health-summary').innerHTML = '<span class="badge ok">healthy</span>';
+  }
+}
+
+async function loadErrors() {
+  const data = await fetchJSON('errors?range=' + encodeURIComponent(getRange()));
+  const rows = Array.isArray(data.timeline) ? data.timeline : [];
+  const tbody = $('errors-table');
+  $('errors-summary').textContent = (data.source || 'unknown') + ', ' + rows.length + ' buckets';
+  if (!rows.length) {
+    tbody.innerHTML = emptyRow(5, 'No error buckets', 'No request errors or health metric errors in this range.');
+    return;
+  }
+  tbody.innerHTML = rows.map(r => `<tr>
+    <td class="mono">${esc(formatTime(r.timestamp))}</td>
+    <td class="numeric mono">${formatFull(r.count)}</td>
+    <td class="numeric mono">${formatFull(r.parse_errors)}</td>
+    <td class="numeric mono">${formatFull(r.db_errors)}</td>
+    <td class="numeric mono">${formatFull(r.dropped_events)}</td>
+  </tr>`).join('');
 }
 
 async function refresh() {
-  const btn = document.getElementById('refresh-btn');
-  btn.textContent = '...'; btn.disabled = true;
+  if (isRefreshing) return;
+  isRefreshing = true;
+  const btn = $('refresh-btn');
+  btn.textContent = 'Loading';
+  btn.disabled = true;
+
   try {
-    if (!metadata) await loadMetadata();
-    await Promise.all([loadSummary(), loadModels(), loadKeys(), loadRequests(), loadTimeseries(), loadHealth()]);
-  } catch(e) { console.error(e); }
-  btn.textContent = 'Refresh'; btn.disabled = false;
+    const tasks = [];
+    if (!metadata) {
+      tasks.push(['metadata', loadMetadata]);
+    }
+    tasks.push(
+      ['summary', loadSummary],
+      ['models', loadModels],
+      ['keys', loadKeys],
+      ['requests', loadRequests],
+      ['timeseries', loadTimeseries],
+      ['health', loadHealth],
+      ['errors', loadErrors]
+    );
+
+    const settled = await Promise.allSettled(tasks.map(([name, fn]) => fn().then(() => name)));
+    const failures = settled
+      .map((result, index) => ({ result, name: tasks[index][0] }))
+      .filter(item => item.result.status === 'rejected')
+      .map(item => ({ name: item.name, error: item.result.reason }));
+
+    if (failures.length === 0) {
+      setStatus('live', 'Dashboard live', 'All panels refreshed successfully.');
+    } else if (failures.length === tasks.length) {
+      setStatus('error', 'Refresh failed', failures.map(f => `${f.name}: ${f.error.message}`).join(' | '));
+      markFailedPanels(failures);
+    } else {
+      setStatus('partial', 'Partial refresh', failures.map(f => `${f.name}: ${f.error.message}`).join(' | '));
+      markFailedPanels(failures);
+    }
+
+    setLastRefresh(new Date());
+  } finally {
+    btn.textContent = 'Refresh';
+    btn.disabled = false;
+    isRefreshing = false;
+  }
 }
 
-document.getElementById('range-select').addEventListener('change', refresh);
+function markFailedPanels(failures) {
+  const failed = new Map(failures.map(f => [f.name, f.error]));
+  if (failed.has('models')) $('models-table').innerHTML = errorRow(9, failed.get('models').message);
+  if (failed.has('keys')) $('keys-table').innerHTML = errorRow(7, failed.get('keys').message);
+  if (failed.has('requests')) $('requests-table').innerHTML = errorRow(11, failed.get('requests').message);
+  if (failed.has('errors')) $('errors-table').innerHTML = errorRow(5, failed.get('errors').message);
+  if (failed.has('timeseries')) {
+    $('timeseries-chart').innerHTML = `<div class="empty error-line">${esc(failed.get('timeseries').message)}</div>`;
+  }
+}
+
+function configureAutoRefresh() {
+  const enabled = $('auto-refresh').checked;
+  if (autoRefreshTimer) {
+    clearInterval(autoRefreshTimer);
+    autoRefreshTimer = null;
+  }
+  if (enabled) {
+    autoRefreshTimer = setInterval(refresh, 30000);
+  }
+}
+
+async function reloadRequestsFromFilter() {
+  try {
+    await loadRequests();
+  } catch (err) {
+    $('requests-table').innerHTML = errorRow(11, err.message);
+    setStatus('partial', 'Requests refresh failed', err.message);
+  }
+}
+
+function debounce(fn, wait) {
+  let timer;
+  return function debounced() {
+    clearTimeout(timer);
+    timer = setTimeout(fn, wait);
+  };
+}
+
+function refreshFromFocus() {
+  if (Date.now() - lastRefreshAt < 10000) return;
+  refresh();
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
-  await loadMetadata();
+  applyMetadata();
+  $('refresh-btn').addEventListener('click', refresh);
+  $('range-select').addEventListener('change', refresh);
+  $('filter-status').addEventListener('change', reloadRequestsFromFilter);
+  $('filter-model').addEventListener('change', reloadRequestsFromFilter);
+  $('filter-endpoint').addEventListener('change', reloadRequestsFromFilter);
+  $('auto-refresh').addEventListener('change', configureAutoRefresh);
+  window.addEventListener('focus', debounce(refreshFromFocus, 2000));
   await refresh();
 });
 </script>

@@ -3,7 +3,7 @@ package webui
 import (
 	"embed"
 	"encoding/json"
-	"fmt"
+	"html"
 	"io/fs"
 	"net/http"
 	"strconv"
@@ -79,6 +79,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
+	setNoStore(w)
 	path := r.URL.Path
 	switch {
 	case strings.HasSuffix(path, "/api/summary"):
@@ -103,17 +104,15 @@ func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	html, err := staticFiles.ReadFile("static/index.html")
+	htmlBytes, err := staticFiles.ReadFile("static/index.html")
 	if err != nil {
 		http.Error(w, "index not found", 500)
 		return
 	}
-	apiBase, _ := json.Marshal(s.basePath + "/api/")
-	injected := strings.Replace(string(html),
-		"const BASE = '/metering/api/';",
-		fmt.Sprintf("const BASE = %s;", apiBase),
-		1)
+	apiBase := html.EscapeString(s.basePath + "/api/")
+	injected := strings.ReplaceAll(string(htmlBytes), "__METERING_API_BASE__", apiBase)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
 	w.Write([]byte(injected))
 }
 
@@ -136,6 +135,12 @@ func parseRange(r *http.Request) (time.Time, string) {
 func writeJSON(w http.ResponseWriter, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
+}
+
+func setNoStore(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
 }
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
