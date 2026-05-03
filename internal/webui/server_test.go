@@ -303,7 +303,7 @@ func TestAPIErrorsSource(t *testing.T) {
 		t.Fatalf("fallback response = %+v, want request_usage_fallback with one row", resp)
 	}
 
-	if err := database.InsertHealthMetric(now.Format(time.RFC3339), 1, 2, 3, 4); err != nil {
+	if err := database.InsertHealthMetric(now.Format(time.RFC3339), 1, 2, 3, 4, 0); err != nil {
 		t.Fatalf("InsertHealthMetric: %v", err)
 	}
 	req = httptest.NewRequest("GET", "/metering/api/errors?range=24h", nil)

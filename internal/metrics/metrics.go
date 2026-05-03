@@ -27,6 +27,7 @@ func AddDroppedEvents(n int64) { atomic.AddInt64(&droppedEvents, n) }
 func AddParseErrors(n int64)   { atomic.AddInt64(&parseErrors, n) }
 func AddDBWriteErrors(n int64) { atomic.AddInt64(&dbWriteErrors, n) }
 func AddSSELineSkips(n int64)  { atomic.AddInt64(&sseLineSkips, n) }
+func SSELineSkips() int64     { return atomic.LoadInt64(&sseLineSkips) }
 func SetMeteringEnabled(enabled bool) {
 	if enabled {
 		atomic.StoreInt64(&meteringEnabled, 1)

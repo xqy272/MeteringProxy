@@ -50,6 +50,7 @@ func New(upstream string, hasher *hash.Hasher, rw RecordWriter, maxSample int64)
 			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 20,
 			IdleConnTimeout:     90 * time.Second,
+			DisableCompression:  true,
 		},
 	}
 }
@@ -119,6 +120,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
+	status := resp.StatusCode
+	if status == 0 {
+		status = http.StatusOK
+	}
+
 	isStream := responseIndicatesStream(resp.Header.Get("Content-Type"), requestSuggestsStream)
 	requestID := requestIDFromHeaders(resp.Header, r.Header)
 
@@ -128,12 +134,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Header().Set("X-Metering-Proxy", "1")
-	w.WriteHeader(resp.StatusCode)
+	w.WriteHeader(status)
 
 	if isStream {
-		p.handleStream(w, r, resp, start, ttfb, prof, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested, cr)
+		p.handleStream(w, r, resp, start, ttfb, prof, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested, cr, status)
 	} else {
-		p.handleNonStream(w, r, resp, start, ttfb, prof, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested, cr)
+		p.handleNonStream(w, r, resp, start, ttfb, prof, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested, cr, status)
 	}
 }
 
@@ -242,7 +248,7 @@ func (r *replayReader) Close() error {
 // ---------- streaming path ----------
 
 func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.Response, start time.Time, ttfb time.Duration,
-	prof *profile.EndpointProfile, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested string, cr *countingReader) {
+	prof *profile.EndpointProfile, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested string, cr *countingReader, status int) {
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -253,7 +259,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 		}
 		captureOutcome := event.OutcomeSkipped
 		captureReason := event.ReasonUsageNotPresent
-		p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, resp.StatusCode, true,
+		p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, true,
 			clientIPHash, apiKeyHash, modelRequested, nil, cr.bytesRead, written, errStr,
 			captureOutcome, captureReason)
 		return
@@ -275,7 +281,12 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 		maxLine = prof.StreamProtocol.MaxLineSize
 	}
 	lineBuf := make([]byte, 0, 4096)
+	lineOverflow := false
 	buf := make([]byte, 32*1024)
+	recordLineSkip := func() {
+		atomic.AddInt64(&p.SSELineSkips, 1)
+		metrics.AddSSELineSkips(1)
+	}
 
 	for {
 		select {
@@ -291,7 +302,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 				captureOutcome = event.OutcomeSkipped
 				captureReason = event.ReasonUsageNotPresent
 			}
-			p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, resp.StatusCode, true,
+			p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, true,
 				clientIPHash, apiKeyHash, modelRequested, lastUsage, cr.bytesRead, totalBytes, errStr,
 				captureOutcome, captureReason)
 			return
@@ -310,7 +321,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 					captureOutcome = event.OutcomeSkipped
 					captureReason = event.ReasonUsageNotPresent
 				}
-				p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, resp.StatusCode, true,
+				p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, true,
 					clientIPHash, apiKeyHash, modelRequested, lastUsage, cr.bytesRead, totalBytes, werr.Error(),
 					captureOutcome, captureReason)
 				return
@@ -321,23 +332,35 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 			for len(chunk) > 0 {
 				nl := bytes.IndexByte(chunk, '\n')
 				if nl < 0 {
-					if len(lineBuf)+len(chunk) <= maxLine {
-						lineBuf = append(lineBuf, chunk...)
+					if !lineOverflow {
+						if len(lineBuf)+len(chunk) <= maxLine {
+							lineBuf = append(lineBuf, chunk...)
+						} else {
+							recordLineSkip()
+							lineOverflow = true
+							lineBuf = lineBuf[:0]
+						}
 					}
 					break
 				}
 				var line []byte
-				if len(lineBuf) > 0 {
-					if len(lineBuf)+nl <= maxLine {
-						line = append(lineBuf, chunk[:nl]...)
-					} else {
-						atomic.AddInt64(&p.SSELineSkips, 1)
-						metrics.AddSSELineSkips(1)
-					}
+				if lineOverflow {
+					lineOverflow = false
 					lineBuf = lineBuf[:0]
 				} else {
-					if nl <= maxLine {
-						line = chunk[:nl]
+					if len(lineBuf) > 0 {
+						if len(lineBuf)+nl <= maxLine {
+							line = append(lineBuf, chunk[:nl]...)
+						} else {
+							recordLineSkip()
+						}
+						lineBuf = lineBuf[:0]
+					} else {
+						if nl <= maxLine {
+							line = chunk[:nl]
+						} else {
+							recordLineSkip()
+						}
 					}
 				}
 				chunk = chunk[nl+1:]
@@ -365,7 +388,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 				captureOutcome = event.OutcomeSkipped
 				captureReason = event.ReasonUsageNotPresent
 			}
-			p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, resp.StatusCode, true,
+			p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, true,
 				clientIPHash, apiKeyHash, modelRequested, lastUsage, cr.bytesRead, totalBytes, errStr,
 				captureOutcome, captureReason)
 			return
@@ -422,7 +445,7 @@ func (lb *limitedBuffer) Bytes() []byte {
 }
 
 func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, resp *http.Response, start time.Time, ttfb time.Duration,
-	prof *profile.EndpointProfile, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested string, cr *countingReader) {
+	prof *profile.EndpointProfile, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested string, cr *countingReader, status int) {
 
 	lb := &limitedBuffer{max: int(p.maxSample)}
 	reader := io.TeeReader(resp.Body, lb)
@@ -460,7 +483,7 @@ func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, resp *ht
 	if copyErr != nil {
 		errStr = copyErr.Error()
 	}
-	p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, resp.StatusCode, false,
+	p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, false,
 		clientIPHash, apiKeyHash, modelRequested, usage, cr.bytesRead, written, errStr,
 		captureOutcome, captureReason)
 }
@@ -543,6 +566,9 @@ func truncateUsageRawJSON(raw string) (string, bool) {
 }
 
 func (p *Proxy) writeError(w http.ResponseWriter, start time.Time, ttfb time.Duration, prof *profile.EndpointProfile, endpoint, method, clientIPHash, apiKeyHash, modelRequested string, requestBytes int64, status int, err error) {
+	if status == 0 {
+		status = http.StatusBadGateway
+	}
 	w.Header().Set("X-Metering-Proxy", "1")
 	http.Error(w, fmt.Sprintf("upstream error: %v", err), status)
 

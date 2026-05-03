@@ -86,6 +86,7 @@ type HealthReport struct {
 	DroppedEvents int64  `json:"dropped_events"`
 	ParseErrors   int64  `json:"parse_errors"`
 	DBErrors      int64  `json:"db_errors"`
+	SSELineSkips  int64  `json:"sse_line_skips"`
 }
 
 type MetadataReport struct {

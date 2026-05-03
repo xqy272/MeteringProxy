@@ -100,12 +100,78 @@ func TimeseriesFromDB(rows []db.TimeseriesRow) []TimeseriesReport {
 	result := make([]TimeseriesReport, len(rows))
 	for i, r := range rows {
 		result[i] = TimeseriesReport{
-			Timestamp:   r.Timestamp,
-			Count:       r.Count,
-			InputTokens: r.InputTokens,
+			Timestamp:    r.Timestamp,
+			Count:        r.Count,
+			InputTokens:  r.InputTokens,
 			OutputTokens: r.OutputTokens,
-			TotalTokens: r.TotalTokens,
+			TotalTokens:  r.TotalTokens,
 		}
 	}
 	return result
+}
+
+// RequestsFromDB converts db.RequestRow slice to domain RequestReport slice.
+func RequestsFromDB(rows []db.RequestRow) []RequestReport {
+	result := make([]RequestReport, len(rows))
+	for i, r := range rows {
+		result[i] = RequestReport{
+			ID:              r.ID,
+			CreatedAt:       r.CreatedAt,
+			RequestID:       r.RequestID,
+			Endpoint:        r.Endpoint,
+			EndpointProfile: r.EndpointProfile,
+			CaptureMode:     r.CaptureMode,
+			MeteringKind:    r.MeteringKind,
+			Method:          r.Method,
+			Status:          r.Status,
+			LatencyMs:       r.LatencyMs,
+			TTFBMs:          r.TTFBMs,
+			Stream:          r.Stream,
+			ClientIPHash:    r.ClientIPHash,
+			APIKeyHash:      r.APIKeyHash,
+			ModelRequested:  r.ModelRequested,
+			ModelReturned:   r.ModelReturned,
+			InputTokens:     r.InputTokens,
+			OutputTokens:    r.OutputTokens,
+			ReasoningTokens: r.ReasoningTokens,
+			CachedTokens:    r.CachedTokens,
+			TotalTokens:     r.TotalTokens,
+			RequestBytes:    r.RequestBytes,
+			ResponseBytes:   r.ResponseBytes,
+			CaptureOutcome:  r.CaptureOutcome,
+			CaptureReason:   r.CaptureReason,
+			Error:           r.Error,
+		}
+	}
+	return result
+}
+
+// ErrorTimelineFromDB converts db.ErrorTimelineRow slice to domain ErrorTimelineReport slice.
+func ErrorTimelineFromDB(rows []db.ErrorTimelineRow) []ErrorTimelineReport {
+	result := make([]ErrorTimelineReport, len(rows))
+	for i, r := range rows {
+		result[i] = ErrorTimelineReport{
+			Timestamp:     r.Timestamp,
+			Count:         r.Count,
+			ParseErrors:   r.ParseErrors,
+			DBErrors:      r.DBErrors,
+			DroppedEvents: r.DroppedEvents,
+		}
+	}
+	return result
+}
+
+// HealthFromDB converts a db.HealthRow to a domain HealthReport.
+func HealthFromDB(row *db.HealthRow) HealthReport {
+	if row == nil {
+		return HealthReport{}
+	}
+	return HealthReport{
+		Timestamp:     row.Timestamp,
+		QueueDepth:    row.QueueDepth,
+		DroppedEvents: row.DroppedEvents,
+		ParseErrors:   row.ParseErrors,
+		DBErrors:      row.DBErrors,
+		SSELineSkips:  row.SSELineSkips,
+	}
 }

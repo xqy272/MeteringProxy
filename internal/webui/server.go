@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"ai-gateway-metering-proxy/internal/db"
 	"ai-gateway-metering-proxy/internal/event"
 	"ai-gateway-metering-proxy/internal/pricing"
 	"ai-gateway-metering-proxy/internal/profile"
@@ -152,8 +151,9 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		cost, _ := s.pricing.Cost(m.Model, m.InputTokens, m.OutputTokens, m.ReasoningTokens, m.CachedTokens)
 		totalCost += cost
 	}
-	row.TotalCost = totalCost
-	writeJSON(w, row)
+	report := event.SummaryFromDB(row)
+	report.TotalCost = totalCost
+	writeJSON(w, report)
 }
 
 func (s *Server) handleTimeseries(w http.ResponseWriter, r *http.Request) {
@@ -171,10 +171,11 @@ func (s *Server) handleTimeseries(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	if rows == nil {
-		rows = []db.TimeseriesRow{}
+	report := event.TimeseriesFromDB(rows)
+	if report == nil {
+		report = []event.TimeseriesReport{}
 	}
-	writeJSON(w, rows)
+	writeJSON(w, report)
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
@@ -184,24 +185,16 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	if rows == nil {
-		rows = []db.ModelRow{}
+	report := event.ModelsFromDB(rows)
+	if report == nil {
+		report = []event.ModelReport{}
 	}
-	type modelWithCost struct {
-		db.ModelRow
-		Cost      float64 `json:"cost"`
-		CostKnown bool    `json:"cost_known"`
+	for i := range report {
+		cost, known := s.pricing.Cost(report[i].Model, report[i].InputTokens, report[i].OutputTokens, report[i].ReasoningTokens, report[i].CachedTokens)
+		report[i].Cost = cost
+		report[i].CostKnown = known
 	}
-	result := make([]modelWithCost, len(rows))
-	for i, row := range rows {
-		cost, known := s.pricing.Cost(row.Model, row.InputTokens, row.OutputTokens, row.ReasoningTokens, row.CachedTokens)
-		result[i] = modelWithCost{
-			ModelRow:  row,
-			Cost:      cost,
-			CostKnown: known,
-		}
-	}
-	writeJSON(w, result)
+	writeJSON(w, report)
 }
 
 func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
@@ -211,10 +204,11 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	if rows == nil {
-		rows = []db.KeyRow{}
+	report := event.KeysFromDB(rows)
+	if report == nil {
+		report = []event.KeyReport{}
 	}
-	writeJSON(w, rows)
+	writeJSON(w, report)
 }
 
 func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {
@@ -243,25 +237,26 @@ func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	if rows == nil {
-		rows = []db.RequestRow{}
+	report := event.RequestsFromDB(rows)
+	if report == nil {
+		report = []event.RequestReport{}
 	}
-	writeJSON(w, rows)
+	writeJSON(w, report)
 }
 
 func (s *Server) handleErrors(w http.ResponseWriter, r *http.Request) {
 	since, _ := parseRange(r)
 
 	type errorResp struct {
-		Timeline      []db.ErrorTimelineRow `json:"timeline"`
-		Source        string                `json:"source"`
-		QueueDepth    int64                 `json:"queue_depth"`
-		ParseErrors   int64                 `json:"parse_errors"`
-		DBErrors      int64                 `json:"db_errors"`
-		DroppedEvents int64                 `json:"dropped_events"`
+		Timeline      []event.ErrorTimelineReport `json:"timeline"`
+		Source        string                      `json:"source"`
+		QueueDepth    int64                       `json:"queue_depth"`
+		ParseErrors   int64                       `json:"parse_errors"`
+		DBErrors      int64                       `json:"db_errors"`
+		DroppedEvents int64                       `json:"dropped_events"`
 	}
 
-	writeErrResp := func(source string, timeline []db.ErrorTimelineRow) {
+	writeErrResp := func(source string, timeline []event.ErrorTimelineReport) {
 		latestHealth, _ := s.db.LatestHealth()
 		resp := errorResp{
 			Timeline: timeline,
@@ -274,7 +269,7 @@ func (s *Server) handleErrors(w http.ResponseWriter, r *http.Request) {
 			resp.DroppedEvents = latestHealth.DroppedEvents
 		}
 		if resp.Timeline == nil {
-			resp.Timeline = []db.ErrorTimelineRow{}
+			resp.Timeline = []event.ErrorTimelineReport{}
 		}
 		writeJSON(w, resp)
 	}
@@ -282,11 +277,11 @@ func (s *Server) handleErrors(w http.ResponseWriter, r *http.Request) {
 	healthRows, err := s.db.ErrorTimeline(since)
 	if err != nil || len(healthRows) == 0 {
 		reqErrorRows, _ := s.db.ErrorTimelineFromRequests(since)
-		writeErrResp("request_usage_fallback", reqErrorRows)
+		writeErrResp("request_usage_fallback", event.ErrorTimelineFromDB(reqErrorRows))
 		return
 	}
 
-	writeErrResp("health_metrics", healthRows)
+	writeErrResp("health_metrics", event.ErrorTimelineFromDB(healthRows))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -298,7 +293,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"dropped_events":   dropped,
 		"parse_errors":     parseErrors,
 		"db_write_errors":  dbErrors,
-		"latest_health":    latestHealth,
+		"latest_health":    event.HealthFromDB(latestHealth),
 		"metering_enabled": meteringEnabled,
 		"capture_disabled": !meteringEnabled,
 	}

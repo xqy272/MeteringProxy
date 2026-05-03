@@ -49,5 +49,5 @@ type ReportStore interface {
 
 // HealthWriter is the write-side interface for health metrics.
 type HealthWriter interface {
-	InsertHealthMetric(ts string, queueDepth int, dropped, parseErrors, dbErrors int64) error
+	InsertHealthMetric(ts string, queueDepth int, dropped, parseErrors, dbErrors, sseLineSkips int64) error
 }

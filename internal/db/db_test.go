@@ -120,7 +120,7 @@ func TestMigrateAddsMissingColumnsToLegacyDB(t *testing.T) {
 		t.Fatalf("InsertBatch after legacy migration: %v", err)
 	}
 
-	if err := d.InsertHealthMetric(ts(0), 1, 2, 3, 4); err != nil {
+	if err := d.InsertHealthMetric(ts(0), 1, 2, 3, 4, 0); err != nil {
 		t.Fatalf("InsertHealthMetric after legacy migration: %v", err)
 	}
 
@@ -399,7 +399,7 @@ func TestTimeseries(t *testing.T) {
 func TestHealthMetrics(t *testing.T) {
 	d := newTestDB(t)
 
-	err := d.InsertHealthMetric(ts(-10*time.Minute), 5, 10, 2, 1)
+	err := d.InsertHealthMetric(ts(-10*time.Minute), 5, 10, 2, 1, 0)
 	if err != nil {
 		t.Fatalf("InsertHealthMetric: %v", err)
 	}

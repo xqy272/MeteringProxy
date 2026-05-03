@@ -27,7 +27,14 @@ if [[ ! -f "$DB_PATH" ]]; then
 fi
 
 # Use SQLite's backup API to get a consistent copy while WAL mode is active.
-sqlite3 "$DB_PATH" ".backup '$TMP_DB'"
+sqlite3 "$DB_PATH" ".backup \"$TMP_DB\""
+
+integrity="$(sqlite3 "$TMP_DB" "PRAGMA integrity_check")"
+if [[ "$integrity" != "ok" ]]; then
+    echo "Backup integrity check failed: $integrity" >&2
+    exit 1
+fi
+
 gzip -c "$TMP_DB" > "$TMP_GZ"
 mv -f "$TMP_GZ" "$BACKUP_FILE"
 

@@ -114,11 +114,12 @@ type RequestRow struct {
 }
 
 type HealthRow struct {
-	Timestamp     string `json:"timestamp"`
-	QueueDepth    int64  `json:"queue_depth"`
-	DroppedEvents int64  `json:"dropped_events"`
-	ParseErrors   int64  `json:"parse_errors"`
-	DBErrors      int64  `json:"db_errors"`
+	Timestamp      string `json:"timestamp"`
+	QueueDepth     int64  `json:"queue_depth"`
+	DroppedEvents  int64  `json:"dropped_events"`
+	ParseErrors    int64  `json:"parse_errors"`
+	DBErrors       int64  `json:"db_errors"`
+	SSELineSkips   int64  `json:"sse_line_skips"`
 }
 
 type ErrorTimelineRow struct {
@@ -132,6 +133,7 @@ type ErrorTimelineRow struct {
 type DB struct {
 	sql  *sql.DB
 	read *sql.DB
+	path string
 }
 
 const schemaVersion = 4
@@ -196,7 +198,7 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("configure read db: %w", err)
 	}
 
-	return &DB{sql: sqlDB, read: readDB}, nil
+	return &DB{sql: sqlDB, read: readDB, path: path}, nil
 }
 
 func migrate(sqlDB *sql.DB) error {
@@ -235,15 +237,28 @@ func migrate(sqlDB *sql.DB) error {
 			queue_depth INTEGER DEFAULT 0,
 			dropped_events_total INTEGER DEFAULT 0,
 			parse_error_total INTEGER DEFAULT 0,
-			db_write_error_total INTEGER DEFAULT 0
+			db_write_error_total INTEGER DEFAULT 0,
+			sse_line_skips_total INTEGER DEFAULT 0
 		);
 
 		CREATE TABLE IF NOT EXISTS schema_migrations (
 			version INTEGER PRIMARY KEY,
+			name TEXT NOT NULL DEFAULT '',
+			applied_at TEXT NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS schema_tasks (
+			name TEXT PRIMARY KEY,
 			applied_at TEXT NOT NULL
 		);
 		`
 	if _, err := sqlDB.Exec(schema); err != nil {
+		return err
+	}
+	// Ensure name column exists on legacy schema_migrations tables.
+	if err := ensureColumns(sqlDB, "schema_migrations", []columnSpec{
+		{"name", "name TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
 		return err
 	}
 	if err := ensureColumns(sqlDB, "request_usage", requestUsageColumns()); err != nil {
@@ -255,13 +270,13 @@ func migrate(sqlDB *sql.DB) error {
 	if err := createIndexes(sqlDB); err != nil {
 		return err
 	}
-	if err := runBackfills(sqlDB); err != nil {
+	if err := runSchemaTask(sqlDB, "backfill_v4_normalization", backfillV4Normalization); err != nil {
 		return err
 	}
 	if _, err := sqlDB.Exec(`
-			INSERT OR IGNORE INTO schema_migrations (version, applied_at)
-			VALUES (?, ?)
-		`, schemaVersion, time.Now().UTC().Format(time.RFC3339)); err != nil {
+			INSERT OR IGNORE INTO schema_migrations (version, name, applied_at)
+			VALUES (?, ?, ?)
+		`, schemaVersion, "v4_baseline", time.Now().UTC().Format(time.RFC3339)); err != nil {
 		return err
 	}
 	_, err := sqlDB.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion))
@@ -336,6 +351,7 @@ func healthMetricColumns() []columnSpec {
 		{"dropped_events_total", "dropped_events_total INTEGER DEFAULT 0"},
 		{"parse_error_total", "parse_error_total INTEGER DEFAULT 0"},
 		{"db_write_error_total", "db_write_error_total INTEGER DEFAULT 0"},
+		{"sse_line_skips_total", "sse_line_skips_total INTEGER DEFAULT 0"},
 	}
 }
 
@@ -372,7 +388,38 @@ func ensureColumns(sqlDB *sql.DB, table string, cols []columnSpec) error {
 	return nil
 }
 
-func runBackfills(sqlDB *sql.DB) error {
+func runSchemaTask(sqlDB *sql.DB, name string, fn func(*sql.Tx) error) error {
+	tx, err := sqlDB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var existing string
+	err = tx.QueryRow(
+		"SELECT name FROM schema_tasks WHERE name = ?",
+		name,
+	).Scan(&existing)
+	if err == nil {
+		return nil
+	}
+	if err != sql.ErrNoRows {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		"INSERT INTO schema_tasks (name, applied_at) VALUES (?, ?)",
+		name,
+		time.Now().UTC().Format(time.RFC3339),
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func backfillV4Normalization(tx *sql.Tx) error {
 	statements := []string{
 		`UPDATE request_usage SET created_at_unix = COALESCE(CAST(strftime('%s', created_at) AS INTEGER), 0) WHERE created_at_unix IS NULL OR created_at_unix <= 0`,
 		`UPDATE health_metrics SET timestamp_unix = COALESCE(CAST(strftime('%s', timestamp) AS INTEGER), 0) WHERE timestamp_unix IS NULL OR timestamp_unix <= 0`,
@@ -393,6 +440,7 @@ func runBackfills(sqlDB *sql.DB) error {
 		`UPDATE health_metrics SET dropped_events_total = COALESCE(dropped_events_total, 0) WHERE dropped_events_total IS NULL`,
 		`UPDATE health_metrics SET parse_error_total = COALESCE(parse_error_total, 0) WHERE parse_error_total IS NULL`,
 		`UPDATE health_metrics SET db_write_error_total = COALESCE(db_write_error_total, 0) WHERE db_write_error_total IS NULL`,
+		`UPDATE health_metrics SET sse_line_skips_total = COALESCE(sse_line_skips_total, 0) WHERE sse_line_skips_total IS NULL`,
 		// W3: Normalize new columns
 		`UPDATE request_usage SET endpoint_profile = COALESCE(endpoint_profile, '') WHERE endpoint_profile IS NULL`,
 		`UPDATE request_usage SET capture_mode = COALESCE(capture_mode, '') WHERE capture_mode IS NULL`,
@@ -407,7 +455,7 @@ func runBackfills(sqlDB *sql.DB) error {
 		`UPDATE request_usage SET capture_reason = COALESCE(capture_reason, '') WHERE capture_reason IS NULL`,
 	}
 	for _, stmt := range statements {
-		if _, err := sqlDB.Exec(stmt); err != nil {
+		if _, err := tx.Exec(stmt); err != nil {
 			return err
 		}
 	}
@@ -425,6 +473,32 @@ func (db *DB) Close() error {
 		}
 	}
 	return err
+}
+
+// Path returns the database file path.
+func (db *DB) Path() string { return db.path }
+
+// WALCheckpointResult holds results from a WAL checkpoint PRAGMA.
+type WALCheckpointResult struct {
+	Busy         int
+	LogFrames    int
+	Checkpointed int
+}
+
+// CheckpointWAL runs a WAL checkpoint with the given mode (PASSIVE or TRUNCATE).
+func (db *DB) CheckpointWAL(mode string) (WALCheckpointResult, error) {
+	pragma := "PRAGMA wal_checkpoint(PASSIVE)"
+	switch mode {
+	case "", "PASSIVE":
+		pragma = "PRAGMA wal_checkpoint(PASSIVE)"
+	case "TRUNCATE":
+		pragma = "PRAGMA wal_checkpoint(TRUNCATE)"
+	default:
+		return WALCheckpointResult{}, fmt.Errorf("unsupported wal checkpoint mode: %s", mode)
+	}
+	var r WALCheckpointResult
+	err := db.sql.QueryRow(pragma).Scan(&r.Busy, &r.LogFrames, &r.Checkpointed)
+	return r, err
 }
 
 func (db *DB) InsertBatch(records []UsageRecord) error {
@@ -484,11 +558,11 @@ func (db *DB) InsertBatch(records []UsageRecord) error {
 	return tx.Commit()
 }
 
-func (db *DB) InsertHealthMetric(ts string, queueDepth int, dropped, parseErrors, dbErrors int64) error {
+func (db *DB) InsertHealthMetric(ts string, queueDepth int, dropped, parseErrors, dbErrors, sseLineSkips int64) error {
 	_, err := db.sql.Exec(`
-		INSERT INTO health_metrics (timestamp, timestamp_unix, queue_depth, dropped_events_total, parse_error_total, db_write_error_total)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, ts, unixFromTimestamp(ts), queueDepth, dropped, parseErrors, dbErrors)
+		INSERT INTO health_metrics (timestamp, timestamp_unix, queue_depth, dropped_events_total, parse_error_total, db_write_error_total, sse_line_skips_total)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, ts, unixFromTimestamp(ts), queueDepth, dropped, parseErrors, dbErrors, sseLineSkips)
 	return err
 }
 
@@ -692,9 +766,10 @@ func (db *DB) LatestHealth() (*HealthRow, error) {
 			COALESCE(queue_depth, 0),
 			COALESCE(dropped_events_total, 0),
 			COALESCE(parse_error_total, 0),
-			COALESCE(db_write_error_total, 0)
+			COALESCE(db_write_error_total, 0),
+			COALESCE(sse_line_skips_total, 0)
 		FROM health_metrics ORDER BY id DESC LIMIT 1
-	`).Scan(&row.Timestamp, &row.QueueDepth, &row.DroppedEvents, &row.ParseErrors, &row.DBErrors)
+	`).Scan(&row.Timestamp, &row.QueueDepth, &row.DroppedEvents, &row.ParseErrors, &row.DBErrors, &row.SSELineSkips)
 	if err == sql.ErrNoRows {
 		return row, nil
 	}

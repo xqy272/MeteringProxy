@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"io"
 	"net/http"
@@ -223,6 +224,43 @@ func TestProxyNonStreaming_SmallResponse(t *testing.T) {
 	}
 }
 
+func TestProxyPreservesGzipResponseAndDoesNotInjectAcceptEncoding(t *testing.T) {
+	var compressed bytes.Buffer
+	gz := gzip.NewWriter(&compressed)
+	if _, err := gz.Write([]byte(`{"ok":true}`)); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+
+	var upstreamAcceptEncoding string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamAcceptEncoding = r.Header.Get("Accept-Encoding")
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Write(compressed.Bytes())
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if upstreamAcceptEncoding != "" {
+		t.Fatalf("proxy injected Accept-Encoding = %q, want empty", upstreamAcceptEncoding)
+	}
+	if rec.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip", rec.Header().Get("Content-Encoding"))
+	}
+	if !bytes.Equal(rec.Body.Bytes(), compressed.Bytes()) {
+		t.Fatal("gzip response bytes were modified")
+	}
+}
+
 func TestProxyRecordsTTFBSeparatelyFromTotalLatency(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(20 * time.Millisecond)
@@ -413,6 +451,45 @@ func TestProxyStreaming_LongLineDoesNotBlockForwarding(t *testing.T) {
 	}
 	if len(rw.events) == 0 || lastEvent(rw).InputTokens != 5 {
 		t.Error("usage extraction should still work for subsequent normal-sized line")
+	}
+	if p.SSELineSkips != 1 {
+		t.Errorf("SSELineSkips = %d, want 1 for oversized line", p.SSELineSkips)
+	}
+}
+
+func TestProxyStreaming_LongLineAcrossChunksCountsOneSkip(t *testing.T) {
+	first := "data: " + strings.Repeat("x", 200*1024)
+	second := strings.Repeat("y", 120*1024) + "\n"
+	usage := "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3,\"total_tokens\":8}}\n"
+	done := "data: [DONE]\n"
+	stream := first + second + usage + done
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		for _, chunk := range []string{first, second, usage, done} {
+			w.Write([]byte(chunk))
+			flusher.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"stream":true}`))
+	req.Header.Set("Accept", "text/event-stream")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Body.String() != stream {
+		t.Error("stream response body modified")
+	}
+	if p.SSELineSkips != 1 {
+		t.Errorf("SSELineSkips = %d, want 1 for one oversized fragmented line", p.SSELineSkips)
+	}
+	if len(rw.events) == 0 || lastEvent(rw).InputTokens != 5 || lastEvent(rw).OutputTokens != 3 {
+		t.Error("usage extraction should continue after oversized fragmented line")
 	}
 }
 

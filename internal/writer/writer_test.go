@@ -176,3 +176,42 @@ func TestFlushCountsDBErrorAfterRetryFailure(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func TestConcurrentEnqueue(t *testing.T) {
+	fake := &fakeInserter{}
+	bw := &BatchWriter{
+		queue:       make(chan StatsEvent, 100),
+		db:          fake,
+		batchSize:   50,
+		flushTicker: time.NewTicker(time.Hour),
+		stopCh:      make(chan struct{}),
+	}
+	bw.Start()
+
+	const goroutines = 10
+	const perRoutine = 10
+	var wg sync.WaitGroup
+	successCount := int64(0)
+
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perRoutine; i++ {
+				if bw.Enqueue(evWithTime("")) {
+					atomic.AddInt64(&successCount, 1)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	bw.Stop()
+
+	_, inserted := fake.snapshot()
+	if int64(inserted) != atomic.LoadInt64(&successCount) {
+		t.Fatalf("inserted = %d, want %d", inserted, successCount)
+	}
+	if qd, _, _, _ := bw.Snapshot(); qd != 0 {
+		t.Fatalf("QueueDepth = %d, want 0 after Stop", qd)
+	}
+}

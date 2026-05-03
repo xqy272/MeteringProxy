@@ -22,6 +22,8 @@ import (
 	"ai-gateway-metering-proxy/internal/writer"
 )
 
+const walSizeThreshold = 128 * 1024 * 1024 // 128 MiB
+
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to config file")
 	flag.Parse()
@@ -63,17 +65,49 @@ func main() {
 	batchWriter.Start()
 	defer batchWriter.Stop()
 
-	// Health metrics reporter (every 60s).
+	// Wire store interface boundaries.
+	var reportStore store.ReportStore = database
+	var healthWriter store.HealthWriter = database
+
+	// Health metrics reporter (every 60s) with WAL checkpoint scheduling.
 	stopHealth := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
+		lastCheckpoint := time.Now()
 		for {
 			select {
 			case <-ticker.C:
 				qd, dropped, parseErrors, dbErrors := batchWriter.Snapshot()
-				if err := database.InsertHealthMetric(time.Now().UTC().Format(time.RFC3339), int(qd), dropped, parseErrors, dbErrors); err != nil {
+				sseSkips := metrics.SSELineSkips()
+				if err := healthWriter.InsertHealthMetric(time.Now().UTC().Format(time.RFC3339), int(qd), dropped, parseErrors, dbErrors, sseSkips); err != nil {
 					log.Printf("health metric insert error: %v", err)
+				}
+
+				// Hourly PASSIVE WAL checkpoint.
+				if time.Since(lastCheckpoint) >= time.Hour {
+					result, err := database.CheckpointWAL("PASSIVE")
+					if err != nil {
+						log.Printf("wal checkpoint error: %v", err)
+					} else {
+						log.Printf("wal checkpoint: busy=%d log=%d checkpointed=%d",
+							result.Busy, result.LogFrames, result.Checkpointed)
+					}
+					lastCheckpoint = time.Now()
+
+					// If WAL file exceeds threshold, attempt TRUNCATE.
+					walPath := database.Path() + "-wal"
+					if info, statErr := os.Stat(walPath); statErr == nil {
+						if info.Size() > walSizeThreshold {
+							truncResult, truncErr := database.CheckpointWAL("TRUNCATE")
+							if truncErr != nil {
+								log.Printf("wal truncate checkpoint error: %v", truncErr)
+							} else if truncResult.Busy == 0 {
+								log.Printf("wal truncate checkpoint: busy=%d log=%d checkpointed=%d",
+									truncResult.Busy, truncResult.LogFrames, truncResult.Checkpointed)
+							}
+						}
+					}
 				}
 			case <-stopHealth:
 				return
@@ -93,7 +127,7 @@ func main() {
 	mux.Handle("/metrics", metrics.Handler())
 
 	if cfg.WebUI.Enabled {
-		webuiServer := webui.New(database, pricingData, batchWriter, proxyHandler.Registry(), cfg.WebUI.BasePath)
+		webuiServer := webui.New(reportStore, pricingData, batchWriter, proxyHandler.Registry(), cfg.WebUI.BasePath)
 		webuiServer.SetMeteringEnabledFunc(func() bool { return cfg.MeteringEnabled })
 		mux.Handle(cfg.WebUI.BasePath, webuiServer)
 		mux.Handle(cfg.WebUI.BasePath+"/", webuiServer)
