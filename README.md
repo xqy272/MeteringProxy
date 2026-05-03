@@ -52,7 +52,7 @@ chown -R 1000:1000 /opt/ai-gateway/metering   # 与容器内 appuser 的 uid:gid
 chmod 700 /opt/ai-gateway/metering
 ```
 
-### 3. 生成盐值（只需一次）
+### 4. 生成盐值（只需一次）
 
 ```bash
 python3 -c "import secrets; print(secrets.token_hex(32))" > /opt/ai-gateway/metering/salt
@@ -62,7 +62,7 @@ chmod 600 /opt/ai-gateway/metering/salt
 
 盐值只生成一次。不要在升级或回滚时重新生成、编辑或覆盖该文件；它必须随 SQLite 数据库一起备份。
 
-### 4. 创建配置文件
+### 5. 创建配置文件
 
 在 `/opt/ai-gateway/metering/` 下创建两个文件：
 
@@ -128,7 +128,7 @@ pricing:
     output_per_1m: 0.87
 ```
 
-### 5. 拉取并启动容器
+### 6. 拉取并启动容器
 
 ```bash
 docker pull ghcr.io/xqy272/ai-gateway-metering-proxy:v0.1.0
@@ -143,23 +143,73 @@ docker run -d \
   -config /data/config.yaml
 ```
 
-### 6. 配置 Caddy
+### 7. 配置 Caddy
 
-将 MeteringProxy 接入 Caddy 反向代理链路：
+将 MeteringProxy 接入 Caddy 反向代理链路。生产配置应将 WebUI API 与 WebUI 页面分开处理：`/metering/api/*` 必须不可缓存，`/metering` 必须由外层反向代理保护。
 
 ```caddyfile
-@metered {
-    method POST
-    path /v1/chat/completions /v1/responses
-}
+api.example.com {
+    encode zstd gzip
 
-reverse_proxy @metered 127.0.0.1:8320
-reverse_proxy 127.0.0.1:8317
+    request_body {
+        max_size 20MB
+    }
+
+    @metering_api path /metering/api /metering/api/*
+    handle @metering_api {
+        basic_auth {
+            user <bcrypt-hash>
+        }
+        header Cache-Control "no-store, no-cache, must-revalidate"
+        header Pragma "no-cache"
+        header Expires "0"
+        reverse_proxy 127.0.0.1:8320
+    }
+
+    @metering_ui path /metering /metering/*
+    handle @metering_ui {
+        basic_auth {
+            user <bcrypt-hash>
+        }
+        header Cache-Control "no-cache"
+        reverse_proxy 127.0.0.1:8320
+    }
+
+    @metered {
+        method POST
+        path /v1/chat/completions /v1/responses
+    }
+    handle @metered {
+        reverse_proxy 127.0.0.1:8320 {
+            stream_close_delay 5m
+            transport http {
+                dial_timeout 5s
+                response_header_timeout 180s
+                read_timeout 0
+                write_timeout 0
+            }
+        }
+    }
+
+    handle {
+        reverse_proxy 127.0.0.1:8317 {
+            stream_close_delay 5m
+            transport http {
+                dial_timeout 5s
+                response_header_timeout 180s
+                read_timeout 0
+                write_timeout 0
+            }
+        }
+    }
+}
 ```
 
 关键点：
 - 仅将计量目标 API 路径路由至 MeteringProxy（`:8320`），其余请求直通 CLIProxyAPI（`:8317`）。
 - 为 `/metering` 路径配置 Basic Auth 或等效访问控制，防止仪表盘数据暴露。
+- `/metering/api/*` 不应被浏览器、CDN 或反向代理缓存。MeteringProxy 后端也会为 WebUI API 返回 `Cache-Control: no-store, no-cache, must-revalidate`，Caddy 侧仍建议显式配置。
+- `@metering_api` 必须位于更宽泛的 `/metering/*` 规则之前，否则 API 可能被错误地当作静态 UI 路径处理。
 
 重载 Caddy 使其生效：
 
@@ -169,7 +219,7 @@ caddy reload --config /path/to/Caddyfile
 docker exec caddy caddy reload --config /etc/caddy/Caddyfile
 ```
 
-### 7. 验证
+### 8. 验证
 
 ```bash
 # 检查容器状态
@@ -185,7 +235,7 @@ curl -s http://127.0.0.1:8320/metering/api/health
 curl -s http://127.0.0.1:8320/metering/api/summary?range=24h
 ```
 
-### 8. 升级
+### 9. 升级
 
 ```bash
 docker pull ghcr.io/xqy272/ai-gateway-metering-proxy:v0.2.0
@@ -211,66 +261,6 @@ docker run -d \
 | `v0.1.0` | 固定版本，生产推荐使用 |
 | `edge` | 追踪 main 分支最新提交，适合测试 |
 | `latest` | 指向最新发布版本 |
-
----
-
-## 部署（备选：裸机 + systemd）
-
-如果不使用 Docker，也可以直接在 Linux 上运行二进制文件。
-
-### 1. 构建 Linux 二进制（或从 Release 下载）
-
-```bash
-wget https://github.com/xqy272/ai-gateway-metering-proxy/releases/download/v0.1.0/ai-gateway-metering-proxy
-chmod +x ai-gateway-metering-proxy
-sudo cp ai-gateway-metering-proxy /usr/local/bin/
-```
-
-### 2. 准备环境
-
-```bash
-install -d -m 700 -o www-data -g www-data /opt/ai-gateway/metering
-python3 -c "import secrets; print(secrets.token_hex(32))" > /opt/ai-gateway/metering/salt
-chown www-data:www-data /opt/ai-gateway/metering/salt
-chmod 600 /opt/ai-gateway/metering/salt
-```
-
-### 3. 放置配置文件
-
-将 `config.yaml` 和 `pricing.yaml` 放入 `/opt/ai-gateway/metering/`，此时路径应使用实际系统路径：
-
-```yaml
-listen: "127.0.0.1:8320"
-upstream: "http://127.0.0.1:8317"
-database: "/opt/ai-gateway/metering/usage.sqlite"
-salt_file: "/opt/ai-gateway/metering/salt"
-# ...其余配置同上
-```
-
-### 4. 安装 systemd 服务
-
-```bash
-sudo cp systemd/ai-gateway-metering-proxy.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now ai-gateway-metering-proxy
-sudo systemctl status ai-gateway-metering-proxy
-```
-
-systemd 单元示例见 [systemd/ai-gateway-metering-proxy.service](systemd/ai-gateway-metering-proxy.service)。
-
-### 5. 配置 Caddy
-
-```caddyfile
-@metered {
-    method POST
-    path /v1/chat/completions /v1/responses
-}
-
-reverse_proxy @metered 127.0.0.1:8320
-reverse_proxy 127.0.0.1:8317
-```
-
----
 
 ## 记录的字段
 
@@ -346,6 +336,18 @@ https://<域名>/metering
 
 健康状态计数器为进程生命期计数器。容器/服务重启后，`parse_errors`、`db_write_errors` 和 `dropped_events` 从零重新开始计数。
 
+WebUI 是只读运维面板，不修改配置、价格表或数据库写入路径。页面会显示请求总览、模型成本占比、API Key 维度、最近请求、capture outcome/reason、TTFB、总延迟、队列深度、丢弃事件、解析错误和数据库写入错误。
+
+浏览器请求 WebUI API 时会使用 `cache: no-store`。后端也会为 `/metering/api/*` 设置不可缓存响应头，避免普通浏览器窗口复用旧的统计结果。若页面顶部显示 `Partial` 或 `Error`，说明至少一个 WebUI API 请求失败；其它成功的面板仍会继续展示。常见排查命令：
+
+```bash
+curl -u 'user:password' -i 'https://<域名>/metering/api/summary?range=24h'
+curl -u 'user:password' -i 'https://<域名>/metering/api/models?range=24h'
+curl -u 'user:password' -i 'https://<域名>/metering/api/health'
+```
+
+如果服务器本机 `127.0.0.1:8320` 查询正常，但浏览器页面无数据，优先检查反向代理是否缓存了 `/metering/api/*`、是否对 API 返回了 `401/403/404/302`，以及 Basic Auth 凭据是否被浏览器带到 API 请求上。
+
 ## 定价逻辑
 
 价格表仅为估算，不具备计费效力。匹配链路为：
@@ -381,10 +383,6 @@ pricing:
 
 ## 备份
 
-`scripts/backup.sh` 使用 SQLite 备份 API 对运行中的 WAL 数据库进行在线备份，先执行 `PRAGMA integrity_check`，确认结果为 `ok` 后再写入压缩文件。
-
-该脚本面向宿主机或裸机 systemd 环境运行，要求 `bash` 和支持 `-printf` 的 GNU `find`。Docker 运行镜像不复制该脚本，也不安装 bash；Docker 部署请使用下面的 `docker exec sqlite3` 备份命令，或在宿主机上对挂载目录运行脚本。
-
 **Docker 环境中运行备份：**
 
 ```bash
@@ -395,39 +393,13 @@ docker cp metering-proxy:/tmp/backup.sqlite "$backup_file"
 gzip "$backup_file"
 ```
 
-**裸机环境使用 backup.sh：**
-
-默认值：
-
-- 数据库：`/opt/ai-gateway/metering/usage.sqlite`
-- 备份目录：`/opt/ai-gateway/metering/backups`
-- 每日备份保留：90 天
-- 每月备份保留：12 份
-
-环境变量覆盖：
-
-```bash
-DB_PATH=/opt/ai-gateway/metering/usage.sqlite \
-BACKUP_DIR=/opt/ai-gateway/metering/backups \
-RETENTION_DAYS=90 \
-MONTHLY_KEEP=12 \
-/path/to/scripts/backup.sh
-```
-
-通过 cron 或 systemd timer 安装。确保备份用户有权读取数据库并可写入备份目录。
-
 ## 运维
 
 常用检查命令：
 
 ```bash
-# Docker 部署
 docker logs metering-proxy
 docker exec metering-proxy wget -qO- http://127.0.0.1:8320/metering/api/health
-
-# 裸机部署
-journalctl -u ai-gateway-metering-proxy -f
-curl -s http://127.0.0.1:8320/metering/api/health
 
 # 检查数据库文件
 ls -lh /opt/ai-gateway/metering/usage.sqlite*
@@ -472,14 +444,6 @@ chmod 600 /opt/ai-gateway/metering/usage.sqlite
 # 然后用上一个镜像 tag 重新 docker run
 ```
 
-裸机部署回滚：在 Caddy 中将计量接口路径直接路由回 CLIProxyAPI：
-
-```text
-127.0.0.1:8320 -> 127.0.0.1:8317
-```
-
-重载 Caddy 即可。现有 SQLite 数据可保留以供后续检查或迁移。
-
 ## 附录 A：裸机 CLIProxyAPI
 
 如果你的 CLIProxyAPI 不在 Docker 中而是直接跑在宿主机上，需要改用 `--add-host` 方式让容器能访问宿主机的 8317 端口：
@@ -512,11 +476,12 @@ docker run -d \
 - [ ] Docker 容器正常运行且配置了 `--restart unless-stopped`
 - [ ] `go test ./...`、`go test -race ./...` 和 `go vet ./...` 通过
 - [ ] Docker 镜像可构建：`docker build -t metering-proxy:local .`
-- [ ] 盐值文件存在，owner 为服务用户，权限 `0600`，已备份
-- [ ] 运行时目录权限正确（宿主机 `0700`）
+- [ ] 盐值文件存在，owner 为 `1000:1000`，权限 `0600`，已备份
+- [ ] 宿主机运行时目录权限 `0700`、owner `1000:1000`
 - [ ] `config.yaml` 容器内路径均使用 `/data/` 前缀
 - [ ] `pricing.yaml` 与实际服务商定价一致，并确认修改后会重启服务
 - [ ] Caddy 已保护 `/metering` 路径
+- [ ] Caddy 已确认 `/metering/api/*` 返回 `Cache-Control: no-store, no-cache, must-revalidate`
 - [ ] 如环境需要，Caddy 请求体限制已配置
 - [ ] Caddy 仅将目标 API 路径路由至 MeteringProxy
 - [ ] 部署流程为 stop-then-start，不并发运行两个实例写同一个 SQLite 文件
@@ -564,9 +529,6 @@ go build -o ai-gateway-metering-proxy.exe .
 
 # 本地构建 Docker 镜像
 docker build -t ai-gateway-metering-proxy .
-
-# Linux 裸机构建（需要 CGO 可用）
-go build -o ai-gateway-metering-proxy .
 ```
 
 ## 数据兼容性
