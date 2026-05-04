@@ -1,6 +1,6 @@
 # MeteringProxy
 
-MeteringProxy 是一个面向 AI 网关流量的透明计量代理，部署在 Caddy 与 [CLIProxyAPI](https://github.com/xqy272/CLIProxyAPI) 之间。它在不修改请求或响应字节的前提下转发 LLM API 调用，同时将用量统计异步写入 SQLite，通过只读 WebUI 提供实时可见性。
+MeteringProxy 是一个面向 AI 网关流量的透明计量代理，部署在 Caddy 与 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 之间。它在不修改请求或响应字节的前提下转发 LLM API 调用，同时将用量统计异步写入 SQLite，通过只读 WebUI 提供实时可见性。
 
 ## 为什么选择 MeteringProxy
 
