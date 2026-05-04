@@ -1,6 +1,7 @@
 package hash
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,6 +10,18 @@ import (
 	"os"
 	"runtime"
 )
+
+// algorithm is a code-level lock on the hashing scheme. It is NOT embedded in
+// hash output — that would constitute a second breaking change. It exists to
+// make future maintainers pause before altering the algorithm, salt handling,
+// or output format.
+//
+// The 2026-05 switch from SHA256(salt+value) to HMAC-SHA256(salt, value) was
+// a one-time migration that broke historical API-key and client-IP groupings.
+// Future changes REQUIRE a dual-read/write migration path in the database
+// layer. The salt file, the HMAC-SHA256 algorithm, and the 64-char hex output
+// format are locked.
+const algorithm = "hmac-sha256-v1"
 
 type Hasher struct {
 	salt string
@@ -45,16 +58,18 @@ func (h *Hasher) Hash(value string) string {
 	if value == "" {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(h.salt + value))
-	return hex.EncodeToString(sum[:])
+	mac := hmac.New(sha256.New, []byte(h.salt))
+	_, _ = mac.Write([]byte(value))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func (h *Hasher) HashBytes(data []byte) string {
 	if len(data) == 0 {
 		return ""
 	}
-	sum := sha256.Sum256(append([]byte(h.salt), data...))
-	return hex.EncodeToString(sum[:])
+	mac := hmac.New(sha256.New, []byte(h.salt))
+	_, _ = mac.Write(data)
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func GenerateSalt() string {

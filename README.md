@@ -303,7 +303,7 @@ chmod 600 /opt/ai-gateway/metering/usage.sqlite
 - 时间戳、接口路径、请求方法、状态码
 - 请求总耗时及上游首字节延迟（`latency_ms`、`ttfb_ms`）
 - 流式/非流式标志
-- API Key 和客户端 IP 的 SHA256 加盐哈希
+- API Key 和客户端 IP 的 HMAC-SHA256 加盐哈希
 - 请求模型与返回模型名称
 - 输入、输出、缓存、推理及总 token 数量
 - 请求/响应字节数

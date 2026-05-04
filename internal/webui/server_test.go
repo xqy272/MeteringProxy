@@ -609,8 +609,8 @@ func TestAPIErrorsSource(t *testing.T) {
 	if resp.Source != "health_metrics+request_usage" || len(resp.Timeline) != 2 {
 		t.Fatalf("health response = %+v, want combined health and request rows", resp)
 	}
-	if resp.BucketCount != 2 || resp.NonzeroBucketCount != 2 {
-		t.Fatalf("health bucket counts = %+v, want 2/2", resp)
+	if resp.BucketCount != 2 || resp.NonzeroBucketCount != 1 {
+		t.Fatalf("health bucket counts = %+v, want 2/1 (no baseline)", resp)
 	}
 
 	if err := database.InsertHealthMetric(now.Add(time.Minute).Format(time.RFC3339), 1, 2, 3, 4, 0); err != nil {
@@ -622,8 +622,8 @@ func TestAPIErrorsSource(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal nonzero errors: %v", err)
 	}
-	if len(resp.Timeline) != 2 || resp.BucketCount != 3 || resp.NonzeroBucketCount != 2 {
-		t.Fatalf("nonzero health response = %+v, want request error plus one nonzero health bucket", resp)
+	if len(resp.Timeline) != 1 || resp.BucketCount != 3 || resp.NonzeroBucketCount != 1 {
+		t.Fatalf("nonzero health response = %+v, want request error only (health delta=0, no baseline)", resp)
 	}
 }
 

@@ -3,6 +3,7 @@ package extractor
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestClassifyError(t *testing.T) {
@@ -20,6 +21,8 @@ func TestClassifyError(t *testing.T) {
 		{"rate 429", 429, "rate_limit", "", "", "rate_limited"},
 		{"rate 429 default", 429, "", "", "", "rate_limited"},
 		{"context_length 400", 400, "", "", "context_length_exceeded", "context_length"},
+		{"context word only 400", 400, "", "", "Invalid context provided", "invalid_request"},
+		{"context window 400", 400, "", "", "This model's context window was exceeded", "context_length"},
 		{"invalid_request 400", 400, "", "invalid_api_key", "", "invalid_request"},
 		{"upstream 500", 500, "", "", "", "upstream_5xx"},
 		{"upstream 502", 502, "", "", "", "upstream_5xx"},
@@ -217,10 +220,5 @@ func TestSanitizeMessage_EmptyString(t *testing.T) {
 }
 
 func isValidUTF8(s string) bool {
-	for _, r := range s {
-		if r == 0xFFFD {
-			return false
-		}
-	}
-	return true
+	return utf8.ValidString(s)
 }

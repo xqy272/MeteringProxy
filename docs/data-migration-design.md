@@ -306,7 +306,7 @@ SELECT SUM(total_tokens) FROM request_usage; -- 聚合值比对（抽样）
 
 ### 4.1 问题定义
 
-`api_key_hash = SHA256(plaintext_key + salt)` 和 `client_ip_hash = SHA256(plaintext_ip + salt)` 是单向函数。当盐值变更时，同一把 Key 或同一个 IP 会产生不同的哈希值，导致 `GROUP BY` 聚合将新旧记录计为两个不同来源。
+`api_key_hash = HMAC-SHA256(salt, plaintext_key)` 和 `client_ip_hash = HMAC-SHA256(salt, plaintext_ip)` 是单向函数。当盐值变更时，同一把 Key 或同一个 IP 会产生不同的哈希值，导致 `GROUP BY` 聚合将新旧记录计为两个不同来源。
 
 ### 4.2 盐值不变时的策略
 
@@ -378,7 +378,7 @@ WHERE api_key_hash = ? AND api_key_hash_v2 = '';
 |----------|:----:|------|
 | 盐文件泄露 | 低 | 备份文件、日志、配置文件意外暴露；泄露的后果是对低熵 IP 的字典反推成为可能，而非直接暴露 Key |
 | 合规要求定期轮换密钥材料 | 看行业 | 一般面向金融/医疗行业，AI 网关计量数据通常不在此范围 |
-| 从 SHA256 升级到 bcrypt/Argon2 | 极低 | 分组聚合不需要密码哈希的抗暴力破解特性，SHA256 足够 |
+| 从 HMAC-SHA256 升级到 bcrypt/Argon2 | 极低 | 分组聚合不需要密码哈希的抗暴力破解特性，HMAC-SHA256 足够 |
 | 安全意识过度敏感，主观决定轮换 | 低 | 需权衡轮换成本与风险增量 |
 
 实际运营中，盐值大概率永远不变。`salt_version` 是低成本保险，不加也能过，加了给未来留退路。

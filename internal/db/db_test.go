@@ -149,6 +149,27 @@ func TestInsertBatch(t *testing.T) {
 	}
 }
 
+func TestInsertBatchRejectsInvalidTimestamp(t *testing.T) {
+	d := newTestDB(t)
+	err := d.InsertBatch([]UsageRecord{{
+		CreatedAt: "not-a-timestamp",
+		Endpoint:  "/v1/chat/completions",
+		Method:    "POST",
+		Status:    200,
+		LatencyMs: 10,
+	}})
+	if err == nil {
+		t.Fatal("expected invalid timestamp error")
+	}
+}
+
+func TestInsertHealthMetricRejectsInvalidTimestamp(t *testing.T) {
+	d := newTestDB(t)
+	if err := d.InsertHealthMetric("not-a-timestamp", 0, 0, 0, 0, 0); err == nil {
+		t.Fatal("expected invalid health timestamp error")
+	}
+}
+
 func TestSummary(t *testing.T) {
 	d := newTestDB(t)
 	insertRecord(t, d, ts(-1*time.Hour), "/v1/chat/completions", 200, "gpt-4o", 100, 200, 300)
@@ -627,8 +648,8 @@ func TestHealthMetrics(t *testing.T) {
 	if len(rows) != 1 {
 		t.Errorf("expected 1 error timeline row, got %d", len(rows))
 	}
-	if len(rows) == 1 && (rows[0].DroppedEvents != 10 || rows[0].ParseErrors != 2 || rows[0].DBErrors != 1) {
-		t.Errorf("error deltas = %+v, want dropped=10 parse=2 db=1", rows[0])
+	if len(rows) == 1 && (rows[0].DroppedEvents != 0 || rows[0].ParseErrors != 0 || rows[0].DBErrors != 0) {
+		t.Errorf("error deltas = %+v, want zero (no baseline before range)", rows[0])
 	}
 	if err := d.InsertHealthMetric(ts(-5*time.Minute), 5, 12, 2, 5, 0); err != nil {
 		t.Fatalf("InsertHealthMetric second: %v", err)
@@ -736,6 +757,26 @@ func TestOverview(t *testing.T) {
 	failedReqs, _ := data["failed_requests"].(int64)
 	if failedReqs != 1 {
 		t.Errorf("failed_requests = %d, want 1", failedReqs)
+	}
+}
+
+func TestOverviewCaptureStats(t *testing.T) {
+	d := newTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := d.InsertBatch([]UsageRecord{
+		{CreatedAt: now.Add(-30 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/chat/completions", Method: "POST", Status: 200, LatencyMs: 10, CaptureOutcome: "failed"},
+		{CreatedAt: now.Add(-20 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/chat/completions", Method: "POST", Status: 200, LatencyMs: 10, CaptureOutcome: "skipped"},
+		{CreatedAt: now.Add(-10 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/chat/completions", Method: "POST", Status: 200, LatencyMs: 10, CaptureOutcome: "skipped"},
+	}); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	failed, skipped, err := d.OverviewCaptureStats(now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("OverviewCaptureStats: %v", err)
+	}
+	if failed != 1 || skipped != 2 {
+		t.Fatalf("capture stats failed=%d skipped=%d, want 1/2", failed, skipped)
 	}
 }
 

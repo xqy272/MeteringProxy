@@ -97,6 +97,20 @@ func TestRegistry_GeminiGenerateContentMatch(t *testing.T) {
 	if p.Name != "unknown_passthrough" {
 		t.Errorf("countTokens matched %s, want unknown_passthrough", p.Name)
 	}
+
+	for _, path := range []string{
+		"/v1beta/models/gemini-2.5-pro:generateContent/extra",
+		"/v1beta/models/gemini-2.5-pro:streamGenerateContent/extra",
+		"/v1beta/models/gemini-2.5-pro:generateContentExtra",
+	} {
+		p, err := r.Match(http.MethodPost, path)
+		if err != nil {
+			t.Fatalf("Match(%q): %v", path, err)
+		}
+		if p.Name != "unknown_passthrough" {
+			t.Errorf("%q matched %s, want unknown_passthrough", path, p.Name)
+		}
+	}
 }
 
 func TestRegistry_UnknownPassthrough(t *testing.T) {

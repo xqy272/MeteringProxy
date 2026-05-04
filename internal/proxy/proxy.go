@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"mime"
@@ -150,6 +152,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (p *Proxy) forwardTransparent(w http.ResponseWriter, r *http.Request) {
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, p.upstream+r.URL.RequestURI(), r.Body)
 	if err != nil {
+		w.Header().Set("X-Metering-Proxy", "1")
 		http.Error(w, "upstream error", 502)
 		return
 	}
@@ -162,6 +165,7 @@ func (p *Proxy) forwardTransparent(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := p.transport.RoundTrip(upstreamReq)
 	if err != nil {
+		w.Header().Set("X-Metering-Proxy", "1")
 		http.Error(w, "upstream error", 502)
 		return
 	}
@@ -258,7 +262,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 		written, err := io.Copy(w, resp.Body)
 		errStr := ""
 		if err != nil {
-			errStr = truncateErrorString(err.Error())
+			errStr = safeOperationalError(err)
 		}
 		captureOutcome := event.OutcomeSkipped
 		captureReason := event.ReasonUsageNotPresent
@@ -303,7 +307,11 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 	if prof != nil && prof.StreamProtocol.MaxLineSize > 0 {
 		maxLine = prof.StreamProtocol.MaxLineSize
 	}
-	lineBuf := make([]byte, 0, 4096)
+	initCap := maxLine
+	if initCap > 32*1024 {
+		initCap = 32 * 1024
+	}
+	lineBuf := make([]byte, 0, initCap)
 	lineOverflow := false
 	buf := make([]byte, 32*1024)
 	recordLineSkip := func() {
@@ -316,7 +324,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 			reportParseErrors()
 			errStr := ""
 			if err := r.Context().Err(); err != nil {
-				errStr = truncateErrorString(err.Error())
+				errStr = safeOperationalError(err)
 			}
 			captureOutcome := event.OutcomeCaptured
 			captureReason := ""
@@ -344,7 +352,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 					captureReason = event.ReasonUsageNotPresent
 				}
 				p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, true,
-					clientIPHash, apiKeyHash, modelRequested, lastUsage, cr.bytesRead, totalBytes, werr.Error(),
+					clientIPHash, apiKeyHash, modelRequested, lastUsage, cr.bytesRead, totalBytes, safeOperationalError(werr),
 					captureOutcome, captureReason, finalizeStreamErrInfo())
 				return
 			}
@@ -352,7 +360,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 
 			chunk := buf[:n]
 			for len(chunk) > 0 {
-				nl := bytes.IndexByte(chunk, '\n')
+				nl, lineBreakLen := nextLineBreak(chunk)
 				if nl < 0 {
 					if !lineOverflow {
 						if len(lineBuf)+len(chunk) <= maxLine {
@@ -385,7 +393,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 						}
 					}
 				}
-				chunk = chunk[nl+1:]
+				chunk = chunk[nl+lineBreakLen:]
 
 				if len(line) > 0 {
 					if errPayloads != nil {
@@ -404,7 +412,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 		if readErr != nil {
 			errStr := ""
 			if readErr != io.EOF {
-				errStr = truncateErrorString(readErr.Error())
+				errStr = safeOperationalError(readErr)
 			}
 			reportParseErrors()
 			captureOutcome := event.OutcomeCaptured
@@ -418,6 +426,22 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 				captureOutcome, captureReason, finalizeStreamErrInfo())
 			return
 		}
+	}
+}
+
+func nextLineBreak(chunk []byte) (idx, width int) {
+	nl := bytes.IndexByte(chunk, '\n')
+	cr := bytes.IndexByte(chunk, '\r')
+	switch {
+	case nl < 0 && cr < 0:
+		return -1, 0
+	case cr >= 0 && (nl < 0 || cr < nl):
+		if cr+1 < len(chunk) && chunk[cr+1] == '\n' {
+			return cr, 2
+		}
+		return cr, 1
+	default:
+		return nl, 1
 	}
 }
 
@@ -474,7 +498,7 @@ func (s *errorPayloadSampler) addStrippedPayload(payload []byte) {
 
 func (s *errorPayloadSampler) finalize() []byte {
 	s.locked = true
-	if s.overflow || len(s.payloads) == 0 {
+	if len(s.payloads) == 0 {
 		return nil
 	}
 	var result []byte
@@ -578,7 +602,7 @@ func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, resp *ht
 
 	errStr := ""
 	if copyErr != nil {
-		errStr = truncateErrorString(copyErr.Error())
+		errStr = safeOperationalError(copyErr)
 	}
 	p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, false,
 		clientIPHash, apiKeyHash, modelRequested, usage, cr.bytesRead, written, errStr,
@@ -692,7 +716,7 @@ func (p *Proxy) writeError(w http.ResponseWriter, start time.Time, ttfb time.Dur
 	}
 
 	p.recordUsage(start, ttfb, prof, endpoint, method, "", status, false,
-		clientIPHash, apiKeyHash, modelRequested, nil, requestBytes, 0, event.ReasonUpstreamError,
+		clientIPHash, apiKeyHash, modelRequested, nil, requestBytes, 0, safeOperationalError(err),
 		captureOutcome, event.ReasonUpstreamError, errInfo)
 }
 
@@ -710,6 +734,46 @@ func truncateErrorString(err string) string {
 		end = maxErrorStringLen
 	}
 	return err[:end]
+}
+
+func safeOperationalError(err error) string {
+	if err == nil {
+		return ""
+	}
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "context_canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	}
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		return "timeout"
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return "dns_error"
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "connection refused"):
+		return "connection_refused"
+	case strings.Contains(msg, "connection reset"):
+		return "connection_reset"
+	case strings.Contains(msg, "no such host"):
+		return "dns_error"
+	case strings.Contains(msg, "no route to host"):
+		return "no_route"
+	case strings.Contains(msg, "network is unreachable"):
+		return "network_unreachable"
+	case strings.Contains(msg, "tls"):
+		return "tls_error"
+	case strings.Contains(msg, "use of closed network connection"):
+		return "connection_closed"
+	case strings.Contains(msg, "broken pipe"):
+		return "client_write_error"
+	default:
+		return "upstream_error"
+	}
 }
 
 // ---------- helpers ----------
@@ -771,7 +835,11 @@ func mergeUsageInfo(current, next *extractor.UsageInfo) *extractor.UsageInfo {
 		merged.CacheCreationTokens = next.CacheCreationTokens
 	}
 	if next.TotalTokens != 0 {
-		merged.TotalTokens = next.TotalTokens
+		if next.InputTokens == 0 && next.OutputTokens != 0 && current.InputTokens != 0 && next.TotalTokens == next.OutputTokens {
+			merged.TotalTokens = merged.InputTokens + next.OutputTokens
+		} else {
+			merged.TotalTokens = next.TotalTokens
+		}
 	} else if next.InputTokens != 0 || next.OutputTokens != 0 || next.ReasoningTokens != 0 || next.CachedTokens != 0 {
 		// For Anthropic streaming, InputTokens includes cache creation and cache
 		// read tokens, so InputTokens + OutputTokens gives the correct total.
@@ -812,7 +880,7 @@ func bearerToken(auth string) string {
 	if len(fields) == 2 && strings.EqualFold(fields[0], "Bearer") {
 		return fields[1]
 	}
-	return auth
+	return ""
 }
 
 func clientIPFromRequest(r *http.Request) string {
@@ -853,12 +921,12 @@ func apiKeyToken(r *http.Request) string {
 }
 
 func requestIDFromHeaders(respHeader, reqHeader http.Header) string {
-	for _, name := range []string{"OpenAI-Request-ID", "X-Request-ID", "X-Request-Id", "Request-ID"} {
+	for _, name := range []string{"OpenAI-Request-ID", "X-Request-ID", "Request-ID"} {
 		if value := respHeader.Get(name); value != "" {
 			return value
 		}
 	}
-	for _, name := range []string{"X-Request-ID", "X-Request-Id", "Request-ID"} {
+	for _, name := range []string{"X-Request-ID", "Request-ID"} {
 		if value := reqHeader.Get(name); value != "" {
 			return value
 		}

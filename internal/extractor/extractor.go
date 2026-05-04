@@ -44,6 +44,9 @@ func ExtractChatUsage(data []byte) (*UsageInfo, error) {
 	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.InputTokens > 0 {
 		return nil, nil
 	}
+	if !hasChatUsageTokens(&usage) {
+		return nil, nil
+	}
 	info := chatUsageToInfo(resp.Model, &usage)
 	info.UsageRawJSON = rawUsageString(resp.Usage)
 	return info, nil
@@ -150,7 +153,7 @@ func ExtractNonStreaming(body []byte, endpoint string) (*UsageInfo, error) {
 		if err := json.Unmarshal(generic.Usage, &usage); err != nil {
 			return nil, err
 		}
-		if usage.PromptTokens > 0 || usage.TotalTokens > 0 {
+		if hasChatUsageTokens(&usage) {
 			info := chatUsageToInfo(generic.Model, &usage)
 			info.UsageRawJSON = rawUsageString(generic.Usage)
 			return info, nil
@@ -217,6 +220,9 @@ func tryChatFormat(body []byte) (*UsageInfo, error) {
 	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.InputTokens > 0 {
 		return nil, nil
 	}
+	if !hasChatUsageTokens(&usage) {
+		return nil, nil
+	}
 	info := chatUsageToInfo(resp.Model, &usage)
 	info.UsageRawJSON = rawUsageString(resp.Usage)
 	return info, nil
@@ -278,15 +284,15 @@ func rawUsageString(raw json.RawMessage) string {
 func chatUsageToInfo(model string, u *chatUsage) *UsageInfo {
 	info := &UsageInfo{
 		Model:        model,
-		InputTokens:  u.PromptTokens,
-		OutputTokens: u.CompletionTokens,
-		TotalTokens:  u.TotalTokens,
+		InputTokens:  tokenCount(u.PromptTokens),
+		OutputTokens: tokenCount(u.CompletionTokens),
+		TotalTokens:  tokenCount(u.TotalTokens),
 	}
 	if u.PromptTokensDetails != nil {
-		info.CachedTokens = u.PromptTokensDetails.CachedTokens
+		info.CachedTokens = tokenCount(u.PromptTokensDetails.CachedTokens)
 	}
 	if u.CompletionTokensDetails != nil {
-		info.ReasoningTokens = u.CompletionTokensDetails.ReasoningTokens
+		info.ReasoningTokens = tokenCount(u.CompletionTokensDetails.ReasoningTokens)
 	}
 	return info
 }
@@ -294,15 +300,15 @@ func chatUsageToInfo(model string, u *chatUsage) *UsageInfo {
 func responsesUsageToInfo(model string, u *responsesUsage) *UsageInfo {
 	info := &UsageInfo{
 		Model:        model,
-		InputTokens:  u.InputTokens,
-		OutputTokens: u.OutputTokens,
-		TotalTokens:  u.TotalTokens,
+		InputTokens:  tokenCount(u.InputTokens),
+		OutputTokens: tokenCount(u.OutputTokens),
+		TotalTokens:  tokenCount(u.TotalTokens),
 	}
 	if u.InputTokensDetails != nil {
-		info.CachedTokens = u.InputTokensDetails.CachedTokens
+		info.CachedTokens = tokenCount(u.InputTokensDetails.CachedTokens)
 	}
 	if u.OutputTokensDetails != nil {
-		info.ReasoningTokens = u.OutputTokensDetails.ReasoningTokens
+		info.ReasoningTokens = tokenCount(u.OutputTokensDetails.ReasoningTokens)
 	}
 	return info
 }
@@ -321,26 +327,24 @@ func anthropicUsageInfo(model string, raw json.RawMessage) (*UsageInfo, error) {
 }
 
 func anthropicUsageToInfo(model string, u *anthropicUsage) *UsageInfo {
-	inputTokens := u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
-	totalTokens := int64(0)
-	if inputTokens > 0 {
-		totalTokens = inputTokens + u.OutputTokens
-	}
+	inputTokens := sumTokenCounts(u.InputTokens, u.CacheCreationInputTokens, u.CacheReadInputTokens)
+	outputTokens := tokenCount(u.OutputTokens)
+	totalTokens := sumTokenCounts(inputTokens, outputTokens)
 	return &UsageInfo{
 		Model:               model,
 		InputTokens:         inputTokens,
-		OutputTokens:        u.OutputTokens,
-		CachedTokens:        u.CacheReadInputTokens,
-		CacheCreationTokens: u.CacheCreationInputTokens,
+		OutputTokens:        outputTokens,
+		CachedTokens:        tokenCount(u.CacheReadInputTokens),
+		CacheCreationTokens: tokenCount(u.CacheCreationInputTokens),
 		TotalTokens:         totalTokens,
 	}
 }
 
 func hasAnthropicUsageTokens(u *anthropicUsage) bool {
-	return u.InputTokens != 0 ||
-		u.OutputTokens != 0 ||
-		u.CacheCreationInputTokens != 0 ||
-		u.CacheReadInputTokens != 0
+	return u.InputTokens > 0 ||
+		u.OutputTokens > 0 ||
+		u.CacheCreationInputTokens > 0 ||
+		u.CacheReadInputTokens > 0
 }
 
 func geminiJSONToInfo(body []byte) (*UsageInfo, error) {
@@ -372,38 +376,68 @@ func geminiResponseToInfo(resp *geminiResponse) (*UsageInfo, error) {
 }
 
 func geminiUsageToInfo(model string, u *geminiUsage) *UsageInfo {
-	inputTokens := u.PromptTokenCount + u.ToolUsePromptTokenCount
-	if inputTokens == 0 && u.CachedContentTokenCount > 0 {
-		inputTokens = u.CachedContentTokenCount
+	promptTokens := tokenCount(u.PromptTokenCount)
+	toolUseTokens := tokenCount(u.ToolUsePromptTokenCount)
+	cachedTokens := tokenCount(u.CachedContentTokenCount)
+	thoughtTokens := tokenCount(u.ThoughtsTokenCount)
+
+	inputTokens := sumTokenCounts(promptTokens, toolUseTokens)
+	if inputTokens == 0 && cachedTokens > 0 {
+		inputTokens = cachedTokens
 	}
-	outputTokens := u.CandidatesTokenCount + u.ThoughtsTokenCount
-	if outputTokens == 0 && u.TotalTokenCount > inputTokens {
-		outputTokens = u.TotalTokenCount - inputTokens
-		if outputTokens < 0 {
-			outputTokens = 0
-		}
+	outputTokens := sumTokenCounts(u.CandidatesTokenCount, thoughtTokens)
+	providerTotal := tokenCount(u.TotalTokenCount)
+	if outputTokens == 0 && providerTotal > inputTokens {
+		outputTokens = providerTotal - inputTokens
 	}
-	totalTokens := u.TotalTokenCount
+	totalTokens := providerTotal
 	if totalTokens == 0 {
-		totalTokens = inputTokens + outputTokens
+		totalTokens = sumTokenCounts(inputTokens, outputTokens)
 	}
 	return &UsageInfo{
 		Model:           model,
 		InputTokens:     inputTokens,
 		OutputTokens:    outputTokens,
-		ReasoningTokens: u.ThoughtsTokenCount,
-		CachedTokens:    u.CachedContentTokenCount,
+		ReasoningTokens: thoughtTokens,
+		CachedTokens:    cachedTokens,
 		TotalTokens:     totalTokens,
 	}
 }
 
 func hasGeminiUsageTokens(u *geminiUsage) bool {
-	return u.PromptTokenCount != 0 ||
-		u.CandidatesTokenCount != 0 ||
-		u.TotalTokenCount != 0 ||
-		u.CachedContentTokenCount != 0 ||
-		u.ThoughtsTokenCount != 0 ||
-		u.ToolUsePromptTokenCount != 0
+	return u.PromptTokenCount > 0 ||
+		u.CandidatesTokenCount > 0 ||
+		u.TotalTokenCount > 0 ||
+		u.CachedContentTokenCount > 0 ||
+		u.ThoughtsTokenCount > 0 ||
+		u.ToolUsePromptTokenCount > 0
+}
+
+func hasChatUsageTokens(u *chatUsage) bool {
+	return u.PromptTokens > 0 ||
+		u.CompletionTokens > 0 ||
+		u.TotalTokens > 0
+}
+
+func tokenCount(v int64) int64 {
+	if v < 0 {
+		return 0
+	}
+	return v
+}
+
+const maxTokenCount = int64(9223372036854775807)
+
+func sumTokenCounts(values ...int64) int64 {
+	var total int64
+	for _, value := range values {
+		value = tokenCount(value)
+		if value > maxTokenCount-total {
+			return maxTokenCount
+		}
+		total += value
+	}
+	return total
 }
 
 // ---------- JSON types ----------

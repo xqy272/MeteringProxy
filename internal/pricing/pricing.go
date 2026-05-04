@@ -194,14 +194,14 @@ func computeCost(mp ModelPrice, inputTokens, outputTokens, reasoningTokens, cach
 }
 
 func inputBreakdown(inputTokens, cachedTokens, cacheCreationTokens int64) (nonCachedInput, cachedInput, cacheCreationInput int64) {
-	if inputTokens <= 0 {
-		return 0, 0, 0
-	}
 	if cachedTokens < 0 {
 		cachedTokens = 0
 	}
 	if cacheCreationTokens < 0 {
 		cacheCreationTokens = 0
+	}
+	if inputTokens <= 0 {
+		return 0, cachedTokens, cacheCreationTokens
 	}
 	if cacheCreationTokens > inputTokens {
 		cacheCreationTokens = inputTokens

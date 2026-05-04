@@ -28,6 +28,15 @@ func TestHashStableAndSalted(t *testing.T) {
 	}
 }
 
+func TestHashUsesKeyedMACWithoutConcatenationAmbiguity(t *testing.T) {
+	// Plain SHA256(salt+value) would collide for these two pairs.
+	h1 := NewWithSalt("ab")
+	h2 := NewWithSalt("a")
+	if h1.Hash("c") == h2.Hash("bc") {
+		t.Fatal("hash should not be vulnerable to salt/value concatenation ambiguity")
+	}
+}
+
 func TestGenerateSalt(t *testing.T) {
 	salt := GenerateSalt()
 	if len(salt) != 64 {

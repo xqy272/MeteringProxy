@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -656,8 +657,12 @@ func (db *DB) InsertBatch(records []UsageRecord) error {
 	}
 
 	for _, r := range records {
-		_, err := stmt.Exec(
-			r.CreatedAt, unixFromTimestamp(r.CreatedAt), r.RequestID, r.Endpoint, r.Method, r.Status, r.LatencyMs, r.TTFBMs, streamInt(r.Stream),
+		createdAtUnix, err := unixFromTimestamp(r.CreatedAt)
+		if err != nil {
+			return fmt.Errorf("parse usage timestamp %q: %w", r.CreatedAt, err)
+		}
+		_, err = stmt.Exec(
+			r.CreatedAt, createdAtUnix, r.RequestID, r.Endpoint, r.Method, r.Status, r.LatencyMs, r.TTFBMs, streamInt(r.Stream),
 			r.ClientIPHash, r.APIKeyHash, r.ModelRequested, r.ModelReturned,
 			r.InputTokens, r.OutputTokens, r.ReasoningTokens, r.CachedTokens, r.CacheCreationTokens, r.TotalTokens,
 			r.RequestBytes, r.ResponseBytes, r.Error,
@@ -676,19 +681,23 @@ func (db *DB) InsertBatch(records []UsageRecord) error {
 }
 
 func (db *DB) InsertHealthMetric(ts string, queueDepth int, dropped, parseErrors, dbErrors, sseLineSkips int64) error {
-	_, err := db.sql.Exec(`
+	timestampUnix, err := unixFromTimestamp(ts)
+	if err != nil {
+		return fmt.Errorf("parse health timestamp %q: %w", ts, err)
+	}
+	_, err = db.sql.Exec(`
 		INSERT INTO health_metrics (timestamp, timestamp_unix, queue_depth, dropped_events_total, parse_error_total, db_write_error_total, sse_line_skips_total)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, ts, unixFromTimestamp(ts), queueDepth, dropped, parseErrors, dbErrors, sseLineSkips)
+	`, ts, timestampUnix, queueDepth, dropped, parseErrors, dbErrors, sseLineSkips)
 	return err
 }
 
-func unixFromTimestamp(ts string) int64 {
+func unixFromTimestamp(ts string) (int64, error) {
 	t, err := time.Parse(time.RFC3339, ts)
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	return t.Unix()
+	return t.Unix(), nil
 }
 
 func (db *DB) Summary(since time.Time) (*SummaryRow, error) {
@@ -957,7 +966,7 @@ func (db *DB) percentileInt(since time.Time, column string, percentile float64, 
 	if count == 0 {
 		return 0, nil
 	}
-	offset := int64(percentile*float64(count)+0.999999) - 1
+	offset := int64(math.Ceil(percentile*float64(count))) - 1
 	if offset < 0 {
 		offset = 0
 	}
@@ -1076,6 +1085,12 @@ func (db *DB) ErrorTimeline(since time.Time) ([]ErrorTimelineRow, error) {
 				prevDropped = droppedEvents
 				continue
 			}
+			// No baseline row exists before the query range. Seed prev from
+			// the first in-range row so the delta is zero rather than the raw
+			// cumulative value.
+			prevParse = parseErrors
+			prevDB = dbErrors
+			prevDropped = droppedEvents
 		}
 		r := ErrorTimelineRow{
 			Timestamp:     timestamp,

@@ -142,8 +142,28 @@ func TestExtractAnthropicUsage_MessageDeltaPartial(t *testing.T) {
 	if u.OutputTokens != 45 {
 		t.Errorf("output_tokens = %d, want 45", u.OutputTokens)
 	}
-	if u.TotalTokens != 0 {
-		t.Errorf("total_tokens = %d, want 0 for partial delta", u.TotalTokens)
+	if u.TotalTokens != 45 {
+		t.Errorf("total_tokens = %d, want 45 for output-only partial delta", u.TotalTokens)
+	}
+}
+
+func TestExtractAnthropicUsage_NegativeAndOverflowTokensAreClamped(t *testing.T) {
+	input := []byte(`data: {"type":"message_start","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":9223372036854775807,"cache_creation_input_tokens":5,"cache_read_input_tokens":-20,"output_tokens":1}}}`)
+	u, err := ExtractAnthropicUsage(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u == nil {
+		t.Fatal("expected non-nil usage")
+	}
+	if u.InputTokens != maxTokenCount {
+		t.Errorf("input_tokens = %d, want saturated maxTokenCount", u.InputTokens)
+	}
+	if u.CachedTokens != 0 {
+		t.Errorf("cached_tokens = %d, want 0 for negative provider value", u.CachedTokens)
+	}
+	if u.TotalTokens != maxTokenCount {
+		t.Errorf("total_tokens = %d, want saturated maxTokenCount", u.TotalTokens)
 	}
 }
 
@@ -365,6 +385,17 @@ func TestExtractNonStreaming_NoUsage(t *testing.T) {
 	}
 	if u != nil {
 		t.Error("expected nil when no usage in response")
+	}
+}
+
+func TestExtractNonStreaming_ChatZeroTokenUsageIsNil(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o","usage":{"total_tokens":0}}`)
+	u, err := ExtractNonStreaming(body, "/v1/chat/completions")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u != nil {
+		t.Fatalf("expected nil usage for all-zero chat usage, got %+v", u)
 	}
 }
 

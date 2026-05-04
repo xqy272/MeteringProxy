@@ -317,7 +317,7 @@ function gridLines(maxVal,dims,format=fmtNum) {
 function emptyChart(title) { return `<div class="empty-state"><strong>${esc(title)}</strong></div>`; }
 
 /* --- Usage mode panel -------------------------------------- */
-const modelColors = ['var(--chart-1)','var(--chart-2)','var(--chart-3)','var(--chart-4)','var(--chart-5)','var(--chart-6)'];
+const modelColors = ['var(--chart-1)','var(--chart-2)','var(--chart-3)','var(--chart-4)','var(--chart-5)','var(--chart-6)','var(--chart-7)','var(--chart-8)','var(--chart-9)'];
 
 function usageMeta(mode=currentUsageMode) {
   if(mode==='tokens') return {
@@ -424,15 +424,16 @@ function renderSingleTrend(el,rows,bucket,meta) {
     const y=yFor(v), h=Math.max(0,dims.h-dims.b-y);
     const failed=Number(r.failed_count||0), failedH=currentUsageMode==='requests'?pH*Math.min(failed,maxV)/maxV:0;
     const failedY=dims.h-dims.b-failedH;
+    const mainKind=currentUsageMode==='cost'?'cost':'requests';
     const tt=currentUsageMode==='requests'?reqTooltip(r):ttHtml(fmtShort(r.timestamp),'',[
-      ['requests',meta.tooltip,meta.fmtFull(v)],
+      [mainKind,meta.tooltip,meta.fmtFull(v)],
       ['tokens',t('tooltip.tokens'),fmtFull(r.total_tokens||0)],
       ['failed',t('tooltip.failed'),fmtFull(r.failed_count||0)]
     ]);
     return `<g class="chart-hover-group" tabindex="0" data-tooltip="${esc(tt)}">
       <rect class="chart-hover-band" x="${(dims.l+slot*i).toFixed(1)}" y="${dims.t}" width="${slot.toFixed(1)}" height="${pH}"/>
       <line class="chart-hover-ruler" x1="${cx.toFixed(1)}" y1="${dims.t}" x2="${cx.toFixed(1)}" y2="${dims.h-dims.b}"/>
-      ${h>0?`<rect class="chart-bar requests chart-bar-rect" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}"/>`:''}
+      ${h>0?`<rect class="chart-bar ${mainKind} chart-bar-rect" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}"/>`:''}
       ${failedH>0?`<rect class="chart-bar failed chart-bar-rect" x="${(x+barW*.62).toFixed(1)}" y="${failedY.toFixed(1)}" width="${Math.max(2,barW*.34).toFixed(1)}" height="${failedH.toFixed(1)}"/>`:''}
     </g>`;
   }).join('');
@@ -538,43 +539,6 @@ function pieSvg(rows,total,meta) {
   </svg>`;
 }
 
-/* --- Chart: Requests (bar chart) --------------------------- */
-function renderRequestsChart(rows,bucket) {
-  const el=$('requests-chart');
-  if(!rows.length){el.innerHTML=emptyChart(t('state.no_request_data'));setText('requests-chart-summary','');setText('requests-chart-left','-');setText('requests-chart-right','-');return;}
-  const dims=chartDims(el);
-  const pW=dims.w-dims.l-dims.r, pH=dims.h-dims.t-dims.b;
-  const maxC=Math.max(...rows.map(r=>Number(r.count||0)),1);
-  const slot=pW/rows.length;
-  const barW=Math.max(2,Math.min(20,slot*.55));
-  const yFor=v=>dims.h-dims.b-pH*Number(v||0)/maxC;
-  const totalReqs=rows.reduce((s,r)=>s+Number(r.count||0),0);
-
-  const bars=rows.map((r,i)=>{
-    const cx=dims.l+slot*(i+.5), x=cx-barW/2;
-    const count=Number(r.count||0), failed=Number(r.failed_count||0);
-    const yC=yFor(count), hC=Math.max(0,dims.h-dims.b-yC);
-    const yF=yFor(failed), hF=Math.max(0,dims.h-dims.b-yF);
-    const bx=dims.l+slot*i;
-    return `<g class="chart-hover-group" tabindex="0" data-tt="${esc(reqTooltip(r))}">
-      <rect class="chart-hover-band" x="${bx.toFixed(1)}" y="${dims.t}" width="${slot.toFixed(1)}" height="${pH}"/>
-      <line class="chart-hover-ruler" x1="${cx.toFixed(1)}" y1="${dims.t}" x2="${cx.toFixed(1)}" y2="${dims.h-dims.b}"/>
-      ${hC>0?`<rect class="chart-bar requests chart-bar-rect" x="${x.toFixed(1)}" y="${yC.toFixed(1)}" width="${barW.toFixed(1)}" height="${hC.toFixed(1)}"/>`:''}
-      ${failed>0&&hF>0?`<rect class="chart-bar failed chart-bar-rect" x="${(x+barW+1).toFixed(1)}" y="${yF.toFixed(1)}" width="${Math.max(2,barW*.4).toFixed(1)}" height="${hF.toFixed(1)}"/>`:''}
-    </g>`;
-  }).join('');
-
-  el.innerHTML=`<svg viewBox="0 0 ${dims.w} ${dims.h}" role="img" aria-label="${esc(t('panel.requests'))}">
-    ${gridLines(maxC,dims)}
-    <line stroke="var(--chart-grid)" stroke-width="1" x1="${dims.l}" y1="${dims.h-dims.b}" x2="${dims.w-dims.r}" y2="${dims.h-dims.b}"/>
-    ${bars}
-  </svg>`;
-  attachTT(el);
-  setText('requests-chart-summary',t('summary.requests_chart',{count:rows.length,bucket,peak:fmtFull(maxC)}));
-  setText('requests-chart-left',fmtShort(rows[0].timestamp));
-  setText('requests-chart-right',fmtFull(totalReqs)+' '+t('tooltip.requests').toLowerCase());
-}
-
 function reqTooltip(r) {
   const c=Number(r.count||0),f=Number(r.failed_count||0);
   return ttHtml(fmtShort(r.timestamp),'',[
@@ -584,52 +548,6 @@ function reqTooltip(r) {
     ['requests',t('tooltip.avg_latency'),fmtLat(r.avg_latency_ms)],
     ['tokens',t('tooltip.tokens'),fmtFull(r.total_tokens)]
   ]);
-}
-
-/* --- Chart: Tokens (stacked bar chart) --------------------- */
-function renderTokensChart(rows,bucket) {
-  const el=$('tokens-chart');
-  if(!rows.length){el.innerHTML=emptyChart(t('state.no_token_data'));setText('tokens-chart-summary','');setText('tokens-chart-left','-');setText('tokens-chart-right','-');return;}
-  const dims=chartDims(el);
-  const pW=dims.w-dims.l-dims.r, pH=dims.h-dims.t-dims.b;
-  const totals=rows.map(r=>{
-    const reas=Number(r.reasoning_tokens||0),rawOut=Number(r.output_tokens||0);
-    return {cached:Number(r.cached_tokens||0),uncached:Math.max(0,Number(r.input_tokens||0)-Number(r.cached_tokens||0)),output:Math.max(0,rawOut-reas),reasoning:reas,total:Number(r.total_tokens||0)};
-  });
-  const stacks=totals.map(r=>r.cached+r.uncached+r.output+r.reasoning);
-  const maxStack=Math.max(...stacks,1);
-  const totalTok=totals.reduce((s,r)=>s+r.total,0);
-  const slot=pW/rows.length;
-  const barW=Math.max(2,Math.min(18,slot*.55));
-  const yFor=v=>dims.h-dims.b-pH*Number(v||0)/maxStack;
-
-  const bars=rows.map((r,i)=>{
-    const cx=dims.l+slot*(i+.5), x=cx-barW/2;
-    let cursor=dims.h-dims.b;
-    const parts=[['cached',totals[i].cached],['uncached',totals[i].uncached],['output',totals[i].output],['reasoning',totals[i].reasoning]];
-    const rects=parts.map(([kind,val])=>{
-      if(val<=0)return'';
-      const h=pH*val/maxStack; if(h<.5)return'';
-      cursor-=h;
-      return `<rect class="chart-bar ${kind} chart-bar-rect" x="${x.toFixed(1)}" y="${cursor.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}"/>`;
-    }).join('');
-    const bx=dims.l+slot*i;
-    return `<g class="chart-hover-group" tabindex="0" data-tt="${esc(tokTooltip(r,totals[i]))}">
-      <rect class="chart-hover-band" x="${bx.toFixed(1)}" y="${dims.t}" width="${slot.toFixed(1)}" height="${pH}"/>
-      <line class="chart-hover-ruler" x1="${cx.toFixed(1)}" y1="${dims.t}" x2="${cx.toFixed(1)}" y2="${dims.h-dims.b}"/>
-      ${rects}
-    </g>`;
-  }).join('');
-
-  el.innerHTML=`<svg viewBox="0 0 ${dims.w} ${dims.h}" role="img" aria-label="${esc(t('panel.tokens'))}">
-    ${gridLines(maxStack,dims)}
-    <line stroke="var(--chart-grid)" stroke-width="1" x1="${dims.l}" y1="${dims.h-dims.b}" x2="${dims.w-dims.r}" y2="${dims.h-dims.b}"/>
-    ${bars}
-  </svg>`;
-  attachTT(el);
-  setText('tokens-chart-summary',t('summary.tokens_chart',{count:rows.length,bucket,tokens:fmtFull(totalTok)}));
-  setText('tokens-chart-left',fmtShort(rows[0].timestamp));
-  setText('tokens-chart-right',t('summary.peak_tokens',{tokens:fmtFull(Math.max(...totals.map(r=>r.total)))}));
 }
 
 function tokTooltip(row,vals) {
@@ -773,13 +691,6 @@ async function loadIssues() {
     card.addEventListener('click',open);
   });
   renderClassPanel();
-  list.querySelectorAll('.issue-filter-card[data-issue]').forEach(row=>{
-    const open=()=>showReqForIssue(items[Number(row.dataset.issue||0)]);
-    row.addEventListener('click',open);
-    row.addEventListener('keydown',e=>{
-      if(e.key==='Enter'||e.key===' '){e.preventDefault();open();}
-    });
-  });
 }
 
 /* --- Health / Diagnostics ---------------------------------- */
@@ -863,20 +774,6 @@ function closeRequestDetails() {
   updateToggleLabels();
 }
 async function reloadReqFilter() { if(!requestsExpanded)return; try{await loadRequests();}catch(e){$('requests-table').innerHTML=errorRow(11,e.message);} }
-function setSelectValue(sel,val,label){if(!sel||!val)return;const sv=String(val);if(![...sel.options].some(o=>o.value===sv)){const o=document.createElement('option');o.value=sv;o.textContent=label||sv;sel.appendChild(o);}sel.value=sv;}
-async function showReqForIssue(item) {
-  if(!item||item.system)return;
-  currentIssueClassFilter=item.class||'';
-  const st=Number(item.status||0);
-  $('filter-status').value=st>=500?'5xx':st>=400?'4xx':'';
-  $('filter-model').value='';$('filter-endpoint').value='';
-  setSelectValue($('filter-model'),item.model||'unidentified',modelName(item.model||'unidentified'));
-  if(item.endpoint)setSelectValue($('filter-endpoint'),item.endpoint,item.endpoint);
-  if(!requestsExpanded){requestsExpanded=true;$('request-details').classList.remove('hidden');updateToggleLabels();}
-  $('requests-table').innerHTML=emptyRow(11,t('state.loading_requests'));
-  await reloadReqFilter();
-  $('request-details').scrollIntoView({block:'start',behavior:'smooth'});
-}
 async function showReqForIssueClass(errorClass) {
   if(!errorClass)return;
   if(currentIssueClassFilter===errorClass && requestsExpanded){
@@ -908,12 +805,6 @@ function configAutoRefresh() {
 }
 function debounce(fn,ms){let t;return()=>{clearTimeout(t);t=setTimeout(fn,ms);};}
 function rerenderCharts(){renderUsagePanel();}
-
-// legacy stubs for removed sections
-function renderOpsBoard() {}
-function renderCaptureDiagnosticSummary() {}
-function renderHealthCard() {}
-function captureSnapshot() { return latestHealth || {}; }
 
 /* --- Init -------------------------------------------------- */
 document.addEventListener('DOMContentLoaded', async ()=>{

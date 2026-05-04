@@ -49,7 +49,7 @@ type ReportStore interface {
 	LatestHealth() (*db.HealthRow, error)
 	Overview(since time.Time) *db.OverviewRow
 	Issues(since time.Time, limit int) ([]db.IssueRow, error)
-	OverviewCaptureStats(since time.Time, failed, skipped *int64)
+	OverviewCaptureStats(since time.Time) (failed, skipped int64, err error)
 }
 
 // HealthWriter is the write-side interface for health metrics.

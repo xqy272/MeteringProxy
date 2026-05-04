@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"bytes"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -97,10 +99,47 @@ func TestProxyRequest_UpstreamErrorSetsErrorClass(t *testing.T) {
 	if ev.ErrorClass != "proxy_upstream_error" {
 		t.Errorf("error_class = %q, want proxy_upstream_error", ev.ErrorClass)
 	}
+	if ev.Error != "connection_refused" && ev.Error != "upstream_error" {
+		t.Errorf("error = %q, want safe upstream category", ev.Error)
+	}
+	if strings.Contains(ev.Error, "127.0.0.1") {
+		t.Errorf("error leaked upstream address: %q", ev.Error)
+	}
+}
+
+func TestForwardTransparentErrorSetsMeteringHeader(t *testing.T) {
+	rw := &testRW{}
+	p := New("http://127.0.0.1:1", hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+
+	req := httptest.NewRequest("GET", "/v1/models", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != 502 {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	if rec.Header().Get("X-Metering-Proxy") != "1" {
+		t.Fatal("missing X-Metering-Proxy header on passthrough error")
+	}
+	if len(rw.events) != 0 {
+		t.Fatalf("passthrough error recorded %d events, want 0", len(rw.events))
+	}
+}
+
+func TestSafeOperationalErrorRedactsDetails(t *testing.T) {
+	err := &net.OpError{Op: "dial", Net: "tcp", Addr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 8317}, Err: errors.New("connect: connection refused")}
+	got := safeOperationalError(err)
+	if got != "connection_refused" {
+		t.Fatalf("safeOperationalError = %q, want connection_refused", got)
+	}
+	if strings.Contains(got, "127.0.0.1") || strings.Contains(got, "8317") {
+		t.Fatalf("safeOperationalError leaked address: %q", got)
+	}
 }
 
 func TestProxyStreaming_SSEErrorSamplingOverflow(t *testing.T) {
-	// More than 5 SSE payloads - sampler should overflow and return nil
+	// More than 5 SSE payloads should preserve the bounded first samples instead
+	// of discarding everything already collected.
 	chunks := []string{
 		"data: {\"error\":{\"message\":\"err1\"}}\n",
 		"data: {\"error\":{\"message\":\"err2\"}}\n",
@@ -140,10 +179,9 @@ func TestProxyStreaming_SSEErrorSamplingOverflow(t *testing.T) {
 	if len(rw.events) == 0 {
 		t.Fatal("no event recorded")
 	}
-	// After overflow, error_class should be empty (sampler overflowed, ExtractErrorInfo was not called)
 	ev := lastEvent(rw)
-	if ev.ErrorClass != "" {
-		t.Logf("error_class after overflow = %q (may be set if first 5 payloads were within limit)", ev.ErrorClass)
+	if ev.ErrorClass != "rate_limited" {
+		t.Fatalf("error_class after overflow = %q, want rate_limited from bounded sample", ev.ErrorClass)
 	}
 }
 

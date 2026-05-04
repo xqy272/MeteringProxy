@@ -38,6 +38,9 @@
   --chart-4: #f59e0b;
   --chart-5: #a78bfa;
   --chart-6: #f43f5e;
+  --chart-7: #14b8a6;
+  --chart-8: #ef4444;
+  --chart-9: #8b5cf6;
   --tooltip-bg: #18181b;
   --tooltip-fg: #fafafa;
   --tooltip-muted: #a1a1aa;
@@ -86,6 +89,9 @@
   --chart-4: #fbbf24;
   --chart-5: #c4b5fd;
   --chart-6: #fb7185;
+  --chart-7: #2dd4bf;
+  --chart-8: #f87171;
+  --chart-9: #a78bfa;
   --tooltip-bg: #27272a;
   --tooltip-fg: #fafafa;
   --tooltip-muted: #a1a1aa;
@@ -545,6 +551,7 @@ img { display: block; }
 .chart-bar.uncached  { fill: var(--accent); }
 .chart-bar.output    { fill: var(--green); }
 .chart-bar.reasoning { fill: var(--violet); }
+.chart-bar.cost      { fill: var(--accent); opacity: .85; }
 .chart-bar.requests  { fill: var(--accent); opacity: .85; }
 .chart-bar.failed    { fill: var(--red); opacity: .9; }
 
@@ -607,6 +614,7 @@ img { display: block; }
 .tt-dot.uncached  { background: var(--accent); }
 .tt-dot.output    { background: var(--green); }
 .tt-dot.reasoning { background: var(--violet); }
+.tt-dot.cost      { background: var(--accent); }
 .tt-dot.requests  { background: var(--accent); }
 .tt-dot.failed    { background: var(--red); }
 .tt-dot.tokens    { background: var(--violet); }

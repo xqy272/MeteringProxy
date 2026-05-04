@@ -184,13 +184,22 @@ func TestBearerToken(t *testing.T) {
 		{"Bearer sk-test", "sk-test"},
 		{"bearer sk-test", "sk-test"},
 		{"BEARER sk-test", "sk-test"},
-		{"Token sk-test", "Token sk-test"},
-		{"Bearer", "Bearer"},
+		{"Token sk-test", ""},
+		{"Basic abc123", ""},
+		{"Bearer", ""},
 	}
 	for _, tc := range tests {
 		if got := bearerToken(tc.auth); got != tc.want {
 			t.Errorf("bearerToken(%q) = %q, want %q", tc.auth, got, tc.want)
 		}
+	}
+}
+
+func TestAPIKeyTokenDoesNotHashNonBearerAuthorization(t *testing.T) {
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
+	if got := apiKeyToken(req); got != "" {
+		t.Fatalf("apiKeyToken Basic auth = %q, want empty", got)
 	}
 }
 
@@ -497,6 +506,33 @@ func TestProxyStreaming_SSEAcrossChunks(t *testing.T) {
 	ev := lastEvent(rw)
 	if ev.InputTokens != 10 || ev.OutputTokens != 2 {
 		t.Errorf("input=%d output=%d, want 10/2", ev.InputTokens, ev.OutputTokens)
+	}
+}
+
+func TestProxyStreaming_BareCRLineBreaks(t *testing.T) {
+	streamBody := "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\rdata: [DONE]\r"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(streamBody))
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"stream":true}`))
+	req.Header.Set("Accept", "text/event-stream")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Body.String() != streamBody {
+		t.Fatal("bare-CR stream body was modified")
+	}
+	if len(rw.events) == 0 {
+		t.Fatal("no event recorded")
+	}
+	if ev := lastEvent(rw); ev.InputTokens != 10 || ev.OutputTokens != 5 || ev.TotalTokens != 15 {
+		t.Fatalf("usage = input %d output %d total %d, want 10/5/15", ev.InputTokens, ev.OutputTokens, ev.TotalTokens)
 	}
 }
 
@@ -1359,6 +1395,7 @@ func TestMergeUsageInfo_AnthropicStreaming(t *testing.T) {
 	}
 	delta := &extractor.UsageInfo{
 		OutputTokens: 45,
+		TotalTokens:  45,
 	}
 
 	merged := mergeUsageInfo(start, delta)

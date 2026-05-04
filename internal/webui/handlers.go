@@ -58,8 +58,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 
 	// Capture section from writer snapshot + DB capture stats
 	qd, dropped, parseErrors, dbErrors := s.writer.Snapshot()
-	var capFailed, capSkipped int64
-	s.db.OverviewCaptureStats(since, &capFailed, &capSkipped)
+	capFailed, capSkipped, capErr := s.db.OverviewCaptureStats(since)
 	captureData := map[string]interface{}{
 		"queue_depth":     qd,
 		"dropped_events":  dropped,
@@ -68,8 +67,10 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		"capture_failed":  capFailed,
 		"capture_skipped": capSkipped,
 	}
-	if dbOverview.Capture.Error == "" {
-		dbOverview.Capture.Data = captureData
+	dbOverview.Capture.Data = captureData
+	if capErr != nil {
+		dbOverview.Capture.Error = capErr.Error()
+	} else if dbOverview.Capture.Error == "" {
 		if dropped > 0 || parseErrors > 0 || dbErrors > 0 || qd > 0 || capFailed > 0 || capSkipped > 0 {
 			captureData["status"] = "attention"
 		} else {

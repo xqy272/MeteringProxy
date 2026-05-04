@@ -124,7 +124,7 @@ func classifyError(status int, errType, errCode, message string) string {
 	}
 	if status == 400 {
 		combined := strings.ToLower(errType + " " + errCode + " " + message)
-		if containsAny(combined, "context", "token limit", "maximum context") {
+		if isContextLengthError(combined) {
 			return "context_length"
 		}
 		return "invalid_request"
@@ -167,6 +167,20 @@ func containsAny(s string, substrs ...string) bool {
 		}
 	}
 	return false
+}
+
+func isContextLengthError(s string) bool {
+	return containsAny(s,
+		"context_length",
+		"context length",
+		"context window",
+		"maximum context",
+		"max context",
+		"token limit",
+		"too many tokens",
+		"maximum number of tokens",
+		"exceeded token",
+	)
 }
 
 var (

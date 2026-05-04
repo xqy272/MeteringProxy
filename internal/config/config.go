@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -28,6 +29,16 @@ type WebUIConfig struct {
 	BasePath string `yaml:"base_path"`
 }
 
+const (
+	minQueueCapacity           = 100
+	maxQueueCapacity           = 1_000_000
+	maxBatchSize               = 10_000
+	maxFlushInterval           = time.Minute
+	minNonstreamSampleBytes    = 1024
+	defaultNonstreamSampleSize = 2 * 1024 * 1024
+	maxNonstreamSampleBytes    = 64 * 1024 * 1024
+)
+
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -52,17 +63,32 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
-	if cfg.QueueCapacity < 100 {
-		cfg.QueueCapacity = 100
+	cfg.Upstream = strings.TrimRight(strings.TrimSpace(cfg.Upstream), "/")
+	if err := validateUpstream(cfg.Upstream); err != nil {
+		return nil, err
+	}
+	if cfg.QueueCapacity < minQueueCapacity {
+		cfg.QueueCapacity = minQueueCapacity
+	} else if cfg.QueueCapacity > maxQueueCapacity {
+		cfg.QueueCapacity = maxQueueCapacity
 	}
 	if cfg.BatchSize < 1 {
 		cfg.BatchSize = 50
+	} else if cfg.BatchSize > maxBatchSize {
+		cfg.BatchSize = maxBatchSize
+	}
+	if cfg.BatchSize > cfg.QueueCapacity {
+		cfg.BatchSize = cfg.QueueCapacity
 	}
 	if cfg.FlushInterval <= 0 {
 		cfg.FlushInterval = 1 * time.Second
+	} else if cfg.FlushInterval > maxFlushInterval {
+		cfg.FlushInterval = maxFlushInterval
 	}
-	if cfg.MaxNonstreamSampleBytes < 1024 {
-		cfg.MaxNonstreamSampleBytes = 2 * 1024 * 1024
+	if cfg.MaxNonstreamSampleBytes < minNonstreamSampleBytes {
+		cfg.MaxNonstreamSampleBytes = defaultNonstreamSampleSize
+	} else if cfg.MaxNonstreamSampleBytes > maxNonstreamSampleBytes {
+		cfg.MaxNonstreamSampleBytes = maxNonstreamSampleBytes
 	}
 	if cfg.WebUI.Enabled {
 		if cfg.WebUI.BasePath == "" {
@@ -77,4 +103,21 @@ func Load(path string) (*Config, error) {
 		}
 	}
 	return cfg, nil
+}
+
+func validateUpstream(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("upstream URL is invalid: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("upstream URL must use http or https")
+	}
+	if u.Host == "" {
+		return fmt.Errorf("upstream URL must include a host")
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("upstream URL must not include query or fragment")
+	}
+	return nil
 }

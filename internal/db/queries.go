@@ -1,6 +1,9 @@
 package db
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Overview returns a composite overview with selected range, recent 1h,
 // capture health, and cost sections.
@@ -245,17 +248,18 @@ func classSeverity(class string) string {
 	}
 }
 
-func (db *DB) OverviewCaptureStats(since time.Time, failed, skipped *int64) {
-	if failed != nil {
-		db.read.QueryRow(`
-			SELECT COUNT(*) FROM request_usage
-			WHERE created_at_unix >= ? AND capture_outcome = 'failed'
-		`, since.Unix()).Scan(failed)
+func (db *DB) OverviewCaptureStats(since time.Time) (failed, skipped int64, err error) {
+	if err := db.read.QueryRow(`
+		SELECT COUNT(*) FROM request_usage
+		WHERE created_at_unix >= ? AND capture_outcome = 'failed'
+	`, since.Unix()).Scan(&failed); err != nil {
+		return 0, 0, fmt.Errorf("capture failed stats: %w", err)
 	}
-	if skipped != nil {
-		db.read.QueryRow(`
-			SELECT COUNT(*) FROM request_usage
-			WHERE created_at_unix >= ? AND capture_outcome = 'skipped'
-		`, since.Unix()).Scan(skipped)
+	if err := db.read.QueryRow(`
+		SELECT COUNT(*) FROM request_usage
+		WHERE created_at_unix >= ? AND capture_outcome = 'skipped'
+	`, since.Unix()).Scan(&skipped); err != nil {
+		return 0, 0, fmt.Errorf("capture skipped stats: %w", err)
 	}
+	return failed, skipped, nil
 }

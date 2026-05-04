@@ -146,6 +146,51 @@ pricing:
 	}
 }
 
+func TestCost_CacheCreationFallsBackToInputPrice(t *testing.T) {
+	p, err := Load(writePricing(t, `
+pricing:
+  claude-sonnet-4-6:
+    input_per_1m: 3.00
+    cached_input_per_1m: 0.30
+    output_per_1m: 15.00
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	cost, known := p.CostWithCacheCreation("claude-sonnet-4-6", 5, 0, 0, 0, 5)
+	if !known {
+		t.Fatal("expected known cost")
+	}
+	expected := 5 / 1_000_000.0 * 3.00
+	if diff := cost - expected; diff < -0.0001 || diff > 0.0001 {
+		t.Fatalf("cost = %.6f, want %.6f", cost, expected)
+	}
+}
+
+func TestCost_ChargesExplicitCacheTokensWhenInputMissing(t *testing.T) {
+	p, err := Load(writePricing(t, `
+pricing:
+  recovered:
+    input_per_1m: 2.00
+    cached_input_per_1m: 0.20
+    cache_creation_per_1m: 2.50
+    output_per_1m: 4.00
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	cost, known := p.CostWithCacheCreation("recovered", 0, 0, 0, 7, 5)
+	if !known {
+		t.Fatal("expected known cost")
+	}
+	expected := 7/1_000_000.0*0.20 + 5/1_000_000.0*2.50
+	if diff := cost - expected; diff < -0.0001 || diff > 0.0001 {
+		t.Fatalf("cost = %.6f, want %.6f", cost, expected)
+	}
+}
+
 func TestCost_CacheBreakdownClampedToInput(t *testing.T) {
 	p, err := Load(writePricing(t, `
 pricing:
