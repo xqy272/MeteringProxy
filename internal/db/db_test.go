@@ -191,6 +191,44 @@ func TestModels(t *testing.T) {
 	}
 }
 
+func TestTokenAggregatesIncludeCacheCreation(t *testing.T) {
+	d := newTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := d.InsertBatch([]UsageRecord{
+		{
+			CreatedAt:           now.Add(-10 * time.Minute).Format(time.RFC3339),
+			Endpoint:            "/v1/messages",
+			Method:              "POST",
+			Status:              200,
+			LatencyMs:           100,
+			ModelReturned:       "claude-sonnet-4-6",
+			InputTokens:         125,
+			OutputTokens:        30,
+			CachedTokens:        20,
+			CacheCreationTokens: 5,
+			TotalTokens:         155,
+		},
+	}); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	models, err := d.Models(now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("Models: %v", err)
+	}
+	if len(models) != 1 || models[0].CacheCreationTokens != 5 {
+		t.Fatalf("models = %+v, want cache_creation_tokens=5", models)
+	}
+
+	buckets, err := d.ModelTimeseries(now.Add(-time.Hour), 60)
+	if err != nil {
+		t.Fatalf("ModelTimeseries: %v", err)
+	}
+	if len(buckets) != 1 || buckets[0].CacheCreationTokens != 5 {
+		t.Fatalf("model timeseries = %+v, want cache_creation_tokens=5", buckets)
+	}
+}
+
 func TestModelsAndKeysTreatEmptyAsUnknown(t *testing.T) {
 	d := newTestDB(t)
 	insertRecord(t, d, ts(-1*time.Minute), "/v1/chat/completions", 200, "", 1, 2, 3)
@@ -231,6 +269,46 @@ func TestRequestsModelFilterUsesEffectiveModel(t *testing.T) {
 	}
 }
 
+func TestRequestsEndpointFilterSupportsProfiles(t *testing.T) {
+	d := newTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := d.InsertBatch([]UsageRecord{
+		{
+			CreatedAt: now.Add(-10 * time.Minute).Format(time.RFC3339),
+			Endpoint:  "/v1beta/models/gemini-2.5-pro:generateContent", EndpointProfile: "gemini_generate_content",
+			Method: "POST", Status: 200, LatencyMs: 10, ModelReturned: "gemini-2.5-pro",
+		},
+		{
+			CreatedAt: now.Add(-9 * time.Minute).Format(time.RFC3339),
+			Endpoint:  "/v1beta/models/gemini-2.5-flash:streamGenerateContent", EndpointProfile: "gemini_generate_content",
+			Method: "POST", Status: 200, LatencyMs: 10, ModelReturned: "gemini-2.5-flash",
+		},
+		{
+			CreatedAt: now.Add(-8 * time.Minute).Format(time.RFC3339),
+			Endpoint:  "/v1/messages", EndpointProfile: "anthropic_messages",
+			Method: "POST", Status: 200, LatencyMs: 10, ModelReturned: "claude-sonnet-4-6",
+		},
+	}); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	rows, err := d.Requests(10, 0, 0, "", "profile:gemini_generate_content", "", now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("Requests profile filter: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %+v, want two Gemini profile rows", rows)
+	}
+
+	rows, err = d.Requests(10, 0, 0, "", "/v1/messages", "", now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("Requests endpoint filter: %v", err)
+	}
+	if len(rows) != 1 || rows[0].EndpointProfile != "anthropic_messages" {
+		t.Fatalf("rows = %+v, want one Anthropic row", rows)
+	}
+}
+
 func TestIssuesAggregatesByEffectiveModelAndUsesLatestSample(t *testing.T) {
 	d := newTestDB(t)
 	now := time.Now().UTC().Truncate(time.Second)
@@ -254,7 +332,10 @@ func TestIssuesAggregatesByEffectiveModelAndUsesLatestSample(t *testing.T) {
 		t.Fatalf("InsertBatch: %v", err)
 	}
 
-	rows := d.Issues(now.Add(-time.Hour), 20)
+	rows, err := d.Issues(now.Add(-time.Hour), 20)
+	if err != nil {
+		t.Fatalf("Issues: %v", err)
+	}
 	if len(rows) != 2 {
 		t.Fatalf("issues = %+v, want 2 grouped rows", rows)
 	}
@@ -623,5 +704,111 @@ func TestDBFilePermissions(t *testing.T) {
 				t.Errorf("%s file permissions: %04o, want 0600", suffix, got)
 			}
 		}
+	}
+}
+
+func TestOverview(t *testing.T) {
+	d := newTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	if err := d.InsertBatch([]UsageRecord{
+		{CreatedAt: now.Add(-30 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/chat/completions", Method: "POST", Status: 200, LatencyMs: 100, TTFBMs: 20, InputTokens: 500, OutputTokens: 200, TotalTokens: 700, CaptureOutcome: "captured"},
+		{CreatedAt: now.Add(-20 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/chat/completions", Method: "POST", Status: 500, LatencyMs: 300, TTFBMs: 60, InputTokens: 100, OutputTokens: 50, TotalTokens: 150, CaptureOutcome: "failed"},
+	}); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	row := d.Overview(now.Add(-time.Hour))
+	if row == nil {
+		t.Fatal("Overview returned nil")
+	}
+	if row.Selected.Error != "" {
+		t.Fatalf("Overview.Selected error: %s", row.Selected.Error)
+	}
+	data, ok := row.Selected.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Overview.Selected.Data is not a map, got %T", row.Selected.Data)
+	}
+	totalReqs, _ := data["total_requests"].(int64)
+	if totalReqs != 2 {
+		t.Errorf("total_requests = %d, want 2", totalReqs)
+	}
+	failedReqs, _ := data["failed_requests"].(int64)
+	if failedReqs != 1 {
+		t.Errorf("failed_requests = %d, want 1", failedReqs)
+	}
+}
+
+func TestInsertBatch_AllFieldsPopulated(t *testing.T) {
+	d := newTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	fullRecord := UsageRecord{
+		CreatedAt:             now.Add(-5 * time.Minute).Format(time.RFC3339),
+		RequestID:             "req-test-all-fields",
+		Endpoint:              "/v1/chat/completions",
+		Method:                "POST",
+		Status:                200,
+		LatencyMs:             150,
+		TTFBMs:                30,
+		Stream:                true,
+		ClientIPHash:          "ip-hash-123",
+		APIKeyHash:            "key-hash-456",
+		ModelRequested:        "gpt-4o",
+		ModelReturned:         "gpt-4o-2024-08-06",
+		InputTokens:           1000,
+		OutputTokens:          500,
+		ReasoningTokens:       50,
+		CachedTokens:          200,
+		CacheCreationTokens:   30,
+		TotalTokens:           1550,
+		RequestBytes:          2048,
+		ResponseBytes:         8192,
+		Error:                 "",
+		EndpointProfile:       "chat_completions",
+		CaptureMode:           "usage_metered",
+		MeteringKind:          "llm_tokens",
+		UsageRawJSON:          `{"prompt_tokens":1000}`,
+		UsageRawTruncated:     false,
+		BillableInput:         0.03,
+		BillableOutput:        0.06,
+		BillableTotal:         0.09,
+		BillableUnit:          "USD",
+		CaptureOutcome:        "captured",
+		CaptureReason:         "",
+		ErrorClass:            "",
+		ErrorType:             "",
+		ErrorCode:             "",
+		ErrorParam:            "",
+		ErrorMessage:          "",
+		ErrorMessageTruncated: false,
+	}
+
+	if err := d.InsertBatch([]UsageRecord{fullRecord}); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	rows, err := d.Requests(10, 0, 0, "", "", "", time.Time{})
+	if err != nil {
+		t.Fatalf("Requests: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	r := rows[0]
+	if r.RequestID != "req-test-all-fields" {
+		t.Errorf("request_id = %q, want req-test-all-fields", r.RequestID)
+	}
+	if r.ReasoningTokens != 50 {
+		t.Errorf("reasoning_tokens = %d, want 50", r.ReasoningTokens)
+	}
+	if r.CacheCreationTokens != 30 {
+		t.Errorf("cache_creation_tokens = %d, want 30", r.CacheCreationTokens)
+	}
+	if r.EndpointProfile != "chat_completions" {
+		t.Errorf("endpoint_profile = %q, want chat_completions", r.EndpointProfile)
+	}
+	if r.CaptureOutcome != "captured" {
+		t.Errorf("capture_outcome = %q, want captured", r.CaptureOutcome)
 	}
 }

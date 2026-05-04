@@ -363,4 +363,3 @@ func BenchmarkGolden_StreamForwarding(b *testing.B) {
 		p.ServeHTTP(rec, req)
 	}
 }
-

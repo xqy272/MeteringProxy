@@ -16,6 +16,11 @@ Only the metered API paths should be handled by this proxy in production:
 
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
+- `POST /v1/messages`
+- `POST /v1beta/models/{model}:generateContent`
+- `POST /v1beta/models/{model}:streamGenerateContent`
+- `POST /v1/models/{model}:generateContent`
+- `POST /v1/models/{model}:streamGenerateContent`
 
 ## Non-Negotiable Invariants
 
@@ -33,7 +38,7 @@ Only the metered API paths should be handled by this proxy in production:
 main.go                 wiring, HTTP server, shutdown, health reporter
 internal/config         YAML config defaults and validation
 internal/db             SQLite schema, migrations, queries
-internal/extractor      usage extraction for chat and responses APIs
+internal/extractor      usage extraction for OpenAI, Anthropic, and Gemini APIs
 internal/hash           salted SHA256 hashing
 internal/pricing        estimated cost calculation
 internal/proxy          reverse proxy, SSE handling, usage capture
@@ -54,6 +59,8 @@ internal/writer         async batch writer and counters
 
 - Chat Completions usage uses `prompt_tokens`, `completion_tokens`, and `total_tokens`.
 - Responses API usage uses `input_tokens`, `output_tokens`, and `total_tokens`.
+- Anthropic Messages usage uses `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, and `cache_read_input_tokens`.
+- Gemini generateContent usage uses `usageMetadata` token counts.
 - Reasoning and cached token fields are detail fields and may be absent.
 - SSE parsing is best-effort and must never alter forwarded bytes.
 
@@ -63,6 +70,7 @@ Reasoning tokens are treated as a subset of output tokens.
 
 - If `reasoning_per_1m` is set: charge regular output as `output_tokens - reasoning_tokens`, clamped at zero, plus reasoning at `reasoning_per_1m`.
 - If `reasoning_per_1m` is not set: charge all `output_tokens` at `output_per_1m` and do not add reasoning again.
+- Anthropic cache creation tokens use `cache_creation_per_1m` when configured, otherwise they fall back to regular input pricing.
 
 ## Test Commands
 

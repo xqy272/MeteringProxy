@@ -25,14 +25,15 @@ type Event struct {
 	ModelRequested string
 	ModelReturned  string
 
-	InputTokens     int64
-	OutputTokens    int64
-	ReasoningTokens int64
-	CachedTokens    int64
-	TotalTokens     int64
+	InputTokens         int64
+	OutputTokens        int64
+	ReasoningTokens     int64
+	CachedTokens        int64
+	CacheCreationTokens int64
+	TotalTokens         int64
 
 	// Billable fields are reserved for future event-time pricing.
-	// Currently cost is computed at query time via pricing.Cost() in the WebUI;
+	// Currently cost is computed at query time in the WebUI;
 	// these fields are always zero and stored as zero in the database.
 	BillableInput  float64
 	BillableOutput float64

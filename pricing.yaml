@@ -16,16 +16,19 @@ pricing:
   claude-sonnet-4-6:
     input_per_1m: 3.00
     cached_input_per_1m: 0.30
+    cache_creation_per_1m: 3.75
     output_per_1m: 15.00
     reasoning_per_1m: 3.00
   claude-opus-4-7:
     input_per_1m: 15.00
     cached_input_per_1m: 1.50
+    cache_creation_per_1m: 18.75
     output_per_1m: 75.00
     reasoning_per_1m: 15.00
   claude-haiku-4-5:
     input_per_1m: 1.00
     cached_input_per_1m: 0.10
+    cache_creation_per_1m: 1.25
     output_per_1m: 5.00
     reasoning_per_1m: 1.00
   # DeepSeek models

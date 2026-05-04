@@ -45,8 +45,8 @@ func TestProxyNonStreaming_ErrorFieldsRecorded(t *testing.T) {
 	if ev.ErrorCode != "insufficient_quota" {
 		t.Errorf("error_code = %q, want insufficient_quota", ev.ErrorCode)
 	}
-	if ev.ErrorMessage == "" {
-		t.Error("error_message should not be empty")
+	if ev.ErrorMessage != "" {
+		t.Errorf("error_message = %q, want empty; provider messages are not persisted", ev.ErrorMessage)
 	}
 }
 
@@ -194,4 +194,3 @@ func TestProxyNonStreaming_ParseErrorDoesNotBlockForwarding(t *testing.T) {
 		t.Fatal("no event recorded for non-JSON error")
 	}
 }
-

@@ -44,7 +44,7 @@ func main() {
 		}
 		dbPath := cfg.Database
 		if filepath.IsAbs(dbPath) || strings.HasPrefix(dbPath, "/") || strings.HasPrefix(dbPath, `\`) ||
-				!strings.HasSuffix(filepath.Base(dbPath), ".dev.sqlite") {
+			!strings.HasSuffix(filepath.Base(dbPath), ".dev.sqlite") {
 			log.Fatalf("--seed-demo refused: database %q is not a relative *.dev.sqlite path", dbPath)
 		}
 	}

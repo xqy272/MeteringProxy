@@ -51,6 +51,54 @@ func TestRegistry_ResponsesMatch(t *testing.T) {
 	}
 }
 
+func TestRegistry_AnthropicMessagesMatch(t *testing.T) {
+	r := NewRegistry()
+	p, err := r.Match(http.MethodPost, "/v1/messages")
+	if err != nil {
+		t.Fatalf("Match: %v", err)
+	}
+	if p.Name != "anthropic_messages" {
+		t.Errorf("profile name = %q, want anthropic_messages", p.Name)
+	}
+	if p.CaptureMode != event.CaptureUsageMetered {
+		t.Errorf("capture_mode = %q, want %q", p.CaptureMode, event.CaptureUsageMetered)
+	}
+	if p.MeteringKind != event.MeteringLLMTokens {
+		t.Errorf("metering_kind = %q, want %q", p.MeteringKind, event.MeteringLLMTokens)
+	}
+	if !p.IsMetered() {
+		t.Error("Anthropic Messages should be metered")
+	}
+}
+
+func TestRegistry_GeminiGenerateContentMatch(t *testing.T) {
+	r := NewRegistry()
+	for _, path := range []string{
+		"/v1beta/models/gemini-2.5-pro:generateContent",
+		"/v1beta/models/gemini-2.5-pro:streamGenerateContent",
+		"/v1/models/gemini-2.5-flash:generateContent",
+	} {
+		p, err := r.Match(http.MethodPost, path)
+		if err != nil {
+			t.Fatalf("Match(%q): %v", path, err)
+		}
+		if p.Name != "gemini_generate_content" {
+			t.Errorf("profile name for %q = %q, want gemini_generate_content", path, p.Name)
+		}
+		if p.CaptureMode != event.CaptureUsageMetered {
+			t.Errorf("capture_mode = %q, want %q", p.CaptureMode, event.CaptureUsageMetered)
+		}
+	}
+
+	p, err := r.Match(http.MethodPost, "/v1beta/models/gemini-2.5-pro:countTokens")
+	if err != nil {
+		t.Fatalf("Match countTokens: %v", err)
+	}
+	if p.Name != "unknown_passthrough" {
+		t.Errorf("countTokens matched %s, want unknown_passthrough", p.Name)
+	}
+}
+
 func TestRegistry_UnknownPassthrough(t *testing.T) {
 	r := NewRegistry()
 
@@ -99,6 +147,17 @@ func TestRegistry_ChatCompletionsDoesNotMatchSubpath(t *testing.T) {
 	}
 	if p.Name != "unknown_passthrough" {
 		t.Errorf("POST /v1/chat/completions/extra matched %s, want unknown_passthrough", p.Name)
+	}
+}
+
+func TestRegistry_TrailingSlashNormalization(t *testing.T) {
+	r := NewRegistry()
+	p, err := r.Match(http.MethodPost, "/v1/chat/completions/")
+	if err != nil {
+		t.Fatalf("Match: %v", err)
+	}
+	if p.Name != "chat_completions" {
+		t.Errorf("POST /v1/chat/completions/ matched %s, want chat_completions", p.Name)
 	}
 }
 
@@ -165,15 +224,65 @@ func TestRegistry_ExtractorBinding_Responses(t *testing.T) {
 	}
 }
 
+func TestRegistry_ExtractorBinding_AnthropicMessages(t *testing.T) {
+	r := NewRegistry()
+	p, err := r.Match(http.MethodPost, "/v1/messages")
+	if err != nil {
+		t.Fatalf("Match: %v", err)
+	}
+	if p.NonStreamExtractor == nil || p.StreamExtractor == nil {
+		t.Fatal("Anthropic extractors should be bound")
+	}
+	u, err := p.NonStreamExtractor([]byte(`{"model":"claude-sonnet-4-6","usage":{"input_tokens":10,"output_tokens":5}}`), "/v1/messages")
+	if err != nil {
+		t.Fatalf("non-stream extractor error: %v", err)
+	}
+	if u == nil || u.InputTokens != 10 || u.OutputTokens != 5 {
+		t.Fatalf("Anthropic non-stream extractor failed: %+v", u)
+	}
+	u, err = p.StreamExtractor([]byte(`data: {"type":"message_delta","usage":{"output_tokens":12}}`))
+	if err != nil {
+		t.Fatalf("stream extractor error: %v", err)
+	}
+	if u == nil || u.OutputTokens != 12 {
+		t.Fatalf("Anthropic stream extractor failed: %+v", u)
+	}
+}
+
+func TestRegistry_ExtractorBinding_GeminiGenerateContent(t *testing.T) {
+	r := NewRegistry()
+	p, err := r.Match(http.MethodPost, "/v1beta/models/gemini-2.5-flash:generateContent")
+	if err != nil {
+		t.Fatalf("Match: %v", err)
+	}
+	if p.NonStreamExtractor == nil || p.StreamExtractor == nil {
+		t.Fatal("Gemini extractors should be bound")
+	}
+	u, err := p.NonStreamExtractor([]byte(`{"modelVersion":"gemini-2.5-flash","usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}`), "/v1beta/models/gemini-2.5-flash:generateContent")
+	if err != nil {
+		t.Fatalf("non-stream extractor error: %v", err)
+	}
+	if u == nil || u.InputTokens != 10 || u.OutputTokens != 5 {
+		t.Fatalf("Gemini non-stream extractor failed: %+v", u)
+	}
+	u, err = p.StreamExtractor([]byte(`data: {"modelVersion":"gemini-2.5-flash","usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":6,"totalTokenCount":17}}`))
+	if err != nil {
+		t.Fatalf("stream extractor error: %v", err)
+	}
+	if u == nil || u.InputTokens != 11 || u.OutputTokens != 6 {
+		t.Fatalf("Gemini stream extractor failed: %+v", u)
+	}
+}
+
 func TestRegistry_Profiles(t *testing.T) {
 	r := NewRegistry()
 	all := r.Profiles()
-	if len(all) != 3 {
-		t.Errorf("expected 3 profiles, got %d", len(all))
+	if len(all) != 5 {
+		t.Errorf("expected 5 profiles, got %d", len(all))
 	}
 	metered := r.MeteredProfiles()
-	if len(metered) != 2 {
-		t.Errorf("expected 2 metered profiles, got %d", len(metered))
+	if len(metered) != 4 {
+		t.Errorf("expected 4 metered profiles, got %d", len(metered))
 	}
 }
 
@@ -184,6 +293,8 @@ func TestEndpointProfile_DisplayName(t *testing.T) {
 	}{
 		{"chat_completions", "Chat Completions"},
 		{"responses", "Responses API"},
+		{"anthropic_messages", "Anthropic Messages"},
+		{"gemini_generate_content", "Gemini Generate Content"},
 		{"unknown_passthrough", "Unknown (Passthrough)"},
 		{"custom", "custom"},
 	}
@@ -210,11 +321,25 @@ func TestEndpointProfile_ToEndpointMeta(t *testing.T) {
 	if meta.Path != "/v1/chat/completions" {
 		t.Errorf("meta.Path = %q", meta.Path)
 	}
+	if meta.FilterValue != "/v1/chat/completions" {
+		t.Errorf("meta.FilterValue = %q", meta.FilterValue)
+	}
 	if meta.DisplayName != "Chat Completions" {
 		t.Errorf("meta.DisplayName = %q", meta.DisplayName)
 	}
 	if meta.MeteringKind != event.MeteringLLMTokens {
 		t.Errorf("meta.MeteringKind = %q", meta.MeteringKind)
+	}
+
+	dynamic := &EndpointProfile{
+		Name:        "gemini_generate_content",
+		PathPrefix:  "/v1(beta)?/models/{model}:generateContent|streamGenerateContent",
+		Method:      "POST",
+		PathMatcher: func(path string) bool { return true },
+	}
+	meta = dynamic.ToEndpointMeta()
+	if meta.FilterValue != "profile:gemini_generate_content" {
+		t.Errorf("dynamic meta.FilterValue = %q, want profile:gemini_generate_content", meta.FilterValue)
 	}
 }
 

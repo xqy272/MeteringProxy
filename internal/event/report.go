@@ -15,17 +15,18 @@ type SummaryReport struct {
 }
 
 type ModelReport struct {
-	Model           string  `json:"model"`
-	ModelSource     string  `json:"model_source"`
-	RequestCount    int64   `json:"request_count"`
-	FailedCount     int64   `json:"failed_count"`
-	InputTokens     int64   `json:"input_tokens"`
-	OutputTokens    int64   `json:"output_tokens"`
-	ReasoningTokens int64   `json:"reasoning_tokens"`
-	CachedTokens    int64   `json:"cached_tokens"`
-	TotalTokens     int64   `json:"total_tokens"`
-	Cost            float64 `json:"cost"`
-	CostKnown       bool    `json:"cost_known"`
+	Model               string  `json:"model"`
+	ModelSource         string  `json:"model_source"`
+	RequestCount        int64   `json:"request_count"`
+	FailedCount         int64   `json:"failed_count"`
+	InputTokens         int64   `json:"input_tokens"`
+	OutputTokens        int64   `json:"output_tokens"`
+	ReasoningTokens     int64   `json:"reasoning_tokens"`
+	CachedTokens        int64   `json:"cached_tokens"`
+	CacheCreationTokens int64   `json:"cache_creation_tokens"`
+	TotalTokens         int64   `json:"total_tokens"`
+	Cost                float64 `json:"cost"`
+	CostKnown           bool    `json:"cost_known"`
 }
 
 type KeyReport struct {
@@ -38,19 +39,20 @@ type KeyReport struct {
 }
 
 type TimeseriesReport struct {
-	Timestamp       string  `json:"timestamp"`
-	Count           int64   `json:"count"`
-	FailedCount     int64   `json:"failed_count"`
-	InputTokens     int64   `json:"input_tokens"`
-	OutputTokens    int64   `json:"output_tokens"`
-	ReasoningTokens int64   `json:"reasoning_tokens"`
-	CachedTokens    int64   `json:"cached_tokens"`
-	TotalTokens     int64   `json:"total_tokens"`
-	AvgLatencyMs    int64   `json:"avg_latency_ms"`
-	AvgTTFBMs       int64   `json:"avg_ttfb_ms"`
-	Cost            float64 `json:"cost"`
-	CostKnown       bool    `json:"cost_known"`
-	UnpricedModels  int64   `json:"unpriced_models"`
+	Timestamp           string  `json:"timestamp"`
+	Count               int64   `json:"count"`
+	FailedCount         int64   `json:"failed_count"`
+	InputTokens         int64   `json:"input_tokens"`
+	OutputTokens        int64   `json:"output_tokens"`
+	ReasoningTokens     int64   `json:"reasoning_tokens"`
+	CachedTokens        int64   `json:"cached_tokens"`
+	CacheCreationTokens int64   `json:"cache_creation_tokens"`
+	TotalTokens         int64   `json:"total_tokens"`
+	AvgLatencyMs        int64   `json:"avg_latency_ms"`
+	AvgTTFBMs           int64   `json:"avg_ttfb_ms"`
+	Cost                float64 `json:"cost"`
+	CostKnown           bool    `json:"cost_known"`
+	UnpricedModels      int64   `json:"unpriced_models"`
 }
 
 type ActivityReport struct {
@@ -93,6 +95,7 @@ type RequestReport struct {
 	OutputTokens          int64  `json:"output_tokens"`
 	ReasoningTokens       int64  `json:"reasoning_tokens"`
 	CachedTokens          int64  `json:"cached_tokens"`
+	CacheCreationTokens   int64  `json:"cache_creation_tokens"`
 	TotalTokens           int64  `json:"total_tokens"`
 	RequestBytes          int64  `json:"request_bytes"`
 	ResponseBytes         int64  `json:"response_bytes"`
@@ -135,6 +138,7 @@ type MetadataReport struct {
 type EndpointMeta struct {
 	Name         string `json:"name"`
 	Path         string `json:"path"`
+	FilterValue  string `json:"filter_value"`
 	Method       string `json:"method"`
 	DisplayName  string `json:"display_name"`
 	MeteringKind string `json:"metering_kind"`

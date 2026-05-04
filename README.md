@@ -19,7 +19,7 @@ MeteringProxy 是一个面向 AI 网关流量的透明计量代理，部署在 C
 
 建议的 Caddy 路由策略：
 
-- 仅将 `POST /v1/chat/completions` 和 `POST /v1/responses` 路由至 MeteringProxy。
+- 将计量目标 API 路径路由至 MeteringProxy：`POST /v1/chat/completions`、`POST /v1/responses`、`POST /v1/messages`，以及 Gemini 原生 `POST /v1beta/models/{model}:generateContent` / `POST /v1beta/models/{model}:streamGenerateContent`（`/v1/models/...` 同样支持）。
 - 将非计量的管理与模型接口直接路由至 CLIProxyAPI。
 - 使用 Basic Auth 或等效访问控制保护 `/metering` 路径。
 - 如有需要，在 Caddy 侧配置请求体大小限制。Go 代理层有意不截断请求体，保持透明代理行为不变。
@@ -107,16 +107,19 @@ pricing:
   claude-sonnet-4-6:
     input_per_1m: 3.00
     cached_input_per_1m: 0.30
+    cache_creation_per_1m: 3.75
     output_per_1m: 15.00
     reasoning_per_1m: 3.00
   claude-opus-4-7:
     input_per_1m: 15.00
     cached_input_per_1m: 1.50
+    cache_creation_per_1m: 18.75
     output_per_1m: 75.00
     reasoning_per_1m: 15.00
   claude-haiku-4-5:
     input_per_1m: 1.00
     cached_input_per_1m: 0.10
+    cache_creation_per_1m: 1.25
     output_per_1m: 5.00
     reasoning_per_1m: 1.00
   # DeepSeek
@@ -177,9 +180,25 @@ api.example.com {
 
     @metered {
         method POST
-        path /v1/chat/completions /v1/responses
+        path /v1/chat/completions /v1/responses /v1/messages
     }
     handle @metered {
+        reverse_proxy 127.0.0.1:8320 {
+            stream_close_delay 5m
+            transport http {
+                dial_timeout 5s
+                response_header_timeout 180s
+                read_timeout 0
+                write_timeout 0
+            }
+        }
+    }
+
+    @metered_gemini {
+        method POST
+        path_regexp ^/v1(beta)?/models/[^/]+:(generateContent|streamGenerateContent)$
+    }
+    handle @metered_gemini {
         reverse_proxy 127.0.0.1:8320 {
             stream_close_delay 5m
             transport http {
@@ -288,7 +307,7 @@ chmod 600 /opt/ai-gateway/metering/usage.sqlite
 - 请求模型与返回模型名称
 - 输入、输出、缓存、推理及总 token 数量
 - 请求/响应字节数
-- 代理/上游错误信息（如有）
+- 错误分类及 provider type/code/param（如有；不落库 provider 原始 message）
 
 **不会**存储提示词、响应正文、明文 API Key 或明文客户端 IP。
 
@@ -358,6 +377,8 @@ pricing:
 推理 token 被视为输出 token 的子集：
 - 若配置了 `reasoning_per_1m`：常规输出 = max(总输出 - 推理, 0)，推理单独计费。
 - 若未配置 `reasoning_per_1m`：全部输出按 `output_per_1m` 计费，推理不重复计费。
+
+Anthropic cache creation token 优先按 `cache_creation_per_1m` 计费；未配置时回退为普通输入价格。缓存读取 token 按 `cached_input_per_1m` 计费。
 
 价格表只在进程启动时加载，修改后须重启服务。
 

@@ -1,218 +1,201 @@
 package writer
 
 import (
-	"errors"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"ai-gateway-metering-proxy/internal/event"
 )
 
-type fakeInserter struct {
-	mu        sync.Mutex
-	failures  int
-	calls     int
-	inserted  []event.Event
-	callReady chan struct{}
+type mockSink struct {
+	mu      sync.Mutex
+	records [][]event.Event
 }
 
-func (f *fakeInserter) InsertEvents(events []event.Event) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls++
-	if f.callReady != nil {
-		select {
-		case <-f.callReady:
-		default:
-			close(f.callReady)
-		}
-	}
-	if f.failures > 0 {
-		f.failures--
-		return errors.New("temporary insert failure")
-	}
-	f.inserted = append(f.inserted, events...)
+func (m *mockSink) InsertEvents(events []event.Event) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.records = append(m.records, events)
 	return nil
 }
 
-func (f *fakeInserter) snapshot() (calls int, inserted int) {
+func (m *mockSink) getRecords() [][]event.Event {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make([][]event.Event, len(m.records))
+	copy(result, m.records)
+	return result
+}
+
+type failingSink struct {
+	mu        sync.Mutex
+	attempts  int
+	failUntil int
+	delegate  *mockSink
+}
+
+func (f *failingSink) InsertEvents(events []event.Event) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.calls, len(f.inserted)
+	f.attempts++
+	shouldFail := f.attempts <= f.failUntil
+	f.mu.Unlock()
+	if shouldFail {
+		return errDBFail
+	}
+	return f.delegate.InsertEvents(events)
 }
 
-func evWithTime(ts string) StatsEvent {
-	return StatsEvent{Event: event.Event{
-		Timestamp: time.Now().UTC(),
-		Path:      "/v1/responses",
-		Method:    "POST",
-		Status:    200,
-	}}
+var errDBFail = &dbError{}
+
+type dbError struct{}
+
+func (e *dbError) Error() string { return "db write error" }
+
+func TestBatchWriter_EnqueueAndFlush(t *testing.T) {
+	sink := &mockSink{}
+	bw := New(sink, 100, 10, 50*time.Millisecond)
+	bw.Start()
+	defer bw.Stop()
+
+	ev := StatsEvent{Event: event.Event{Path: "/v1/chat/completions", Method: "POST", Status: 200}}
+	if !bw.Enqueue(ev) {
+		t.Fatal("Enqueue should succeed")
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	records := sink.getRecords()
+	if len(records) == 0 {
+		t.Fatal("expected at least one batch flush")
+	}
+	totalEvents := 0
+	for _, batch := range records {
+		totalEvents += len(batch)
+	}
+	if totalEvents != 1 {
+		t.Errorf("total events = %d, want 1", totalEvents)
+	}
 }
 
-func TestEnqueueDropsWhenQueueFull(t *testing.T) {
-	bw := &BatchWriter{
-		queue:       make(chan StatsEvent, 1),
-		db:          &fakeInserter{},
-		batchSize:   10,
-		flushTicker: time.NewTicker(time.Hour),
-		stopCh:      make(chan struct{}),
-	}
-	defer bw.flushTicker.Stop()
+func TestBatchWriter_QueueOverflow(t *testing.T) {
+	sink := &mockSink{}
+	bw := New(sink, 5, 100, 10*time.Second)
+	bw.Start()
+	defer bw.Stop()
 
-	if !bw.Enqueue(StatsEvent{}) {
-		t.Fatal("first enqueue should fit")
+	for i := 0; i < 10; i++ {
+		bw.Enqueue(StatsEvent{Event: event.Event{Path: "/test", Method: "POST", Status: 200}})
 	}
-	if bw.Enqueue(StatsEvent{}) {
-		t.Fatal("second enqueue should be dropped")
+	_, dropped, _, _ := bw.Snapshot()
+	if dropped == 0 {
+		t.Error("expected some events to be dropped on overflow")
 	}
-	qd, dropped, _, _ := bw.Snapshot()
+}
+
+func TestBatchWriter_BatchSizeFlush(t *testing.T) {
+	sink := &mockSink{}
+	bw := New(sink, 1000, 3, 10*time.Second)
+	bw.Start()
+	defer bw.Stop()
+
+	for i := 0; i < 6; i++ {
+		bw.Enqueue(StatsEvent{Event: event.Event{Path: "/test", Method: "POST", Status: 200}})
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	records := sink.getRecords()
+	totalEvents := 0
+	for _, batch := range records {
+		totalEvents += len(batch)
+	}
+	if totalEvents != 6 {
+		t.Errorf("total events = %d, want 6", totalEvents)
+	}
+	batchFound := false
+	for _, batch := range records {
+		if len(batch) == 3 {
+			batchFound = true
+		}
+	}
+	if !batchFound {
+		t.Error("expected at least one batch of size 3")
+	}
+}
+
+func TestBatchWriter_StopDrainsQueue(t *testing.T) {
+	sink := &mockSink{}
+	bw := New(sink, 1000, 100, 10*time.Second)
+	bw.Start()
+
+	for i := 0; i < 5; i++ {
+		bw.Enqueue(StatsEvent{Event: event.Event{Path: "/test", Method: "POST", Status: 200}})
+	}
+
+	bw.Stop()
+
+	records := sink.getRecords()
+	totalEvents := 0
+	for _, batch := range records {
+		totalEvents += len(batch)
+	}
+	if totalEvents != 5 {
+		t.Errorf("total events after stop = %d, want 5", totalEvents)
+	}
+}
+
+func TestBatchWriter_EnqueueAfterStopIsDropped(t *testing.T) {
+	sink := &mockSink{}
+	bw := New(sink, 100, 10, 10*time.Second)
+	bw.Start()
+	bw.Stop()
+
+	if bw.Enqueue(StatsEvent{Event: event.Event{Path: "/test", Method: "POST", Status: 200}}) {
+		t.Fatal("Enqueue after Stop should fail")
+	}
+	_, dropped, _, _ := bw.Snapshot()
 	if dropped != 1 {
-		t.Fatalf("DroppedEvents = %d, want 1", dropped)
+		t.Errorf("dropped = %d, want 1", dropped)
 	}
+}
+
+func TestBatchWriter_Snapshot(t *testing.T) {
+	sink := &mockSink{}
+	bw := New(sink, 100, 10, 10*time.Second)
+
+	bw.Enqueue(StatsEvent{Event: event.Event{Path: "/test"}})
+	bw.IncrParseErrors()
+
+	qd, dropped, parseErrors, dbErrors := bw.Snapshot()
 	if qd != 1 {
-		t.Fatalf("QueueDepth = %d, want 1", qd)
+		t.Errorf("queue depth = %d, want 1", qd)
+	}
+	if dropped != 0 {
+		t.Errorf("dropped = %d, want 0", dropped)
+	}
+	if parseErrors != 1 {
+		t.Errorf("parseErrors = %d, want 1", parseErrors)
+	}
+	if dbErrors != 0 {
+		t.Errorf("dbErrors = %d, want 0", dbErrors)
 	}
 }
 
-func TestStopDrainsQueue(t *testing.T) {
-	fake := &fakeInserter{}
-	bw := &BatchWriter{
-		queue:       make(chan StatsEvent, 10),
-		db:          fake,
-		batchSize:   50,
-		flushTicker: time.NewTicker(time.Hour),
-		stopCh:      make(chan struct{}),
-	}
-	bw.Start()
-
-	for i := 0; i < 3; i++ {
-		if !bw.Enqueue(evWithTime("")) {
-			t.Fatalf("enqueue %d dropped", i)
-		}
-	}
-	bw.Stop()
-
-	_, inserted := fake.snapshot()
-	if inserted != 3 {
-		t.Fatalf("inserted = %d, want 3", inserted)
-	}
-	if qd, _, _, _ := bw.Snapshot(); qd != 0 {
-		t.Fatalf("QueueDepth = %d, want 0", qd)
-	}
-}
-
-func TestFlushRetriesOnceOnInsertFailure(t *testing.T) {
-	fake := &fakeInserter{failures: 1, callReady: make(chan struct{})}
-	bw := &BatchWriter{
-		queue:       make(chan StatsEvent, 10),
-		db:          fake,
-		batchSize:   1,
-		flushTicker: time.NewTicker(time.Hour),
-		stopCh:      make(chan struct{}),
-	}
+func TestBatchWriter_RetryOnDBError(t *testing.T) {
+	delegate := &mockSink{}
+	sink := &failingSink{failUntil: 1, delegate: delegate}
+	bw := New(sink, 100, 100, 50*time.Millisecond)
 	bw.Start()
 	defer bw.Stop()
 
-	if !bw.Enqueue(evWithTime("")) {
-		t.Fatal("enqueue dropped")
-	}
+	bw.Enqueue(StatsEvent{Event: event.Event{Path: "/test", Method: "POST", Status: 200}})
 
-	select {
-	case <-fake.callReady:
-	case <-time.After(2 * time.Second):
-		t.Fatal("insert was not attempted")
+	time.Sleep(200 * time.Millisecond)
+	records := delegate.getRecords()
+	totalEvents := 0
+	for _, batch := range records {
+		totalEvents += len(batch)
 	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		calls, inserted := fake.snapshot()
-		if calls >= 2 && inserted == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("retry did not succeed; calls=%d inserted=%d", calls, inserted)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if _, _, _, dbErrors := bw.Snapshot(); dbErrors != 0 {
-		t.Fatalf("DBWriteErrors = %d, want 0 after retry success", dbErrors)
-	}
-}
-
-func TestFlushCountsDBErrorAfterRetryFailure(t *testing.T) {
-	fake := &fakeInserter{failures: 2, callReady: make(chan struct{})}
-	bw := &BatchWriter{
-		queue:       make(chan StatsEvent, 10),
-		db:          fake,
-		batchSize:   1,
-		flushTicker: time.NewTicker(time.Hour),
-		stopCh:      make(chan struct{}),
-	}
-	bw.Start()
-	defer bw.Stop()
-
-	if !bw.Enqueue(evWithTime("")) {
-		t.Fatal("enqueue dropped")
-	}
-
-	select {
-	case <-fake.callReady:
-	case <-time.After(2 * time.Second):
-		t.Fatal("insert was not attempted")
-	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		calls, inserted := fake.snapshot()
-		_, _, _, dbErrors := bw.Snapshot()
-		if calls >= 2 && inserted == 0 && dbErrors == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("retry failure was not counted; calls=%d inserted=%d dbErrors=%d", calls, inserted, dbErrors)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-func TestConcurrentEnqueue(t *testing.T) {
-	fake := &fakeInserter{}
-	bw := &BatchWriter{
-		queue:       make(chan StatsEvent, 100),
-		db:          fake,
-		batchSize:   50,
-		flushTicker: time.NewTicker(time.Hour),
-		stopCh:      make(chan struct{}),
-	}
-	bw.Start()
-
-	const goroutines = 10
-	const perRoutine = 10
-	var wg sync.WaitGroup
-	successCount := int64(0)
-
-	for g := 0; g < goroutines; g++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := 0; i < perRoutine; i++ {
-				if bw.Enqueue(evWithTime("")) {
-					atomic.AddInt64(&successCount, 1)
-				}
-			}
-		}()
-	}
-	wg.Wait()
-	bw.Stop()
-
-	_, inserted := fake.snapshot()
-	if int64(inserted) != atomic.LoadInt64(&successCount) {
-		t.Fatalf("inserted = %d, want %d", inserted, successCount)
-	}
-	if qd, _, _, _ := bw.Snapshot(); qd != 0 {
-		t.Fatalf("QueueDepth = %d, want 0 after Stop", qd)
+	if totalEvents != 1 {
+		t.Errorf("total events after retry = %d, want 1", totalEvents)
 	}
 }

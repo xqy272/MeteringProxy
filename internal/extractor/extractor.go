@@ -7,13 +7,14 @@ import (
 )
 
 type UsageInfo struct {
-	Model           string `json:"model"`
-	InputTokens     int64  `json:"input_tokens"`
-	OutputTokens    int64  `json:"output_tokens"`
-	ReasoningTokens int64  `json:"reasoning_tokens"`
-	CachedTokens    int64  `json:"cached_tokens"`
-	TotalTokens     int64  `json:"total_tokens"`
-	UsageRawJSON    string `json:"usage_raw_json,omitempty"`
+	Model               string `json:"model"`
+	InputTokens         int64  `json:"input_tokens"`
+	OutputTokens        int64  `json:"output_tokens"`
+	ReasoningTokens     int64  `json:"reasoning_tokens"`
+	CachedTokens        int64  `json:"cached_tokens"`
+	CacheCreationTokens int64  `json:"cache_creation_tokens"`
+	TotalTokens         int64  `json:"total_tokens"`
+	UsageRawJSON        string `json:"usage_raw_json,omitempty"`
 }
 
 // ---------- SSE extraction (used by streaming path) ----------
@@ -74,6 +75,40 @@ func ExtractResponsesUsage(data []byte) (*UsageInfo, error) {
 	return info, nil
 }
 
+// ExtractAnthropicUsage parses an Anthropic Messages SSE "data:" line.
+func ExtractAnthropicUsage(data []byte) (*UsageInfo, error) {
+	text := stripSSEPrefix(string(data))
+	if text == "" {
+		return nil, nil
+	}
+
+	var event struct {
+		Type    string            `json:"type"`
+		Message *anthropicMessage `json:"message"`
+		Usage   json.RawMessage   `json:"usage"`
+		Model   string            `json:"model"`
+	}
+	if err := json.Unmarshal([]byte(text), &event); err != nil {
+		return nil, err
+	}
+	if event.Message != nil && len(event.Message.Usage) > 0 {
+		return anthropicUsageInfo(event.Message.Model, event.Message.Usage)
+	}
+	if len(event.Usage) > 0 {
+		return anthropicUsageInfo(event.Model, event.Usage)
+	}
+	return nil, nil
+}
+
+// ExtractGeminiUsage parses a Gemini streamGenerateContent SSE "data:" line.
+func ExtractGeminiUsage(data []byte) (*UsageInfo, error) {
+	text := stripSSEPrefix(string(data))
+	if text == "" {
+		return nil, nil
+	}
+	return geminiJSONToInfo([]byte(text))
+}
+
 // ---------- non-streaming extraction ----------
 
 // ExtractNonStreaming parses a complete JSON response body for usage.
@@ -123,6 +158,45 @@ func ExtractNonStreaming(body []byte, endpoint string) (*UsageInfo, error) {
 	}
 
 	return nil, nil
+}
+
+// ExtractAnthropicNonStreaming parses an Anthropic Messages JSON response body.
+func ExtractAnthropicNonStreaming(body []byte) (*UsageInfo, error) {
+	body = bytes.TrimSpace(body)
+	var resp anthropicMessage
+	if err := decodeJSON(body, &resp); err != nil {
+		return nil, err
+	}
+	if len(resp.Usage) == 0 {
+		return nil, nil
+	}
+	return anthropicUsageInfo(resp.Model, resp.Usage)
+}
+
+// ExtractGeminiNonStreaming parses Gemini generateContent JSON response bodies.
+// It also accepts a JSON array of streamed chunks for clients that do not use SSE.
+func ExtractGeminiNonStreaming(body []byte) (*UsageInfo, error) {
+	body = bytes.TrimSpace(body)
+	if len(body) == 0 {
+		return nil, nil
+	}
+	if body[0] == '[' {
+		var chunks []geminiResponse
+		if err := decodeJSON(body, &chunks); err != nil {
+			return nil, err
+		}
+		for i := len(chunks) - 1; i >= 0; i-- {
+			info, err := geminiResponseToInfo(&chunks[i])
+			if err != nil {
+				return nil, err
+			}
+			if info != nil {
+				return info, nil
+			}
+		}
+		return nil, nil
+	}
+	return geminiJSONToInfo(body)
 }
 
 func tryChatFormat(body []byte) (*UsageInfo, error) {
@@ -233,6 +307,105 @@ func responsesUsageToInfo(model string, u *responsesUsage) *UsageInfo {
 	return info
 }
 
+func anthropicUsageInfo(model string, raw json.RawMessage) (*UsageInfo, error) {
+	var usage anthropicUsage
+	if err := json.Unmarshal(raw, &usage); err != nil {
+		return nil, err
+	}
+	if !hasAnthropicUsageTokens(&usage) {
+		return nil, nil
+	}
+	info := anthropicUsageToInfo(model, &usage)
+	info.UsageRawJSON = rawUsageString(raw)
+	return info, nil
+}
+
+func anthropicUsageToInfo(model string, u *anthropicUsage) *UsageInfo {
+	inputTokens := u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
+	totalTokens := int64(0)
+	if inputTokens > 0 {
+		totalTokens = inputTokens + u.OutputTokens
+	}
+	return &UsageInfo{
+		Model:               model,
+		InputTokens:         inputTokens,
+		OutputTokens:        u.OutputTokens,
+		CachedTokens:        u.CacheReadInputTokens,
+		CacheCreationTokens: u.CacheCreationInputTokens,
+		TotalTokens:         totalTokens,
+	}
+}
+
+func hasAnthropicUsageTokens(u *anthropicUsage) bool {
+	return u.InputTokens != 0 ||
+		u.OutputTokens != 0 ||
+		u.CacheCreationInputTokens != 0 ||
+		u.CacheReadInputTokens != 0
+}
+
+func geminiJSONToInfo(body []byte) (*UsageInfo, error) {
+	var resp geminiResponse
+	if err := decodeJSON(body, &resp); err != nil {
+		return nil, err
+	}
+	return geminiResponseToInfo(&resp)
+}
+
+func geminiResponseToInfo(resp *geminiResponse) (*UsageInfo, error) {
+	if resp == nil || len(resp.UsageMetadata) == 0 {
+		return nil, nil
+	}
+	var usage geminiUsage
+	if err := json.Unmarshal(resp.UsageMetadata, &usage); err != nil {
+		return nil, err
+	}
+	if !hasGeminiUsageTokens(&usage) {
+		return nil, nil
+	}
+	model := resp.ModelVersion
+	if model == "" {
+		model = resp.Model
+	}
+	info := geminiUsageToInfo(model, &usage)
+	info.UsageRawJSON = rawUsageString(resp.UsageMetadata)
+	return info, nil
+}
+
+func geminiUsageToInfo(model string, u *geminiUsage) *UsageInfo {
+	inputTokens := u.PromptTokenCount + u.ToolUsePromptTokenCount
+	if inputTokens == 0 && u.CachedContentTokenCount > 0 {
+		inputTokens = u.CachedContentTokenCount
+	}
+	outputTokens := u.CandidatesTokenCount + u.ThoughtsTokenCount
+	if outputTokens == 0 && u.TotalTokenCount > inputTokens {
+		outputTokens = u.TotalTokenCount - inputTokens
+		if outputTokens < 0 {
+			outputTokens = 0
+		}
+	}
+	totalTokens := u.TotalTokenCount
+	if totalTokens == 0 {
+		totalTokens = inputTokens + outputTokens
+	}
+	return &UsageInfo{
+		Model:           model,
+		InputTokens:     inputTokens,
+		OutputTokens:    outputTokens,
+		ReasoningTokens: u.ThoughtsTokenCount,
+		CachedTokens:    u.CachedContentTokenCount,
+		TotalTokens:     totalTokens,
+	}
+}
+
+func hasGeminiUsageTokens(u *geminiUsage) bool {
+	return u.PromptTokenCount != 0 ||
+		u.CandidatesTokenCount != 0 ||
+		u.TotalTokenCount != 0 ||
+		u.CachedContentTokenCount != 0 ||
+		u.ThoughtsTokenCount != 0 ||
+		u.ToolUsePromptTokenCount != 0
+}
+
 // ---------- JSON types ----------
 
 type chatUsage struct {
@@ -271,4 +444,31 @@ type inputTokensDetails struct {
 
 type outputTokensDetails struct {
 	ReasoningTokens int64 `json:"reasoning_tokens"`
+}
+
+type anthropicMessage struct {
+	Model string          `json:"model"`
+	Usage json.RawMessage `json:"usage"`
+}
+
+type anthropicUsage struct {
+	InputTokens              int64 `json:"input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+}
+
+type geminiResponse struct {
+	Model         string          `json:"model"`
+	ModelVersion  string          `json:"modelVersion"`
+	UsageMetadata json.RawMessage `json:"usageMetadata"`
+}
+
+type geminiUsage struct {
+	PromptTokenCount        int64 `json:"promptTokenCount"`
+	CandidatesTokenCount    int64 `json:"candidatesTokenCount"`
+	TotalTokenCount         int64 `json:"totalTokenCount"`
+	CachedContentTokenCount int64 `json:"cachedContentTokenCount"`
+	ThoughtsTokenCount      int64 `json:"thoughtsTokenCount"`
+	ToolUsePromptTokenCount int64 `json:"toolUsePromptTokenCount"`
 }

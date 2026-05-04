@@ -177,7 +177,7 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	models, _ := s.db.Models(since)
 	var totalCost float64
 	for _, m := range models {
-		cost, _ := s.pricing.Cost(m.Model, m.InputTokens, m.OutputTokens, m.ReasoningTokens, m.CachedTokens)
+		cost, _ := s.pricing.CostWithCacheCreation(m.Model, m.InputTokens, m.OutputTokens, m.ReasoningTokens, m.CachedTokens, m.CacheCreationTokens)
 		totalCost += cost
 	}
 	report := event.SummaryFromDB(row)
@@ -220,7 +220,7 @@ func (s *Server) handleTimeseries(w http.ResponseWriter, r *http.Request) {
 			acc = &bucketCost{}
 			costs[row.Timestamp] = acc
 		}
-		cost, known := s.pricing.Cost(row.Model, row.InputTokens, row.OutputTokens, row.ReasoningTokens, row.CachedTokens)
+		cost, known := s.pricing.CostWithCacheCreation(row.Model, row.InputTokens, row.OutputTokens, row.ReasoningTokens, row.CachedTokens, row.CacheCreationTokens)
 		if known {
 			acc.cost += cost
 		} else {
@@ -259,7 +259,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		report = []event.ModelReport{}
 	}
 	for i := range report {
-		cost, known := s.pricing.Cost(report[i].Model, report[i].InputTokens, report[i].OutputTokens, report[i].ReasoningTokens, report[i].CachedTokens)
+		cost, known := s.pricing.CostWithCacheCreation(report[i].Model, report[i].InputTokens, report[i].OutputTokens, report[i].ReasoningTokens, report[i].CachedTokens, report[i].CacheCreationTokens)
 		report[i].Cost = cost
 		report[i].CostKnown = known
 	}

@@ -98,6 +98,55 @@ func TestExtractResponsesUsage_NilWhenNotCompleted(t *testing.T) {
 	}
 }
 
+func TestExtractAnthropicUsage_MessageStart(t *testing.T) {
+	input := []byte(`data: {"type":"message_start","message":{"model":"claude-sonnet-4-6-20250514","usage":{"input_tokens":100,"cache_creation_input_tokens":5,"cache_read_input_tokens":20,"output_tokens":1}}}`)
+	u, err := ExtractAnthropicUsage(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u == nil {
+		t.Fatal("expected non-nil usage")
+	}
+	if u.Model != "claude-sonnet-4-6-20250514" {
+		t.Errorf("model = %q", u.Model)
+	}
+	if u.InputTokens != 125 {
+		t.Errorf("input_tokens = %d, want 125", u.InputTokens)
+	}
+	if u.OutputTokens != 1 {
+		t.Errorf("output_tokens = %d, want 1", u.OutputTokens)
+	}
+	if u.CachedTokens != 20 {
+		t.Errorf("cached_tokens = %d, want 20", u.CachedTokens)
+	}
+	if u.CacheCreationTokens != 5 {
+		t.Errorf("cache_creation_tokens = %d, want 5", u.CacheCreationTokens)
+	}
+	if u.TotalTokens != 126 {
+		t.Errorf("total_tokens = %d, want 126", u.TotalTokens)
+	}
+}
+
+func TestExtractAnthropicUsage_MessageDeltaPartial(t *testing.T) {
+	input := []byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":45}}`)
+	u, err := ExtractAnthropicUsage(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u == nil {
+		t.Fatal("expected non-nil usage")
+	}
+	if u.InputTokens != 0 {
+		t.Errorf("input_tokens = %d, want 0 for partial delta", u.InputTokens)
+	}
+	if u.OutputTokens != 45 {
+		t.Errorf("output_tokens = %d, want 45", u.OutputTokens)
+	}
+	if u.TotalTokens != 0 {
+		t.Errorf("total_tokens = %d, want 0 for partial delta", u.TotalTokens)
+	}
+}
+
 func TestExtractNonStreaming_ChatFormat(t *testing.T) {
 	body := []byte(`{"model":"gpt-4o","usage":{"prompt_tokens":100,"completion_tokens":200,"total_tokens":300,"prompt_tokens_details":{"cached_tokens":50}}}`)
 
@@ -137,6 +186,151 @@ func TestExtractNonStreaming_ResponsesFormat(t *testing.T) {
 	}
 	if u.CachedTokens != 10 {
 		t.Errorf("cached_tokens = %d, want 10", u.CachedTokens)
+	}
+}
+
+func TestExtractAnthropicNonStreaming(t *testing.T) {
+	body := []byte(`{"id":"msg_01","type":"message","model":"claude-sonnet-4-6-20250514","usage":{"input_tokens":100,"cache_creation_input_tokens":5,"cache_read_input_tokens":20,"output_tokens":30}}`)
+
+	u, err := ExtractAnthropicNonStreaming(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u == nil {
+		t.Fatal("expected non-nil usage")
+	}
+	if u.Model != "claude-sonnet-4-6-20250514" {
+		t.Errorf("model = %q", u.Model)
+	}
+	if u.InputTokens != 125 {
+		t.Errorf("input_tokens = %d, want 125", u.InputTokens)
+	}
+	if u.OutputTokens != 30 {
+		t.Errorf("output_tokens = %d, want 30", u.OutputTokens)
+	}
+	if u.CachedTokens != 20 {
+		t.Errorf("cached_tokens = %d, want 20", u.CachedTokens)
+	}
+	if u.CacheCreationTokens != 5 {
+		t.Errorf("cache_creation_tokens = %d, want 5", u.CacheCreationTokens)
+	}
+	if u.TotalTokens != 155 {
+		t.Errorf("total_tokens = %d, want 155", u.TotalTokens)
+	}
+	if !strings.Contains(u.UsageRawJSON, `"cache_read_input_tokens":20`) {
+		t.Errorf("UsageRawJSON = %q, want Anthropic usage subset", u.UsageRawJSON)
+	}
+}
+
+func TestExtractGeminiNonStreaming(t *testing.T) {
+	body := []byte(`{"modelVersion":"gemini-2.5-pro","usageMetadata":{"promptTokenCount":100,"cachedContentTokenCount":20,"toolUsePromptTokenCount":5,"candidatesTokenCount":30,"thoughtsTokenCount":10,"totalTokenCount":145}}`)
+
+	u, err := ExtractGeminiNonStreaming(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u == nil {
+		t.Fatal("expected non-nil usage")
+	}
+	if u.Model != "gemini-2.5-pro" {
+		t.Errorf("model = %q", u.Model)
+	}
+	if u.InputTokens != 105 {
+		t.Errorf("input_tokens = %d, want 105", u.InputTokens)
+	}
+	if u.OutputTokens != 40 {
+		t.Errorf("output_tokens = %d, want 40", u.OutputTokens)
+	}
+	if u.ReasoningTokens != 10 {
+		t.Errorf("reasoning_tokens = %d, want 10", u.ReasoningTokens)
+	}
+	if u.CachedTokens != 20 {
+		t.Errorf("cached_tokens = %d, want 20", u.CachedTokens)
+	}
+	if u.TotalTokens != 145 {
+		t.Errorf("total_tokens = %d, want 145", u.TotalTokens)
+	}
+}
+
+func TestExtractGeminiNonStreaming_KeepsProviderTotal(t *testing.T) {
+	body := []byte(`{"modelVersion":"gemini-2.5-pro","usageMetadata":{"promptTokenCount":100,"toolUsePromptTokenCount":5,"candidatesTokenCount":30,"thoughtsTokenCount":10,"totalTokenCount":140}}`)
+
+	u, err := ExtractGeminiNonStreaming(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u == nil {
+		t.Fatal("expected non-nil usage")
+	}
+	if u.InputTokens != 105 {
+		t.Errorf("input_tokens = %d, want 105", u.InputTokens)
+	}
+	if u.OutputTokens != 40 {
+		t.Errorf("output_tokens = %d, want 40", u.OutputTokens)
+	}
+	if u.TotalTokens != 140 {
+		t.Errorf("total_tokens = %d, want provider total 140", u.TotalTokens)
+	}
+}
+
+func TestExtractGeminiNonStreaming_FallbackToCachedWhenInputZero(t *testing.T) {
+	body := []byte(`{"modelVersion":"gemini-2.5-pro","usageMetadata":{"promptTokenCount":0,"cachedContentTokenCount":50,"candidatesTokenCount":30,"totalTokenCount":80}}`)
+
+	u, err := ExtractGeminiNonStreaming(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u == nil {
+		t.Fatal("expected non-nil usage")
+	}
+	if u.InputTokens != 50 {
+		t.Errorf("input_tokens = %d, want 50 (fallback to cachedContentTokenCount)", u.InputTokens)
+	}
+}
+
+func TestExtractGeminiNonStreaming_DoesNotReplaceInputWithCached(t *testing.T) {
+	body := []byte(`{"modelVersion":"gemini-2.5-pro","usageMetadata":{"promptTokenCount":10,"cachedContentTokenCount":50,"candidatesTokenCount":30,"totalTokenCount":80}}`)
+
+	u, err := ExtractGeminiNonStreaming(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u == nil {
+		t.Fatal("expected non-nil usage")
+	}
+	if u.InputTokens != 10 {
+		t.Errorf("input_tokens = %d, want 10 (cachedContentTokenCount should not replace promptTokenCount)", u.InputTokens)
+	}
+	if u.CachedTokens != 50 {
+		t.Errorf("cached_tokens = %d, want 50", u.CachedTokens)
+	}
+}
+
+func TestExtractGeminiUsage_StreamingChunk(t *testing.T) {
+	input := []byte(`data: {"modelVersion":"gemini-2.5-flash","usageMetadata":{"promptTokenCount":50,"candidatesTokenCount":12,"totalTokenCount":62}}`)
+	u, err := ExtractGeminiUsage(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u == nil {
+		t.Fatal("expected non-nil usage")
+	}
+	if u.InputTokens != 50 || u.OutputTokens != 12 || u.TotalTokens != 62 {
+		t.Errorf("usage = %+v, want 50/12/62", u)
+	}
+}
+
+func TestExtractGeminiNonStreaming_ArrayUsesLastUsage(t *testing.T) {
+	body := []byte(`[{"candidates":[{"content":{"parts":[{"text":"hi"}]}}]},{"modelVersion":"gemini-2.5-flash","usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":5,"totalTokenCount":13}}]`)
+	u, err := ExtractGeminiNonStreaming(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u == nil {
+		t.Fatal("expected non-nil usage")
+	}
+	if u.InputTokens != 8 || u.OutputTokens != 5 || u.TotalTokens != 13 {
+		t.Errorf("usage = %+v, want 8/5/13", u)
 	}
 }
 
@@ -230,12 +424,13 @@ func TestTryResponsesFormat_ErrorOnTrash(t *testing.T) {
 
 func TestUsageInfoJSONTags(t *testing.T) {
 	u := UsageInfo{
-		Model:           "gpt-4o",
-		InputTokens:     100,
-		OutputTokens:    200,
-		ReasoningTokens: 10,
-		CachedTokens:    5,
-		TotalTokens:     300,
+		Model:               "gpt-4o",
+		InputTokens:         100,
+		OutputTokens:        200,
+		ReasoningTokens:     10,
+		CachedTokens:        5,
+		CacheCreationTokens: 3,
+		TotalTokens:         300,
 	}
 	data, err := json.Marshal(u)
 	if err != nil {
@@ -245,7 +440,7 @@ func TestUsageInfoJSONTags(t *testing.T) {
 	if err := json.Unmarshal(data, &u2); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if u2.InputTokens != 100 || u2.OutputTokens != 200 || u2.ReasoningTokens != 10 || u2.CachedTokens != 5 {
+	if u2.InputTokens != 100 || u2.OutputTokens != 200 || u2.ReasoningTokens != 10 || u2.CachedTokens != 5 || u2.CacheCreationTokens != 3 {
 		t.Errorf("round-trip mismatch: %+v", u2)
 	}
 }

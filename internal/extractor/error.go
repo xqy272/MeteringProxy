@@ -55,17 +55,19 @@ func extractErrorInfoFromJSON(sample []byte, status int) (*ErrorInfo, error) {
 	var errPayload struct {
 		// OpenAI style: {"error": {"message": "...", "type": "...", "code": "...", "param": "..."}}
 		Error *struct {
-			Message string `json:"message"`
-			Type    string `json:"type"`
-			Code    string `json:"code"`
-			Param   string `json:"param"`
+			Message string          `json:"message"`
+			Type    string          `json:"type"`
+			Code    json.RawMessage `json:"code"`
+			Param   string          `json:"param"`
+			Status  string          `json:"status"`
 		} `json:"error,omitempty"`
 		// Anthropic style: {"type": "error", "error": {"type": "...", "message": "..."}}
 		Type string `json:"type,omitempty"`
 		// Generic style: {"message": "...", "code": "...", "type": "..."}
-		Message string `json:"message,omitempty"`
-		Code    string `json:"code,omitempty"`
-		Param   string `json:"param,omitempty"`
+		Message string          `json:"message,omitempty"`
+		Code    json.RawMessage `json:"code,omitempty"`
+		Param   string          `json:"param,omitempty"`
+		Status  string          `json:"status,omitempty"`
 	}
 
 	if err := json.Unmarshal(sample, &errPayload); err != nil {
@@ -76,18 +78,26 @@ func extractErrorInfoFromJSON(sample []byte, status int) (*ErrorInfo, error) {
 	switch {
 	case errPayload.Error != nil:
 		info.Type = errPayload.Error.Type
-		info.Code = errPayload.Error.Code
+		if info.Type == "" {
+			info.Type = errPayload.Error.Status
+		}
+		info.Code = rawJSONScalarString(errPayload.Error.Code)
 		info.Param = errPayload.Error.Param
 		info.Message = errPayload.Error.Message
 	default:
-		if errPayload.Message == "" && errPayload.Code == "" {
+		code := rawJSONScalarString(errPayload.Code)
+		if errPayload.Message == "" && code == "" && errPayload.Status == "" {
 			return nil, nil
 		}
 		info.Message = errPayload.Message
-		info.Code = errPayload.Code
+		info.Code = code
 		if errPayload.Type != "" && errPayload.Type != "error" {
 			info.Type = errPayload.Type
 		}
+		if info.Type == "" {
+			info.Type = errPayload.Status
+		}
+		info.Param = errPayload.Param
 	}
 	if info.Type == "" && info.Code == "" && info.Param == "" && info.Message == "" {
 		return nil, nil
@@ -104,7 +114,7 @@ func classifyError(status int, errType, errCode, message string) string {
 	}
 	if status == 429 {
 		combined := strings.ToLower(errType + " " + errCode + " " + message)
-		if containsAny(combined, "quota", "insufficient", "balance", "credit") {
+		if containsAny(combined, "quota", "insufficient", "balance", "credit", "resource_exhausted", "exhausted") {
 			return "quota_exhausted"
 		}
 		if containsAny(combined, "rate", "limit", "too many") {
@@ -123,6 +133,31 @@ func classifyError(status int, errType, errCode, message string) string {
 		return "upstream_5xx"
 	}
 	return "unknown"
+}
+
+func rawJSONScalarString(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var n json.Number
+	if err := dec.Decode(&n); err == nil {
+		return n.String()
+	}
+	var b bool
+	if err := json.Unmarshal(raw, &b); err == nil {
+		if b {
+			return "true"
+		}
+		return "false"
+	}
+	return ""
 }
 
 func containsAny(s string, substrs ...string) bool {

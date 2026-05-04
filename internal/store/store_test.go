@@ -26,19 +26,19 @@ func TestInsertEvents_ConvertsCorrectly(t *testing.T) {
 	es := NewEventSink(sink)
 
 	ev := event.Event{
-		ID:            "req-1",
-		Path:          "/v1/chat/completions",
-		Method:        "POST",
-		Status:        200,
-		Stream:        true,
-		LatencyMs:     100,
-		TTFBMs:        30,
-		APIKeyHash:    "key-hash",
-		ClientIPHash:  "ip-hash",
-		ModelReturned: "gpt-4o",
-		InputTokens:   10,
-		OutputTokens:  20,
-		TotalTokens:   30,
+		ID:             "req-1",
+		Path:           "/v1/chat/completions",
+		Method:         "POST",
+		Status:         200,
+		Stream:         true,
+		LatencyMs:      100,
+		TTFBMs:         30,
+		APIKeyHash:     "key-hash",
+		ClientIPHash:   "ip-hash",
+		ModelReturned:  "gpt-4o",
+		InputTokens:    10,
+		OutputTokens:   20,
+		TotalTokens:    30,
 		CaptureOutcome: event.OutcomeCaptured,
 	}
 	events := []event.Event{ev}

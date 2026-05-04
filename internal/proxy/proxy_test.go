@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"ai-gateway-metering-proxy/internal/event"
+	"ai-gateway-metering-proxy/internal/extractor"
 	"ai-gateway-metering-proxy/internal/hash"
 	"ai-gateway-metering-proxy/internal/metrics"
 	"ai-gateway-metering-proxy/internal/writer"
@@ -111,6 +112,16 @@ func TestExtractModel(t *testing.T) {
 			t.Errorf("extractModel(%q) = %q, want %q", tc.body, got, tc.want)
 		}
 	}
+
+	if got := extractModelFromPath("/v1beta/models/gemini-2.5-pro:generateContent"); got != "gemini-2.5-pro" {
+		t.Errorf("extractModelFromPath generateContent = %q, want gemini-2.5-pro", got)
+	}
+	if got := extractModelFromPath("/v1/models/gemini-2.5-flash:streamGenerateContent"); got != "gemini-2.5-flash" {
+		t.Errorf("extractModelFromPath streamGenerateContent = %q, want gemini-2.5-flash", got)
+	}
+	if got := extractModelFromPath("/v1/messages"); got != "" {
+		t.Errorf("extractModelFromPath non-model path = %q, want empty", got)
+	}
 }
 
 func TestIsSSEMediaType(t *testing.T) {
@@ -180,6 +191,45 @@ func TestBearerToken(t *testing.T) {
 		if got := bearerToken(tc.auth); got != tc.want {
 			t.Errorf("bearerToken(%q) = %q, want %q", tc.auth, got, tc.want)
 		}
+	}
+}
+
+func TestAPIKeyTokenProviderNativeHeaders(t *testing.T) {
+	req := httptest.NewRequest("POST", "/v1/messages", nil)
+	req.Header.Set("X-API-Key", "anthropic-key")
+	if got := apiKeyToken(req); got != "anthropic-key" {
+		t.Fatalf("apiKeyToken Anthropic = %q, want anthropic-key", got)
+	}
+
+	req = httptest.NewRequest("POST", "/v1beta/models/gemini-2.5-pro:generateContent?key=query-key", nil)
+	req.Header.Set("X-Goog-API-Key", "google-key")
+	if got := apiKeyToken(req); got != "google-key" {
+		t.Fatalf("apiKeyToken Gemini header = %q, want google-key", got)
+	}
+
+	req = httptest.NewRequest("POST", "/v1beta/models/gemini-2.5-pro:generateContent?key=query-key", nil)
+	if got := apiKeyToken(req); got != "query-key" {
+		t.Fatalf("apiKeyToken Gemini query = %q, want query-key", got)
+	}
+
+	req = httptest.NewRequest("POST", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer bearer-key")
+	req.Header.Set("X-API-Key", "anthropic-key")
+	if got := apiKeyToken(req); got != "bearer-key" {
+		t.Fatalf("apiKeyToken precedence = %q, want bearer-key", got)
+	}
+}
+
+func TestClientIPFromRequestNormalizesRemotePort(t *testing.T) {
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req.RemoteAddr = "203.0.113.10:54321"
+	if got := clientIPFromRequest(req); got != "203.0.113.10" {
+		t.Fatalf("clientIPFromRequest RemoteAddr = %q, want 203.0.113.10", got)
+	}
+
+	req.Header.Set("X-Forwarded-For", "198.51.100.20:1234, 203.0.113.10")
+	if got := clientIPFromRequest(req); got != "198.51.100.20" {
+		t.Fatalf("clientIPFromRequest XFF = %q, want 198.51.100.20", got)
 	}
 }
 
@@ -406,8 +456,8 @@ func TestProxyStreaming_ErrorResponseClassifiedAfterForwarding(t *testing.T) {
 	if ev.ErrorClass != "quota_exhausted" {
 		t.Fatalf("error_class = %q, want quota_exhausted", ev.ErrorClass)
 	}
-	if ev.ErrorMessage != "Quota exhausted" {
-		t.Fatalf("error_message = %q, want Quota exhausted", ev.ErrorMessage)
+	if ev.ErrorMessage != "" {
+		t.Fatalf("error_message = %q, want empty; provider messages are not persisted", ev.ErrorMessage)
 	}
 	if ev.ModelRequested != "gpt-4o" {
 		t.Fatalf("model_requested = %q, want gpt-4o", ev.ModelRequested)
@@ -595,6 +645,203 @@ func TestProxyResponsesAPI_NonStreaming(t *testing.T) {
 	}
 	if ev.EndpointProfile != "responses" {
 		t.Errorf("endpoint_profile = %q, want responses", ev.EndpointProfile)
+	}
+}
+
+func TestProxyAnthropicMessages_NonStreaming(t *testing.T) {
+	upstreamResp := `{"id":"msg_01","model":"claude-sonnet-4-6-20250514","usage":{"input_tokens":100,"cache_creation_input_tokens":5,"cache_read_input_tokens":20,"output_tokens":30}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Request-ID", "req_anthropic")
+		w.Write([]byte(upstreamResp))
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	hasher := hash.NewWithSalt("test-salt")
+	p := New(upstream.URL, hasher, rw, 2*1024*1024)
+
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("X-API-Key", "anthropic-key")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if rec.Body.String() != upstreamResp {
+		t.Fatal("response body modified")
+	}
+	if len(rw.events) == 0 {
+		t.Fatal("no event recorded")
+	}
+	ev := lastEvent(rw)
+	if ev.EndpointProfile != "anthropic_messages" {
+		t.Errorf("endpoint_profile = %q, want anthropic_messages", ev.EndpointProfile)
+	}
+	if ev.ID != "req_anthropic" {
+		t.Errorf("request_id = %q, want req_anthropic", ev.ID)
+	}
+	if ev.APIKeyHash != hasher.Hash("anthropic-key") {
+		t.Errorf("api_key_hash did not use X-API-Key")
+	}
+	if ev.InputTokens != 125 || ev.OutputTokens != 30 || ev.CachedTokens != 20 || ev.TotalTokens != 155 {
+		t.Errorf("usage = input:%d output:%d cached:%d total:%d, want 125/30/20/155", ev.InputTokens, ev.OutputTokens, ev.CachedTokens, ev.TotalTokens)
+	}
+	if ev.ModelReturned != "claude-sonnet-4-6-20250514" {
+		t.Errorf("model_returned = %q", ev.ModelReturned)
+	}
+}
+
+func TestProxyAnthropicMessages_StreamingMergesUsage(t *testing.T) {
+	streamBody := "event: message_start\n" +
+		"data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-6-20250514\",\"usage\":{\"input_tokens\":100,\"cache_creation_input_tokens\":5,\"cache_read_input_tokens\":20,\"output_tokens\":1}}}\n\n" +
+		"event: content_block_delta\n" +
+		"data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n" +
+		"event: message_delta\n" +
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":45}}\n\n" +
+		"event: message_stop\n" +
+		"data: {\"type\":\"message_stop\"}\n\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(streamBody))
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"claude-sonnet-4-6","stream":true}`))
+	req.Header.Set("Accept", "text/event-stream")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Body.String() != streamBody {
+		t.Fatal("stream response body modified")
+	}
+	if len(rw.events) == 0 {
+		t.Fatal("no event recorded")
+	}
+	ev := lastEvent(rw)
+	if ev.EndpointProfile != "anthropic_messages" {
+		t.Errorf("endpoint_profile = %q, want anthropic_messages", ev.EndpointProfile)
+	}
+	if !ev.Stream {
+		t.Error("stream should be true")
+	}
+	if ev.InputTokens != 125 || ev.OutputTokens != 45 || ev.CachedTokens != 20 || ev.CacheCreationTokens != 5 || ev.TotalTokens != 170 {
+		t.Errorf("merged usage = input:%d output:%d cached:%d total:%d, want 120/45/20/165", ev.InputTokens, ev.OutputTokens, ev.CachedTokens, ev.TotalTokens)
+	}
+	if ev.ModelReturned != "claude-sonnet-4-6-20250514" {
+		t.Errorf("model_returned = %q", ev.ModelReturned)
+	}
+}
+
+func TestProxyGeminiGenerateContent_NonStreaming(t *testing.T) {
+	upstreamResp := `{"modelVersion":"gemini-2.5-pro","usageMetadata":{"promptTokenCount":100,"cachedContentTokenCount":20,"toolUsePromptTokenCount":5,"candidatesTokenCount":30,"thoughtsTokenCount":10,"totalTokenCount":145}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(upstreamResp))
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+
+	req := httptest.NewRequest("POST", "/v1beta/models/gemini-2.5-pro:generateContent", strings.NewReader(`{"contents":[{"parts":[{"text":"hi"}]}]}`))
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if len(rw.events) == 0 {
+		t.Fatal("no event recorded")
+	}
+	ev := lastEvent(rw)
+	if ev.EndpointProfile != "gemini_generate_content" {
+		t.Errorf("endpoint_profile = %q, want gemini_generate_content", ev.EndpointProfile)
+	}
+	if ev.ModelRequested != "gemini-2.5-pro" {
+		t.Errorf("model_requested = %q, want gemini-2.5-pro", ev.ModelRequested)
+	}
+	if ev.ModelReturned != "gemini-2.5-pro" {
+		t.Errorf("model_returned = %q, want gemini-2.5-pro", ev.ModelReturned)
+	}
+	if ev.InputTokens != 105 || ev.OutputTokens != 40 || ev.ReasoningTokens != 10 || ev.CachedTokens != 20 || ev.TotalTokens != 145 {
+		t.Errorf("usage = input:%d output:%d reasoning:%d cached:%d total:%d, want 105/40/10/20/145", ev.InputTokens, ev.OutputTokens, ev.ReasoningTokens, ev.CachedTokens, ev.TotalTokens)
+	}
+}
+
+func TestProxyGeminiGenerateContent_Streaming(t *testing.T) {
+	streamBody := "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}]}}]}\n" +
+		"data: {\"modelVersion\":\"gemini-2.5-flash\",\"usageMetadata\":{\"promptTokenCount\":50,\"candidatesTokenCount\":12,\"totalTokenCount\":62}}\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(streamBody))
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+
+	req := httptest.NewRequest("POST", "/v1beta/models/gemini-2.5-flash:streamGenerateContent", strings.NewReader(`{"contents":[{"parts":[{"text":"hi"}]}]}`))
+	req.Header.Set("Accept", "text/event-stream")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Body.String() != streamBody {
+		t.Fatal("stream response body modified")
+	}
+	if len(rw.events) == 0 {
+		t.Fatal("no event recorded")
+	}
+	ev := lastEvent(rw)
+	if ev.EndpointProfile != "gemini_generate_content" {
+		t.Errorf("endpoint_profile = %q, want gemini_generate_content", ev.EndpointProfile)
+	}
+	if ev.ModelRequested != "gemini-2.5-flash" {
+		t.Errorf("model_requested = %q, want gemini-2.5-flash", ev.ModelRequested)
+	}
+	if ev.InputTokens != 50 || ev.OutputTokens != 12 || ev.TotalTokens != 62 {
+		t.Errorf("usage = input:%d output:%d total:%d, want 50/12/62", ev.InputTokens, ev.OutputTokens, ev.TotalTokens)
+	}
+}
+
+func TestProxyGeminiStreamPathWithSSEContentType(t *testing.T) {
+	streamBody := "data: {\"modelVersion\":\"gemini-2.5-flash\",\"usageMetadata\":{\"promptTokenCount\":50,\"candidatesTokenCount\":12,\"totalTokenCount\":62}}\n\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Error("response writer does not support flushing")
+		}
+		w.Write([]byte(streamBody))
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+
+	req := httptest.NewRequest("POST", "/v1beta/models/gemini-2.5-flash:streamGenerateContent", strings.NewReader(`{"contents":[{"parts":[{"text":"hi"}]}]}`))
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if len(rw.events) == 0 {
+		t.Fatal("no event recorded")
+	}
+	ev := lastEvent(rw)
+	if !ev.Stream {
+		t.Fatal("event.Stream = false, want true for SSE stream response")
+	}
+	if ev.InputTokens != 50 || ev.OutputTokens != 12 || ev.TotalTokens != 62 {
+		t.Errorf("usage = input:%d output:%d total:%d, want 50/12/62", ev.InputTokens, ev.OutputTokens, ev.TotalTokens)
+	}
+	if rw.parseErrors != 0 {
+		t.Fatalf("parse_errors = %d, want 0", rw.parseErrors)
 	}
 }
 
@@ -1034,5 +1281,154 @@ func TestUsageRawJSON_TruncatedInEvent(t *testing.T) {
 	}
 	if !strings.Contains(ev.UsageRawJSON, `"prompt_tokens":10`) {
 		t.Errorf("UsageRawJSON does not contain usage subset prefix: %.80q", ev.UsageRawJSON)
+	}
+}
+
+func TestProxyNonStreaming_ErrorClassified(t *testing.T) {
+	upstreamResp := `{"error":{"message":"Rate limit reached for gpt-4o","type":"rate_limit_error","code":"rate_limit_exceeded"}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(429)
+		w.Write([]byte(upstreamResp))
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != 429 {
+		t.Fatalf("status = %d, want 429", rec.Code)
+	}
+	if len(rw.events) == 0 {
+		t.Fatal("no event recorded")
+	}
+	ev := lastEvent(rw)
+	if ev.ErrorClass != "rate_limited" {
+		t.Errorf("error_class = %q, want rate_limited", ev.ErrorClass)
+	}
+	if ev.ErrorCode != "rate_limit_exceeded" {
+		t.Errorf("error_code = %q, want rate_limit_exceeded", ev.ErrorCode)
+	}
+	if ev.ErrorMessage != "" {
+		t.Errorf("error_message = %q, want empty; provider messages are not persisted", ev.ErrorMessage)
+	}
+}
+
+func TestProxyStreaming_MalformedSSELineIncrementsParseErrors(t *testing.T) {
+	streamBody := "data: {broken json here\n\n" +
+		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n" +
+		"data: [DONE]\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(streamBody))
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"stream":true}`))
+	req.Header.Set("Accept", "text/event-stream")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rw.parseErrors == 0 {
+		t.Error("expected parse errors for malformed SSE line")
+	}
+	if len(rw.events) == 0 {
+		t.Fatal("no usage event recorded; valid usage line should still be captured")
+	}
+	ev := lastEvent(rw)
+	if ev.InputTokens != 10 {
+		t.Errorf("input_tokens = %d, want 10 (from valid usage line)", ev.InputTokens)
+	}
+}
+
+func TestMergeUsageInfo_AnthropicStreaming(t *testing.T) {
+	start := &extractor.UsageInfo{
+		Model:               "claude-sonnet-4-6",
+		InputTokens:         125,
+		OutputTokens:        1,
+		CachedTokens:        20,
+		CacheCreationTokens: 5,
+		TotalTokens:         126,
+	}
+	delta := &extractor.UsageInfo{
+		OutputTokens: 45,
+	}
+
+	merged := mergeUsageInfo(start, delta)
+	if merged.InputTokens != 125 {
+		t.Errorf("merged.InputTokens = %d, want 125 (kept from start)", merged.InputTokens)
+	}
+	if merged.OutputTokens != 45 {
+		t.Errorf("merged.OutputTokens = %d, want 45 (from delta)", merged.OutputTokens)
+	}
+	if merged.CachedTokens != 20 {
+		t.Errorf("merged.CachedTokens = %d, want 20 (kept from start)", merged.CachedTokens)
+	}
+	if merged.CacheCreationTokens != 5 {
+		t.Errorf("merged.CacheCreationTokens = %d, want 5 (kept from start)", merged.CacheCreationTokens)
+	}
+	if merged.TotalTokens != 170 {
+		t.Errorf("merged.TotalTokens = %d, want 170 (InputTokens+OutputTokens)", merged.TotalTokens)
+	}
+}
+
+func TestMergeUsageInfo_ResponsesStreamFinalOverwrites(t *testing.T) {
+	partial := &extractor.UsageInfo{
+		OutputTokens: 10,
+	}
+	final := &extractor.UsageInfo{
+		Model:        "gpt-5.4-mini",
+		InputTokens:  371,
+		OutputTokens: 43,
+		TotalTokens:  414,
+	}
+
+	merged := mergeUsageInfo(partial, final)
+	if merged.Model != "gpt-5.4-mini" {
+		t.Errorf("merged.Model = %q, want gpt-5.4-mini", merged.Model)
+	}
+	if merged.InputTokens != 371 {
+		t.Errorf("merged.InputTokens = %d, want 371", merged.InputTokens)
+	}
+	if merged.OutputTokens != 43 {
+		t.Errorf("merged.OutputTokens = %d, want 43", merged.OutputTokens)
+	}
+	if merged.TotalTokens != 414 {
+		t.Errorf("merged.TotalTokens = %d, want 414 (from final)", merged.TotalTokens)
+	}
+}
+
+func TestTruncateErrorString(t *testing.T) {
+	short := "upstream error"
+	got := truncateErrorString(short)
+	if got != short {
+		t.Errorf("short string changed: %q", got)
+	}
+
+	long := strings.Repeat("a", 600)
+	got = truncateErrorString(long)
+	if len(got) > 500 {
+		t.Errorf("truncated length = %d, want <= 500", len(got))
+	}
+}
+
+func TestTruncateUsageRawJSON_UTF8Boundary(t *testing.T) {
+	input := strings.Repeat("α", 3000)
+	got, truncated := truncateUsageRawJSON(input)
+	if !truncated {
+		t.Error("expected truncated = true for long UTF-8 string")
+	}
+	for _, r := range got {
+		if r == 0xFFFD {
+			t.Error("truncated string contains invalid UTF-8 replacement character")
+			break
+		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"os"
 	"runtime"
 )
@@ -23,6 +24,10 @@ func New(saltFile string) (*Hasher, error) {
 		if mode := info.Mode(); mode&0077 != 0 {
 			return nil, fmt.Errorf("salt file has insecure permissions %04o; expected 0600 (no group/other access)", mode.Perm())
 		}
+	} else {
+		// On Windows, file permissions are managed via ACLs, not Unix mode bits.
+		// Log a warning since we cannot enforce strict permissions.
+		log.Printf("warning: salt file permissions check skipped on Windows; ensure %q is not world-readable", saltFile)
 	}
 
 	data, err := os.ReadFile(saltFile)

@@ -15,11 +15,12 @@ type Pricing struct {
 }
 
 type ModelPrice struct {
-	InputPer1M       float64  `yaml:"input_per_1m"`
-	CachedInputPer1M float64  `yaml:"cached_input_per_1m"`
-	OutputPer1M      float64  `yaml:"output_per_1m"`
-	ReasoningPer1M   float64  `yaml:"reasoning_per_1m"`
-	Aliases          []string `yaml:"aliases"`
+	InputPer1M         float64  `yaml:"input_per_1m"`
+	CachedInputPer1M   float64  `yaml:"cached_input_per_1m"`
+	OutputPer1M        float64  `yaml:"output_per_1m"`
+	ReasoningPer1M     float64  `yaml:"reasoning_per_1m"`
+	CacheCreationPer1M float64  `yaml:"cache_creation_per_1m"`
+	Aliases            []string `yaml:"aliases"`
 }
 
 // NewPricing returns an empty Pricing with initialized index.
@@ -67,11 +68,15 @@ func (p *Pricing) buildAliasIndex() {
 // Canonicalization strips known provider date tags (e.g., "-2026-03-17").
 // It is only used for pricing lookup and never alters the persisted model name.
 func (p *Pricing) Cost(model string, inputTokens, outputTokens, reasoningTokens, cachedTokens int64) (float64, bool) {
+	return p.CostWithCacheCreation(model, inputTokens, outputTokens, reasoningTokens, cachedTokens, 0)
+}
+
+func (p *Pricing) CostWithCacheCreation(model string, inputTokens, outputTokens, reasoningTokens, cachedTokens, cacheCreationTokens int64) (float64, bool) {
 	mp, ok := p.lookup(model)
 	if !ok {
 		return 0, false
 	}
-	return computeCost(mp, inputTokens, outputTokens, reasoningTokens, cachedTokens), true
+	return computeCost(mp, inputTokens, outputTokens, reasoningTokens, cachedTokens, cacheCreationTokens), true
 }
 
 func (p *Pricing) lookup(model string) (ModelPrice, bool) {
@@ -158,15 +163,21 @@ func isCompactDateSuffix(s string) bool {
 	return true
 }
 
-func computeCost(mp ModelPrice, inputTokens, outputTokens, reasoningTokens, cachedTokens int64) float64 {
+func computeCost(mp ModelPrice, inputTokens, outputTokens, reasoningTokens, cachedTokens, cacheCreationTokens int64) float64 {
 	cost := 0.0
+
+	nonCachedInput, cachedTokens, cacheCreationTokens := inputBreakdown(inputTokens, cachedTokens, cacheCreationTokens)
 
 	if cachedTokens > 0 {
 		cost += float64(cachedTokens) / 1_000_000.0 * mp.CachedInputPer1M
 	}
-	nonCachedInput := inputTokens - cachedTokens
 	if nonCachedInput > 0 {
 		cost += float64(nonCachedInput) / 1_000_000.0 * mp.InputPer1M
+	}
+	if cacheCreationTokens > 0 && mp.CacheCreationPer1M > 0 {
+		cost += float64(cacheCreationTokens) / 1_000_000.0 * mp.CacheCreationPer1M
+	} else if cacheCreationTokens > 0 {
+		cost += float64(cacheCreationTokens) / 1_000_000.0 * mp.InputPer1M
 	}
 
 	if reasoningTokens > 0 && mp.ReasoningPer1M > 0 {
@@ -180,4 +191,24 @@ func computeCost(mp ModelPrice, inputTokens, outputTokens, reasoningTokens, cach
 	}
 
 	return cost
+}
+
+func inputBreakdown(inputTokens, cachedTokens, cacheCreationTokens int64) (nonCachedInput, cachedInput, cacheCreationInput int64) {
+	if inputTokens <= 0 {
+		return 0, 0, 0
+	}
+	if cachedTokens < 0 {
+		cachedTokens = 0
+	}
+	if cacheCreationTokens < 0 {
+		cacheCreationTokens = 0
+	}
+	if cacheCreationTokens > inputTokens {
+		cacheCreationTokens = inputTokens
+	}
+	remaining := inputTokens - cacheCreationTokens
+	if cachedTokens > remaining {
+		cachedTokens = remaining
+	}
+	return remaining - cachedTokens, cachedTokens, cacheCreationTokens
 }

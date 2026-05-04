@@ -152,6 +152,55 @@ func TestAPISummary(t *testing.T) {
 	}
 }
 
+func TestAPIModelsCostIncludesCacheCreationTokens(t *testing.T) {
+	s, database := newTestServer(t, "/metering")
+	s.pricing.Models["claude-sonnet-4-6"] = pricing.ModelPrice{
+		InputPer1M:         3.00,
+		CachedInputPer1M:   0.30,
+		CacheCreationPer1M: 3.75,
+		OutputPer1M:        15.00,
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := database.InsertBatch([]db.UsageRecord{
+		{
+			CreatedAt:           now.Add(-10 * time.Minute).Format(time.RFC3339),
+			Endpoint:            "/v1/messages",
+			Method:              "POST",
+			Status:              200,
+			LatencyMs:           100,
+			ModelReturned:       "claude-sonnet-4-6",
+			InputTokens:         125,
+			OutputTokens:        30,
+			CachedTokens:        20,
+			CacheCreationTokens: 5,
+			TotalTokens:         155,
+		},
+	}); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/metering/api/models?range=24h", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("GET /metering/api/models: status %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var rows []event.ModelReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("unmarshal models: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("models = %+v, want one row", rows)
+	}
+	expected := 100/1_000_000.0*3.00 + 20/1_000_000.0*0.30 + 5/1_000_000.0*3.75 + 30/1_000_000.0*15.00
+	if diff := rows[0].Cost - expected; diff < -0.0001 || diff > 0.0001 {
+		t.Fatalf("cost = %.6f, want %.6f", rows[0].Cost, expected)
+	}
+	if rows[0].CacheCreationTokens != 5 {
+		t.Fatalf("cache_creation_tokens = %d, want 5", rows[0].CacheCreationTokens)
+	}
+}
+
 func TestAPIResponsesAreNotCacheable(t *testing.T) {
 	s, _ := newTestServer(t, "/metering")
 	req := httptest.NewRequest("GET", "/metering/api/summary?range=24h", nil)

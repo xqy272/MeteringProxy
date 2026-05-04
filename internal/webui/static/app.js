@@ -167,7 +167,7 @@ function applyMeta() {
   if ([...sel.options].some(o=>o.value===cur)) sel.value=cur; else sel.value=ranges[0].key;
   const ep = $('filter-endpoint'), curEp = ep.value;
   const epOpts = ((metadata&&metadata.endpoints)||[]).filter(e=>e.capture_mode!=='passthrough')
-    .map(e=>`<option value="${esc(e.path)}">${esc(e.display_name||e.path)}</option>`).join('');
+    .map(e=>`<option value="${esc(e.filter_value||e.path)}">${esc(e.display_name||e.path)}</option>`).join('');
   ep.innerHTML = `<option value="">${esc(t('filter.all_endpoints'))}</option>`+epOpts;
   if([...ep.options].some(o=>o.value===curEp)) ep.value=curEp;
 }

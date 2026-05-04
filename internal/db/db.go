@@ -5,32 +5,34 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
 type UsageRecord struct {
-	CreatedAt       string
-	RequestID       string
-	Endpoint        string
-	Method          string
-	Status          int
-	LatencyMs       int64
-	TTFBMs          int64
-	Stream          bool
-	ClientIPHash    string
-	APIKeyHash      string
-	ModelRequested  string
-	ModelReturned   string
-	InputTokens     int64
-	OutputTokens    int64
-	ReasoningTokens int64
-	CachedTokens    int64
-	TotalTokens     int64
-	RequestBytes    int64
-	ResponseBytes   int64
-	Error           string
+	CreatedAt           string
+	RequestID           string
+	Endpoint            string
+	Method              string
+	Status              int
+	LatencyMs           int64
+	TTFBMs              int64
+	Stream              bool
+	ClientIPHash        string
+	APIKeyHash          string
+	ModelRequested      string
+	ModelReturned       string
+	InputTokens         int64
+	OutputTokens        int64
+	ReasoningTokens     int64
+	CachedTokens        int64
+	CacheCreationTokens int64
+	TotalTokens         int64
+	RequestBytes        int64
+	ResponseBytes       int64
+	Error               string
 
 	// W3 extended fields
 	EndpointProfile   string
@@ -65,15 +67,16 @@ type SummaryRow struct {
 }
 
 type ModelRow struct {
-	Model           string `json:"model"`
-	ModelSource     string `json:"model_source"`
-	RequestCount    int64  `json:"request_count"`
-	FailedCount     int64  `json:"failed_count"`
-	InputTokens     int64  `json:"input_tokens"`
-	OutputTokens    int64  `json:"output_tokens"`
-	ReasoningTokens int64  `json:"reasoning_tokens"`
-	CachedTokens    int64  `json:"cached_tokens"`
-	TotalTokens     int64  `json:"total_tokens"`
+	Model               string `json:"model"`
+	ModelSource         string `json:"model_source"`
+	RequestCount        int64  `json:"request_count"`
+	FailedCount         int64  `json:"failed_count"`
+	InputTokens         int64  `json:"input_tokens"`
+	OutputTokens        int64  `json:"output_tokens"`
+	ReasoningTokens     int64  `json:"reasoning_tokens"`
+	CachedTokens        int64  `json:"cached_tokens"`
+	CacheCreationTokens int64  `json:"cache_creation_tokens"`
+	TotalTokens         int64  `json:"total_tokens"`
 }
 
 type KeyRow struct {
@@ -86,25 +89,27 @@ type KeyRow struct {
 }
 
 type TimeseriesRow struct {
-	Timestamp       string `json:"timestamp"`
-	Count           int64  `json:"count"`
-	FailedCount     int64  `json:"failed_count"`
-	InputTokens     int64  `json:"input_tokens"`
-	OutputTokens    int64  `json:"output_tokens"`
-	ReasoningTokens int64  `json:"reasoning_tokens"`
-	CachedTokens    int64  `json:"cached_tokens"`
-	TotalTokens     int64  `json:"total_tokens"`
-	AvgLatencyMs    int64  `json:"avg_latency_ms"`
-	AvgTTFBMs       int64  `json:"avg_ttfb_ms"`
+	Timestamp           string `json:"timestamp"`
+	Count               int64  `json:"count"`
+	FailedCount         int64  `json:"failed_count"`
+	InputTokens         int64  `json:"input_tokens"`
+	OutputTokens        int64  `json:"output_tokens"`
+	ReasoningTokens     int64  `json:"reasoning_tokens"`
+	CachedTokens        int64  `json:"cached_tokens"`
+	CacheCreationTokens int64  `json:"cache_creation_tokens"`
+	TotalTokens         int64  `json:"total_tokens"`
+	AvgLatencyMs        int64  `json:"avg_latency_ms"`
+	AvgTTFBMs           int64  `json:"avg_ttfb_ms"`
 }
 
 type ModelTimeseriesRow struct {
-	Timestamp       string `json:"timestamp"`
-	Model           string `json:"model"`
-	InputTokens     int64  `json:"input_tokens"`
-	OutputTokens    int64  `json:"output_tokens"`
-	ReasoningTokens int64  `json:"reasoning_tokens"`
-	CachedTokens    int64  `json:"cached_tokens"`
+	Timestamp           string `json:"timestamp"`
+	Model               string `json:"model"`
+	InputTokens         int64  `json:"input_tokens"`
+	OutputTokens        int64  `json:"output_tokens"`
+	ReasoningTokens     int64  `json:"reasoning_tokens"`
+	CachedTokens        int64  `json:"cached_tokens"`
+	CacheCreationTokens int64  `json:"cache_creation_tokens"`
 }
 
 type ActivityRow struct {
@@ -144,6 +149,7 @@ type RequestRow struct {
 	OutputTokens          int64  `json:"output_tokens"`
 	ReasoningTokens       int64  `json:"reasoning_tokens"`
 	CachedTokens          int64  `json:"cached_tokens"`
+	CacheCreationTokens   int64  `json:"cache_creation_tokens"`
 	TotalTokens           int64  `json:"total_tokens"`
 	RequestBytes          int64  `json:"request_bytes"`
 	ResponseBytes         int64  `json:"response_bytes"`
@@ -419,6 +425,7 @@ func requestUsageColumns() []columnSpec {
 		{"output_tokens", "output_tokens INTEGER DEFAULT 0"},
 		{"reasoning_tokens", "reasoning_tokens INTEGER DEFAULT 0"},
 		{"cached_tokens", "cached_tokens INTEGER DEFAULT 0"},
+		{"cache_creation_tokens", "cache_creation_tokens INTEGER DEFAULT 0"},
 		{"total_tokens", "total_tokens INTEGER DEFAULT 0"},
 		{"request_bytes", "request_bytes INTEGER DEFAULT 0"},
 		{"response_bytes", "response_bytes INTEGER DEFAULT 0"},
@@ -532,6 +539,7 @@ func backfillV4Normalization(tx *sql.Tx) error {
 		`UPDATE request_usage SET output_tokens = COALESCE(output_tokens, 0) WHERE output_tokens IS NULL`,
 		`UPDATE request_usage SET reasoning_tokens = COALESCE(reasoning_tokens, 0) WHERE reasoning_tokens IS NULL`,
 		`UPDATE request_usage SET cached_tokens = COALESCE(cached_tokens, 0) WHERE cached_tokens IS NULL`,
+		`UPDATE request_usage SET cache_creation_tokens = COALESCE(cache_creation_tokens, 0) WHERE cache_creation_tokens IS NULL`,
 		`UPDATE request_usage SET total_tokens = COALESCE(total_tokens, 0) WHERE total_tokens IS NULL`,
 		`UPDATE request_usage SET request_bytes = 0 WHERE request_bytes IS NULL OR request_bytes < 0`,
 		`UPDATE request_usage SET response_bytes = 0 WHERE response_bytes IS NULL OR response_bytes < 0`,
@@ -618,7 +626,7 @@ func (db *DB) InsertBatch(records []UsageRecord) error {
 		INSERT INTO request_usage (
 			created_at, created_at_unix, request_id, endpoint, method, status, latency_ms, ttfb_ms, stream,
 			client_ip_hash, api_key_hash, model_requested, model_returned,
-			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
+			input_tokens, output_tokens, reasoning_tokens, cached_tokens, cache_creation_tokens, total_tokens,
 			request_bytes, response_bytes, error,
 			endpoint_profile, capture_mode, metering_kind,
 			usage_raw_json, usage_raw_truncated,
@@ -627,7 +635,7 @@ func (db *DB) InsertBatch(records []UsageRecord) error {
 				error_class, error_type, error_code, error_param, error_message, error_message_truncated
 		) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
 		          ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32,
-		          ?33, ?34, ?35, ?36, ?37, ?38)
+		          ?33, ?34, ?35, ?36, ?37, ?38, ?39)
 	`)
 	if err != nil {
 		return err
@@ -651,7 +659,7 @@ func (db *DB) InsertBatch(records []UsageRecord) error {
 		_, err := stmt.Exec(
 			r.CreatedAt, unixFromTimestamp(r.CreatedAt), r.RequestID, r.Endpoint, r.Method, r.Status, r.LatencyMs, r.TTFBMs, streamInt(r.Stream),
 			r.ClientIPHash, r.APIKeyHash, r.ModelRequested, r.ModelReturned,
-			r.InputTokens, r.OutputTokens, r.ReasoningTokens, r.CachedTokens, r.TotalTokens,
+			r.InputTokens, r.OutputTokens, r.ReasoningTokens, r.CachedTokens, r.CacheCreationTokens, r.TotalTokens,
 			r.RequestBytes, r.ResponseBytes, r.Error,
 			r.EndpointProfile, r.CaptureMode, r.MeteringKind,
 			r.UsageRawJSON, truncatedInt(r.UsageRawTruncated),
@@ -714,6 +722,7 @@ func (db *DB) Models(since time.Time) ([]ModelRow, error) {
 			COALESCE(SUM(output_tokens), 0),
 			COALESCE(SUM(reasoning_tokens), 0),
 			COALESCE(SUM(cached_tokens), 0),
+			COALESCE(SUM(cache_creation_tokens), 0),
 			COALESCE(SUM(total_tokens), 0)
 		FROM request_usage WHERE created_at_unix >= ?
 		GROUP BY 1 ORDER BY COUNT(*) DESC
@@ -726,7 +735,7 @@ func (db *DB) Models(since time.Time) ([]ModelRow, error) {
 	var result []ModelRow
 	for rows.Next() {
 		var r ModelRow
-		if err := rows.Scan(&r.Model, &r.ModelSource, &r.RequestCount, &r.FailedCount, &r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens, &r.TotalTokens); err != nil {
+		if err := rows.Scan(&r.Model, &r.ModelSource, &r.RequestCount, &r.FailedCount, &r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens, &r.CacheCreationTokens, &r.TotalTokens); err != nil {
 			return nil, err
 		}
 		result = append(result, r)
@@ -781,6 +790,7 @@ func (db *DB) Timeseries(since time.Time, bucketMin int) ([]TimeseriesRow, error
 			COALESCE(SUM(output_tokens), 0),
 			COALESCE(SUM(reasoning_tokens), 0),
 			COALESCE(SUM(cached_tokens), 0),
+			COALESCE(SUM(cache_creation_tokens), 0),
 			COALESCE(SUM(total_tokens), 0),
 			COALESCE(CAST(ROUND(AVG(CASE WHEN latency_ms > 0 THEN latency_ms END)) AS INTEGER), 0),
 			COALESCE(CAST(ROUND(AVG(CASE WHEN ttfb_ms > 0 THEN ttfb_ms END)) AS INTEGER), 0)
@@ -797,7 +807,7 @@ func (db *DB) Timeseries(since time.Time, bucketMin int) ([]TimeseriesRow, error
 		var r TimeseriesRow
 		if err := rows.Scan(
 			&r.Timestamp, &r.Count, &r.FailedCount,
-			&r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens, &r.TotalTokens,
+			&r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens, &r.CacheCreationTokens, &r.TotalTokens,
 			&r.AvgLatencyMs, &r.AvgTTFBMs,
 		); err != nil {
 			return nil, err
@@ -824,7 +834,8 @@ func (db *DB) ModelTimeseries(since time.Time, bucketMin int) ([]ModelTimeseries
 			COALESCE(SUM(input_tokens), 0),
 			COALESCE(SUM(output_tokens), 0),
 			COALESCE(SUM(reasoning_tokens), 0),
-			COALESCE(SUM(cached_tokens), 0)
+			COALESCE(SUM(cached_tokens), 0),
+			COALESCE(SUM(cache_creation_tokens), 0)
 		FROM request_usage WHERE created_at_unix >= ?
 		GROUP BY 1, 2 ORDER BY 1 ASC, COUNT(*) DESC
 	`, since.Unix())
@@ -838,7 +849,7 @@ func (db *DB) ModelTimeseries(since time.Time, bucketMin int) ([]ModelTimeseries
 		var r ModelTimeseriesRow
 		if err := rows.Scan(
 			&r.Timestamp, &r.Model,
-			&r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens,
+			&r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens, &r.CacheCreationTokens,
 		); err != nil {
 			return nil, err
 		}
@@ -972,7 +983,7 @@ func (db *DB) percentileInt(since time.Time, column string, percentile float64, 
 }
 
 func (db *DB) Requests(limit int, statusMin, statusMax int, model, endpoint, errorClass string, since time.Time) ([]RequestRow, error) {
-	query := "SELECT id, COALESCE(created_at, ''), COALESCE(request_id, ''), COALESCE(endpoint, ''), COALESCE(method, ''), COALESCE(status, 0), COALESCE(latency_ms, 0), COALESCE(ttfb_ms, 0), COALESCE(stream, 0), COALESCE(client_ip_hash, ''), COALESCE(api_key_hash, ''), COALESCE(model_requested, ''), COALESCE(model_returned, ''), COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), COALESCE(reasoning_tokens, 0), COALESCE(cached_tokens, 0), COALESCE(total_tokens, 0), COALESCE(request_bytes, 0), COALESCE(response_bytes, 0), COALESCE(error, ''), COALESCE(endpoint_profile, ''), COALESCE(capture_mode, ''), COALESCE(metering_kind, ''), COALESCE(capture_outcome, ''), COALESCE(capture_reason, ''), COALESCE(error_class, ''), COALESCE(error_type, ''), COALESCE(error_code, ''), COALESCE(error_param, ''), COALESCE(error_message, ''), COALESCE(error_message_truncated, 0) FROM request_usage WHERE 1=1"
+	query := "SELECT id, COALESCE(created_at, ''), COALESCE(request_id, ''), COALESCE(endpoint, ''), COALESCE(method, ''), COALESCE(status, 0), COALESCE(latency_ms, 0), COALESCE(ttfb_ms, 0), COALESCE(stream, 0), COALESCE(client_ip_hash, ''), COALESCE(api_key_hash, ''), COALESCE(model_requested, ''), COALESCE(model_returned, ''), COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), COALESCE(reasoning_tokens, 0), COALESCE(cached_tokens, 0), COALESCE(cache_creation_tokens, 0), COALESCE(total_tokens, 0), COALESCE(request_bytes, 0), COALESCE(response_bytes, 0), COALESCE(error, ''), COALESCE(endpoint_profile, ''), COALESCE(capture_mode, ''), COALESCE(metering_kind, ''), COALESCE(capture_outcome, ''), COALESCE(capture_reason, ''), COALESCE(error_class, ''), COALESCE(error_type, ''), COALESCE(error_code, ''), COALESCE(error_param, ''), COALESCE(error_message, ''), COALESCE(error_message_truncated, 0) FROM request_usage WHERE 1=1"
 	var args []any
 
 	if !since.IsZero() {
@@ -992,8 +1003,13 @@ func (db *DB) Requests(limit int, statusMin, statusMax int, model, endpoint, err
 		args = append(args, model)
 	}
 	if endpoint != "" {
-		query += " AND endpoint = ?"
-		args = append(args, endpoint)
+		if profileName, ok := strings.CutPrefix(endpoint, "profile:"); ok {
+			query += " AND endpoint_profile = ?"
+			args = append(args, profileName)
+		} else {
+			query += " AND endpoint = ?"
+			args = append(args, endpoint)
+		}
 	}
 	if errorClass != "" {
 		query += " AND error_class = ?"
@@ -1012,7 +1028,7 @@ func (db *DB) Requests(limit int, statusMin, statusMax int, model, endpoint, err
 	var result []RequestRow
 	for rows.Next() {
 		var r RequestRow
-		if err := rows.Scan(&r.ID, &r.CreatedAt, &r.RequestID, &r.Endpoint, &r.Method, &r.Status, &r.LatencyMs, &r.TTFBMs, &r.Stream, &r.ClientIPHash, &r.APIKeyHash, &r.ModelRequested, &r.ModelReturned, &r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens, &r.TotalTokens, &r.RequestBytes, &r.ResponseBytes, &r.Error, &r.EndpointProfile, &r.CaptureMode, &r.MeteringKind, &r.CaptureOutcome, &r.CaptureReason, &r.ErrorClass, &r.ErrorType, &r.ErrorCode, &r.ErrorParam, &r.ErrorMessage, &r.ErrorMessageTruncated); err != nil {
+		if err := rows.Scan(&r.ID, &r.CreatedAt, &r.RequestID, &r.Endpoint, &r.Method, &r.Status, &r.LatencyMs, &r.TTFBMs, &r.Stream, &r.ClientIPHash, &r.APIKeyHash, &r.ModelRequested, &r.ModelReturned, &r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens, &r.CacheCreationTokens, &r.TotalTokens, &r.RequestBytes, &r.ResponseBytes, &r.Error, &r.EndpointProfile, &r.CaptureMode, &r.MeteringKind, &r.CaptureOutcome, &r.CaptureReason, &r.ErrorClass, &r.ErrorType, &r.ErrorCode, &r.ErrorParam, &r.ErrorMessage, &r.ErrorMessageTruncated); err != nil {
 			return nil, err
 		}
 		result = append(result, r)

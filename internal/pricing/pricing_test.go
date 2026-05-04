@@ -122,6 +122,54 @@ pricing:
 	}
 }
 
+func TestCost_CacheCreationUsesSeparatePrice(t *testing.T) {
+	p, err := Load(writePricing(t, `
+pricing:
+  claude-sonnet-4-6:
+    input_per_1m: 3.00
+    cached_input_per_1m: 0.30
+    cache_creation_per_1m: 3.75
+    output_per_1m: 15.00
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	cost, known := p.CostWithCacheCreation("claude-sonnet-4-6", 125, 30, 0, 20, 5)
+	if !known {
+		t.Fatal("expected known cost")
+	}
+
+	expected := 100/1_000_000.0*3.00 + 20/1_000_000.0*0.30 + 5/1_000_000.0*3.75 + 30/1_000_000.0*15.00
+	if diff := cost - expected; diff < -0.0001 || diff > 0.0001 {
+		t.Errorf("cost = %.6f, want %.6f", cost, expected)
+	}
+}
+
+func TestCost_CacheBreakdownClampedToInput(t *testing.T) {
+	p, err := Load(writePricing(t, `
+pricing:
+  gemini-test:
+    input_per_1m: 2.00
+    cached_input_per_1m: 0.20
+    cache_creation_per_1m: 2.50
+    output_per_1m: 4.00
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	cost, known := p.CostWithCacheCreation("gemini-test", 10, 5, 0, 50, 5)
+	if !known {
+		t.Fatal("expected known cost")
+	}
+
+	expected := 5/1_000_000.0*0.20 + 5/1_000_000.0*2.50 + 5/1_000_000.0*4.00
+	if diff := cost - expected; diff < -0.0001 || diff > 0.0001 {
+		t.Errorf("cost = %.6f, want %.6f", cost, expected)
+	}
+}
+
 func TestCost_ReasoningExceedsOutput(t *testing.T) {
 	p, err := Load(writePricing(t, `
 pricing:
@@ -338,8 +386,8 @@ func TestCanonicalize(t *testing.T) {
 		{"deepseek-chat", "deepseek-chat"},
 		{"deepseek-chat-2026-05-01", "deepseek-chat"},
 		{"", ""},
-		{"gpt-4o-abc", "gpt-4o-abc"},     // not a date suffix
-		{"gpt-4o-20", "gpt-4o-20"},       // too short for date suffix
+		{"gpt-4o-abc", "gpt-4o-abc"}, // not a date suffix
+		{"gpt-4o-20", "gpt-4o-20"},   // too short for date suffix
 	}
 	for _, tc := range tests {
 		got := canonicalize(tc.input)

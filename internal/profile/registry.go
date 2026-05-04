@@ -3,6 +3,7 @@ package profile
 import (
 	"fmt"
 	"net/http"
+	"strings"
 
 	"ai-gateway-metering-proxy/internal/event"
 	"ai-gateway-metering-proxy/internal/extractor"
@@ -25,11 +26,11 @@ func NewRegistry() *Registry {
 func (r *Registry) registerBuiltins() {
 	r.profiles = []*EndpointProfile{
 		{
-			Name:          "chat_completions",
-			Method:        http.MethodPost,
-			PathPrefix:    "/v1/chat/completions",
-			CaptureMode:   event.CaptureUsageMetered,
-			MeteringKind:  event.MeteringLLMTokens,
+			Name:           "chat_completions",
+			Method:         http.MethodPost,
+			PathPrefix:     "/v1/chat/completions",
+			CaptureMode:    event.CaptureUsageMetered,
+			MeteringKind:   event.MeteringLLMTokens,
 			StreamProtocol: streamproto.OpenAISSE(),
 			NonStreamExtractor: func(body []byte, endpoint string) (*extractor.UsageInfo, error) {
 				return extractor.ExtractNonStreaming(body, endpoint)
@@ -39,17 +40,46 @@ func (r *Registry) registerBuiltins() {
 			},
 		},
 		{
-			Name:          "responses",
-			Method:        http.MethodPost,
-			PathPrefix:    "/v1/responses",
-			CaptureMode:   event.CaptureUsageMetered,
-			MeteringKind:  event.MeteringLLMTokens,
+			Name:           "responses",
+			Method:         http.MethodPost,
+			PathPrefix:     "/v1/responses",
+			CaptureMode:    event.CaptureUsageMetered,
+			MeteringKind:   event.MeteringLLMTokens,
 			StreamProtocol: streamproto.OpenAISSE(),
 			NonStreamExtractor: func(body []byte, endpoint string) (*extractor.UsageInfo, error) {
 				return extractor.ExtractNonStreaming(body, endpoint)
 			},
 			StreamExtractor: func(data []byte) (*extractor.UsageInfo, error) {
 				return extractor.ExtractResponsesUsage(data)
+			},
+		},
+		{
+			Name:           "anthropic_messages",
+			Method:         http.MethodPost,
+			PathPrefix:     "/v1/messages",
+			CaptureMode:    event.CaptureUsageMetered,
+			MeteringKind:   event.MeteringLLMTokens,
+			StreamProtocol: streamproto.OpenAISSE(),
+			NonStreamExtractor: func(body []byte, endpoint string) (*extractor.UsageInfo, error) {
+				return extractor.ExtractAnthropicNonStreaming(body)
+			},
+			StreamExtractor: func(data []byte) (*extractor.UsageInfo, error) {
+				return extractor.ExtractAnthropicUsage(data)
+			},
+		},
+		{
+			Name:           "gemini_generate_content",
+			Method:         http.MethodPost,
+			PathPrefix:     "/v1(beta)?/models/{model}:generateContent|streamGenerateContent",
+			PathMatcher:    isGeminiGenerateContentPath,
+			CaptureMode:    event.CaptureUsageMetered,
+			MeteringKind:   event.MeteringLLMTokens,
+			StreamProtocol: streamproto.OpenAISSE(),
+			NonStreamExtractor: func(body []byte, endpoint string) (*extractor.UsageInfo, error) {
+				return extractor.ExtractGeminiNonStreaming(body)
+			},
+			StreamExtractor: func(data []byte) (*extractor.UsageInfo, error) {
+				return extractor.ExtractGeminiUsage(data)
 			},
 		},
 		{
@@ -61,6 +91,22 @@ func (r *Registry) registerBuiltins() {
 			StreamProtocol: streamproto.None(),
 		},
 	}
+}
+
+func isGeminiGenerateContentPath(path string) bool {
+	for _, prefix := range []string{"/v1/models/", "/v1beta/models/"} {
+		if !strings.HasPrefix(path, prefix) {
+			continue
+		}
+		rest := path[len(prefix):]
+		colon := strings.LastIndexByte(rest, ':')
+		if colon <= 0 || colon == len(rest)-1 {
+			return false
+		}
+		action := rest[colon+1:]
+		return action == "generateContent" || action == "streamGenerateContent"
+	}
+	return false
 }
 
 // Match finds the first profile matching the method and path.

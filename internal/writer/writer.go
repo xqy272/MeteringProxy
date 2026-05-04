@@ -28,6 +28,7 @@ type BatchWriter struct {
 	parseErrors   int64
 	dbWriteErrors int64
 	droppedEvents int64
+	stopped       int64
 }
 
 func New(database store.EventSink, queueCapacity, batchSize int, flushInterval time.Duration) *BatchWriter {
@@ -46,12 +47,20 @@ func (bw *BatchWriter) Start() {
 }
 
 func (bw *BatchWriter) Stop() {
+	if !atomic.CompareAndSwapInt64(&bw.stopped, 0, 1) {
+		return
+	}
 	close(bw.stopCh)
 	bw.flushTicker.Stop()
 	bw.wg.Wait()
 }
 
 func (bw *BatchWriter) Enqueue(ev StatsEvent) bool {
+	if atomic.LoadInt64(&bw.stopped) != 0 {
+		atomic.AddInt64(&bw.droppedEvents, 1)
+		metrics.AddDroppedEvents(1)
+		return false
+	}
 	select {
 	case bw.queue <- ev:
 		atomic.AddInt64(&bw.queueDepth, 1)

@@ -48,7 +48,7 @@ type ReportStore interface {
 	ErrorTimelineFromRequests(since time.Time) ([]db.ErrorTimelineRow, error)
 	LatestHealth() (*db.HealthRow, error)
 	Overview(since time.Time) *db.OverviewRow
-	Issues(since time.Time, limit int) []db.IssueRow
+	Issues(since time.Time, limit int) ([]db.IssueRow, error)
 	OverviewCaptureStats(since time.Time, failed, skipped *int64)
 }
 

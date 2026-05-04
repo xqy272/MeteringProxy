@@ -21,7 +21,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		dbOverview.Cost.Error = modelsErr.Error()
 	} else {
 		for _, m := range models {
-			cost, costKnown := s.pricing.Cost(m.Model, m.InputTokens, m.OutputTokens, m.ReasoningTokens, m.CachedTokens)
+			cost, costKnown := s.pricing.CostWithCacheCreation(m.Model, m.InputTokens, m.OutputTokens, m.ReasoningTokens, m.CachedTokens, m.CacheCreationTokens)
 			if costKnown {
 				knownCost += cost
 			} else {
@@ -94,7 +94,11 @@ func (s *Server) handleIssues(w http.ResponseWriter, r *http.Request) {
 		limit = 20
 	}
 
-	dbIssues := s.db.Issues(since, limit)
+	dbIssues, err := s.db.Issues(since, limit)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
 
 	items := make([]event.IssueReport, len(dbIssues))
 	for i, row := range dbIssues {

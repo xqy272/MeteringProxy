@@ -109,7 +109,7 @@ func (db *DB) Overview(since time.Time) *OverviewRow {
 }
 
 // Issues returns aggregated request-level issues.
-func (db *DB) Issues(since time.Time, limit int) []IssueRow {
+func (db *DB) Issues(since time.Time, limit int) ([]IssueRow, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
@@ -190,7 +190,7 @@ func (db *DB) Issues(since time.Time, limit int) []IssueRow {
 		LIMIT ?`,
 		since.Unix(), limit)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -198,13 +198,13 @@ func (db *DB) Issues(since time.Time, limit int) []IssueRow {
 	for rows.Next() {
 		var r IssueRow
 		if err := rows.Scan(&r.Class, &r.Count, &r.LatestAt, &r.Status, &r.Endpoint, &r.Model, &r.ModelSource, &r.APIKeyHash, &r.ErrorType, &r.ErrorCode, &r.Message, &r.RequestID); err != nil {
-			continue
+			return nil, err
 		}
 		r.Label = classLabel(r.Class)
 		r.Severity = classSeverity(r.Class)
 		result = append(result, r)
 	}
-	return result
+	return result, rows.Err()
 }
 
 func classLabel(class string) string {

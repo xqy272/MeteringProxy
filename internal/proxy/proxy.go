@@ -6,9 +6,12 @@ import (
 	"io"
 	"log"
 	"mime"
+	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"ai-gateway-metering-proxy/internal/event"
 	"ai-gateway-metering-proxy/internal/extractor"
@@ -29,30 +32,33 @@ type Proxy struct {
 	hasher          *hash.Hasher
 	writer          RecordWriter
 	maxSample       int64
-	meteringEnabled bool
+	meteringEnabled atomic.Bool
 	registry        *profile.Registry
 	transport       *http.Transport
 }
 
 func New(upstream string, hasher *hash.Hasher, rw RecordWriter, maxSample int64) *Proxy {
-	return &Proxy{
-		upstream:        upstream,
-		hasher:          hasher,
-		writer:          rw,
-		maxSample:       maxSample,
-		meteringEnabled: true,
-		registry:        profile.NewRegistry(),
+	p := &Proxy{
+		upstream:  upstream,
+		hasher:    hasher,
+		writer:    rw,
+		maxSample: maxSample,
+		registry:  profile.NewRegistry(),
 		transport: &http.Transport{
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 20,
-			IdleConnTimeout:     90 * time.Second,
-			DisableCompression:  true,
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   20,
+			IdleConnTimeout:       90 * time.Second,
+			DisableCompression:    true,
+			ResponseHeaderTimeout: 60 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
 		},
 	}
+	p.meteringEnabled.Store(true)
+	return p
 }
 
 func (p *Proxy) SetMeteringEnabled(enabled bool) {
-	p.meteringEnabled = enabled
+	p.meteringEnabled.Store(enabled)
 	metrics.SetMeteringEnabled(enabled)
 }
 
@@ -71,7 +77,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	endpoint := r.URL.Path
 
-	if !p.meteringEnabled || !prof.IsMetered() {
+	if !p.meteringEnabled.Load() || !prof.IsMetered() {
 		p.forwardTransparent(w, r)
 		return
 	}
@@ -83,17 +89,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cr := &countingReader{r: &replayReader{prefix: bodyPrefix, src: r.Body}}
 	r.Body = cr
 
-	clientIP := r.RemoteAddr
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		clientIP = strings.TrimSpace(strings.Split(fwd, ",")[0])
-	}
+	clientIP := clientIPFromRequest(r)
 	clientIPHash := p.hasher.Hash(clientIP)
-	apiKeyHash := p.hasher.Hash(bearerToken(r.Header.Get("Authorization")))
+	apiKeyHash := p.hasher.Hash(apiKeyToken(r))
 
 	modelRequested := extractModel(bodyPrefix)
+	if modelRequested == "" {
+		modelRequested = extractModelFromPath(r.URL.Path)
+	}
 	requestSuggestsStream := r.URL.Query().Get("stream") == "true" ||
 		streamFromJSON(bodyPrefix) ||
-		isSSEMediaType(r.Header.Get("Accept"))
+		isSSEMediaType(r.Header.Get("Accept")) ||
+		streamFromPath(r.URL.Path)
 
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, p.upstream+r.URL.RequestURI(), r.Body)
 	if err != nil {
@@ -251,7 +258,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 		written, err := io.Copy(w, resp.Body)
 		errStr := ""
 		if err != nil {
-			errStr = err.Error()
+			errStr = truncateErrorString(err.Error())
 		}
 		captureOutcome := event.OutcomeSkipped
 		captureReason := event.ReasonUsageNotPresent
@@ -309,7 +316,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 			reportParseErrors()
 			errStr := ""
 			if err := r.Context().Err(); err != nil {
-				errStr = err.Error()
+				errStr = truncateErrorString(err.Error())
 			}
 			captureOutcome := event.OutcomeCaptured
 			captureReason := ""
@@ -388,7 +395,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 					if err != nil {
 						sseParseErrs++
 					} else if u != nil {
-						lastUsage = u
+						lastUsage = mergeUsageInfo(lastUsage, u)
 					}
 				}
 			}
@@ -397,7 +404,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 		if readErr != nil {
 			errStr := ""
 			if readErr != io.EOF {
-				errStr = readErr.Error()
+				errStr = truncateErrorString(readErr.Error())
 			}
 			reportParseErrors()
 			captureOutcome := event.OutcomeCaptured
@@ -452,22 +459,17 @@ func (s *errorPayloadSampler) addStrippedPayload(payload []byte) {
 	if len(payload) == 0 {
 		return
 	}
-	if s.locked || s.overflow {
+	if s.locked {
 		return
 	}
-	if len(s.payloads) >= 5 {
+	if len(s.payloads) >= 5 || s.totalBytes+len(payload) > 8*1024 {
 		s.overflow = true
-		s.payloads = nil
 		return
 	}
 	pl := make([]byte, len(payload))
 	copy(pl, payload)
 	s.payloads = append(s.payloads, pl)
 	s.totalBytes += len(pl)
-	if s.totalBytes > 8*1024 {
-		s.overflow = true
-		s.payloads = nil
-	}
 }
 
 func (s *errorPayloadSampler) finalize() []byte {
@@ -576,7 +578,7 @@ func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, resp *ht
 
 	errStr := ""
 	if copyErr != nil {
-		errStr = copyErr.Error()
+		errStr = truncateErrorString(copyErr.Error())
 	}
 	p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, false,
 		clientIPHash, apiKeyHash, modelRequested, usage, cr.bytesRead, written, errStr,
@@ -639,8 +641,6 @@ func (p *Proxy) recordUsage(start time.Time, ttfb time.Duration, prof *profile.E
 		ev.ErrorType = errInfo.Type
 		ev.ErrorCode = errInfo.Code
 		ev.ErrorParam = errInfo.Param
-		ev.ErrorMessage = errInfo.Message
-		ev.ErrorMessageTruncated = errInfo.MessageTruncated
 	}
 
 	if usage != nil {
@@ -649,6 +649,7 @@ func (p *Proxy) recordUsage(start time.Time, ttfb time.Duration, prof *profile.E
 		ev.OutputTokens = usage.OutputTokens
 		ev.ReasoningTokens = usage.ReasoningTokens
 		ev.CachedTokens = usage.CachedTokens
+		ev.CacheCreationTokens = usage.CacheCreationTokens
 		ev.TotalTokens = usage.TotalTokens
 		ev.UsageRawJSON, ev.UsageRawTruncated = truncateUsageRawJSON(usage.UsageRawJSON)
 		if ev.CaptureOutcome == "" {
@@ -666,7 +667,14 @@ func truncateUsageRawJSON(raw string) (string, bool) {
 	if len(raw) <= maxUsageRawJSONBytes {
 		return raw, false
 	}
-	return raw[:maxUsageRawJSONBytes], true
+	end := maxUsageRawJSONBytes
+	for end > 0 && !utf8.RuneStart(raw[end]) {
+		end--
+	}
+	if end == 0 {
+		end = maxUsageRawJSONBytes
+	}
+	return raw[:end], true
 }
 
 func (p *Proxy) writeError(w http.ResponseWriter, start time.Time, ttfb time.Duration, prof *profile.EndpointProfile, endpoint, method, clientIPHash, apiKeyHash, modelRequested string, requestBytes int64, status int, err error) {
@@ -688,6 +696,22 @@ func (p *Proxy) writeError(w http.ResponseWriter, start time.Time, ttfb time.Dur
 		captureOutcome, event.ReasonUpstreamError, errInfo)
 }
 
+const maxErrorStringLen = 500
+
+func truncateErrorString(err string) string {
+	if len(err) <= maxErrorStringLen {
+		return err
+	}
+	end := maxErrorStringLen
+	for end > 0 && !utf8.RuneStart(err[end]) {
+		end--
+	}
+	if end == 0 {
+		end = maxErrorStringLen
+	}
+	return err[:end]
+}
+
 // ---------- helpers ----------
 
 func extractModel(body []byte) string {
@@ -699,6 +723,64 @@ func extractModel(body []byte) string {
 		return model
 	}
 	return ""
+}
+
+func extractModelFromPath(path string) string {
+	const marker = "/models/"
+	idx := strings.Index(path, marker)
+	if idx < 0 {
+		return ""
+	}
+	model := path[idx+len(marker):]
+	if colon := strings.IndexByte(model, ':'); colon >= 0 {
+		model = model[:colon]
+	}
+	return model
+}
+
+func streamFromPath(path string) bool {
+	return strings.HasSuffix(path, ":streamGenerateContent")
+}
+
+func mergeUsageInfo(current, next *extractor.UsageInfo) *extractor.UsageInfo {
+	if next == nil {
+		return current
+	}
+	if current == nil {
+		clone := *next
+		return &clone
+	}
+
+	merged := *current
+	if next.Model != "" {
+		merged.Model = next.Model
+	}
+	if next.InputTokens != 0 {
+		merged.InputTokens = next.InputTokens
+	}
+	if next.OutputTokens != 0 {
+		merged.OutputTokens = next.OutputTokens
+	}
+	if next.ReasoningTokens != 0 {
+		merged.ReasoningTokens = next.ReasoningTokens
+	}
+	if next.CachedTokens != 0 {
+		merged.CachedTokens = next.CachedTokens
+	}
+	if next.CacheCreationTokens != 0 {
+		merged.CacheCreationTokens = next.CacheCreationTokens
+	}
+	if next.TotalTokens != 0 {
+		merged.TotalTokens = next.TotalTokens
+	} else if next.InputTokens != 0 || next.OutputTokens != 0 || next.ReasoningTokens != 0 || next.CachedTokens != 0 {
+		// For Anthropic streaming, InputTokens includes cache creation and cache
+		// read tokens, so InputTokens + OutputTokens gives the correct total.
+		merged.TotalTokens = merged.InputTokens + merged.OutputTokens
+	}
+	if next.UsageRawJSON != "" {
+		merged.UsageRawJSON = next.UsageRawJSON
+	}
+	return &merged
 }
 
 func isSSEMediaType(headerValue string) bool {
@@ -731,6 +813,43 @@ func bearerToken(auth string) string {
 		return fields[1]
 	}
 	return auth
+}
+
+func clientIPFromRequest(r *http.Request) string {
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		return normalizeIP(strings.TrimSpace(strings.Split(fwd, ",")[0]))
+	}
+	return normalizeIP(r.RemoteAddr)
+}
+
+func normalizeIP(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		return strings.Trim(host, "[]")
+	}
+	if ip := net.ParseIP(strings.Trim(value, "[]")); ip != nil {
+		return ip.String()
+	}
+	return value
+}
+
+// apiKeyToken extracts the API key from request headers or query parameters.
+// The key is later hashed for metering storage; it is never stored or logged in plaintext.
+// For Gemini, the ?key= query parameter is intentionally forwarded to the upstream
+// per invariant #3 (preserve request transparency).
+func apiKeyToken(r *http.Request) string {
+	if token := bearerToken(r.Header.Get("Authorization")); token != "" {
+		return token
+	}
+	for _, name := range []string{"X-API-Key", "X-Goog-API-Key"} {
+		if token := strings.TrimSpace(r.Header.Get(name)); token != "" {
+			return token
+		}
+	}
+	return strings.TrimSpace(r.URL.Query().Get("key"))
 }
 
 func requestIDFromHeaders(respHeader, reqHeader http.Header) string {
