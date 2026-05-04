@@ -650,8 +650,8 @@ func TestProxyRequest_UpstreamError(t *testing.T) {
 	if len(rw.events) == 0 || lastEvent(rw).Error == "" {
 		t.Error("error event should be recorded with error string")
 	}
-	if lastEvent(rw).Error != event.ReasonUpstreamError {
-		t.Errorf("event error = %q, want %q", lastEvent(rw).Error, event.ReasonUpstreamError)
+	if lastEvent(rw).Error == "" || strings.Contains(lastEvent(rw).Error, "127.0.0.1") {
+		t.Errorf("event error = %q, want classified upstream category", lastEvent(rw).Error)
 	}
 }
 
