@@ -181,24 +181,10 @@ api.example.com {
     @metered {
         method POST
         path /v1/chat/completions /v1/responses /v1/messages
+        path /v1/models/*:generateContent /v1/models/*:streamGenerateContent
+        path /v1beta/models/*:generateContent /v1beta/models/*:streamGenerateContent
     }
     handle @metered {
-        reverse_proxy 127.0.0.1:8320 {
-            stream_close_delay 5m
-            transport http {
-                dial_timeout 5s
-                response_header_timeout 180s
-                read_timeout 0
-                write_timeout 0
-            }
-        }
-    }
-
-    @metered_gemini {
-        method POST
-        path_regexp ^/v1(beta)?/models/[^/]+:(generateContent|streamGenerateContent)$
-    }
-    handle @metered_gemini {
         reverse_proxy 127.0.0.1:8320 {
             stream_close_delay 5m
             transport http {
@@ -259,78 +245,16 @@ curl -s http://127.0.0.1:8320/metering/api/summary?range=24h
 
 ## 升级与回滚
 
-### v0.1.x → v0.2.0 升级指南
-
-v0.2.0 是一次大版本更新（47 文件，+7372/-2030 行），新增 Anthropic/Gemini API 计量、错误分类体系、WebUI 重做、HMAC-SHA256 哈希迁移。以下为从 v0.1.1 完整升级流程。
-
----
-
-#### 第一步：停机前检查清单
-
-- [ ] 已确认当前运行版本：`docker inspect metering-proxy --format '{{.Config.Image}}'`
-- [ ] 已确认 `/opt/ai-gateway/metering/config.yaml` 中 `upstream` 字段包含 `http://` 或 `https://` scheme（v0.2.0 会拒绝无 scheme 或含 query/fragment 的上游 URL）
-- [ ] 已阅读下方的「HMAC 哈希迁移」说明，理解 API key / IP 分组断裂的影响
-- [ ] 已有 Caddy 配置调整方案（如需添加 Gemini API 路径路由，见下方）
-
-#### 第二步：备份（必须执行）
+<details>
+<summary><b>展开升级步骤</b></summary>
 
 ```bash
-# 停止服务以确保数据一致
+# 1. 停止 + 备份
 docker stop metering-proxy
+cp /opt/ai-gateway/metering/usage.sqlite /opt/ai-gateway/metering/backups/usage.sqlite.$(date +%Y%m%d-%H%M%S).bak
+cp /opt/ai-gateway/metering/salt       /opt/ai-gateway/metering/backups/salt.$(date +%Y%m%d-%H%M%S).bak
 
-# 备份三个文件，缺一不可
-cp /opt/ai-gateway/metering/usage.sqlite \
-   /opt/ai-gateway/metering/backups/usage.sqlite.pre-v0.2.0.bak
-cp /opt/ai-gateway/metering/salt \
-   /opt/ai-gateway/metering/backups/salt.pre-v0.2.0.bak
-cp /opt/ai-gateway/metering/pricing.yaml \
-   /opt/ai-gateway/metering/backups/pricing.yaml.pre-v0.2.0.bak
-
-# 同步刷新到磁盘
-sync
-```
-
-> **盐值文件**与数据库同等重要。丢失盐值 = 历史 API key / IP 哈希分组永久不可恢复。不要在升级时重新生成盐值。
-
-#### 第三步：更新 pricing.yaml
-
-v0.2.0 新增了 `cache_creation_per_1m` 定价字段。编辑 `/opt/ai-gateway/metering/pricing.yaml`，在三个 Anthropic 模型下添加：
-
-```yaml
-claude-sonnet-4-6:
-  cache_creation_per_1m: 3.75    # 新增
-
-claude-opus-4-7:
-  cache_creation_per_1m: 18.75   # 新增
-
-claude-haiku-4-5:
-  cache_creation_per_1m: 1.25    # 新增
-```
-
-> 不配也可以——缺失时 cache creation tokens 会自动回退到 `input_per_1m` 计费。
-
-#### 第四步：更新 Caddy 配置（如需 Gemini 路由）
-
-如果你使用 Gemini API，需要在 Caddy 中添加两条路由：
-
-```caddyfile
-@metered {
-    method POST
-    path /v1/chat/completions /v1/responses /v1/messages
-    path /v1/models/*:generateContent /v1/models/*:streamGenerateContent
-    path /v1beta/models/*:generateContent /v1beta/models/*:streamGenerateContent
-}
-```
-
-重载 Caddy：
-
-```bash
-caddy reload --config /path/to/Caddyfile
-```
-
-#### 第五步：拉取镜像并替换容器
-
-```bash
+# 2. 更新镜像
 docker pull ghcr.io/xqy272/ai-gateway-metering-proxy:v0.2.0
 docker rm metering-proxy
 docker run -d \
@@ -341,63 +265,20 @@ docker run -d \
   -p 127.0.0.1:8320:8320 \
   ghcr.io/xqy272/ai-gateway-metering-proxy:v0.2.0 \
   -config /data/config.yaml
-```
 
-**首次启动会比平时多几秒**——数据库自动执行增量迁移（7 个新列 + 1 个新索引 + NULL 值规范化）。后续重启恢复秒级。
-
-#### 第六步：启动后验证
-
-```bash
-# 1. 确认容器正常运行（无 crash loop）
-docker ps --filter name=metering-proxy --format '{{.Status}}'
-
-# 2. 确认 DB 迁移版本为 5
+# 3. 验证
+docker ps --filter name=metering-proxy
 docker exec metering-proxy sqlite3 /data/usage.sqlite "PRAGMA user_version;"
-# 输出应为 5
-
-# 3. 检查启动日志无 error
-docker logs metering-proxy 2>&1 | grep -iE 'error|fatal|panic'
-
-# 4. Overview API 正常
-curl -s -u user:pass http://127.0.0.1:8320/metering/api/overview | jq .selected.data
-
-# 5. Issues API 正常
-curl -s -u user:pass http://127.0.0.1:8320/metering/api/issues | jq .total
-
-# 6. 发一条测试请求验证代理链路
-curl -s -o /dev/null -w "%{http_code}" \
-  -X POST http://127.0.0.1:8320/v1/chat/completions \
-  -H "Authorization: Bearer sk-test" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
-# 应返回 200
-
-# 7. WebUI 可访问
-curl -s -o /dev/null -w "%{http_code}" -u user:pass \
-  http://127.0.0.1:8320/metering/
-# 应返回 200
 ```
 
----
+数据库文件在宿主机上，升级不会丢失历史数据。迁移在容器启动时自动执行（仅增量 ALTER TABLE ADD COLUMN，不删列不改类型）。
 
-#### HMAC 哈希迁移说明
+</details>
 
-v0.2.0 将哈希算法从 `SHA256(salt + value)` 改为 `HMAC-SHA256(salt, value)`。对于同样的 API key 和 IP：
+<details>
+<summary><b>展开回滚步骤</b></summary>
 
-| 时间段 | 哈希算法 | WebUI 分组表现 |
-|--------|---------|---------------|
-| v0.1.x 历史数据 | SHA256(salt+value) | 旧分组，标签不变 |
-| v0.2.0 新数据 | HMAC-SHA256(salt, value) | 新分组，与旧数据分离 |
-
-**同一个 API key 在升级后会显示为两条不同的记录**——一条来自历史数据，一条来自新数据。随着时间推移，旧数据会逐渐滚出时间窗口，分组自然归一。
-
-这是一次性破坏变更，**之后算法永不再变**（`hash.go` 中已锁定 `algorithm = "hmac-sha256-v1"`）。
-
----
-
-#### 回滚方案
-
-**简单回滚（代码问题，迁移兼容）：**
+使用旧版本镜像即可（DB 迁移是纯增量的，旧版本不受新增列影响）：
 
 ```bash
 docker stop metering-proxy
@@ -412,22 +293,18 @@ docker run -d \
   -config /data/config.yaml
 ```
 
-v0.2.0 的 DB 迁移（新增列）完全向后兼容——v0.1.1 不会因多了几列而崩溃，只是不读取新字段。
-
-**完整回滚（恢复备份 DB）：**
+如果迁移导致数据库不可用，先停止服务再恢复备份。WAL 模式下不能只覆盖主库文件：
 
 ```bash
 docker stop metering-proxy
-rm -f /opt/ai-gateway/metering/usage.sqlite-wal \
-      /opt/ai-gateway/metering/usage.sqlite-shm
-cp /opt/ai-gateway/metering/backups/usage.sqlite.pre-v0.2.0.bak \
-   /opt/ai-gateway/metering/usage.sqlite
+rm -f /opt/ai-gateway/metering/usage.sqlite-wal /opt/ai-gateway/metering/usage.sqlite-shm
+cp /opt/ai-gateway/metering/backups/usage.sqlite.YYYYMMDD-HHMMSS.bak /opt/ai-gateway/metering/usage.sqlite
 chown 1000:1000 /opt/ai-gateway/metering/usage.sqlite
 chmod 600 /opt/ai-gateway/metering/usage.sqlite
-# 然后用 v0.1.1 镜像重新 docker run
+# 然后用旧镜像 docker run
 ```
 
-> 完整回滚会丢失升级期间产生的所有新计量数据。仅在 DB 迁移异常时使用。
+</details>
 
 ## 记录的字段
 
