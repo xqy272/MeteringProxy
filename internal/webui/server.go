@@ -98,6 +98,10 @@ func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 	setNoStore(w)
 	path := r.URL.Path
 	switch {
+	case strings.HasSuffix(path, "/api/overview"):
+		s.handleOverview(w, r)
+	case strings.HasSuffix(path, "/api/issues"):
+		s.handleIssues(w, r)
 	case strings.HasSuffix(path, "/api/summary"):
 		s.handleSummary(w, r)
 	case strings.HasSuffix(path, "/api/timeseries"):
@@ -184,7 +188,7 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTimeseries(w http.ResponseWriter, r *http.Request) {
 	since, _ := parseRange(r)
 	bucketStr := r.URL.Query().Get("bucket")
-	bucketMin := 10
+	bucketMin := 60
 	switch bucketStr {
 	case "1h":
 		bucketMin = 60
@@ -199,6 +203,36 @@ func (s *Server) handleTimeseries(w http.ResponseWriter, r *http.Request) {
 	report := event.TimeseriesFromDB(rows)
 	if report == nil {
 		report = []event.TimeseriesReport{}
+	}
+	modelRows, err := s.db.ModelTimeseries(since, bucketMin)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	type bucketCost struct {
+		cost           float64
+		unpricedModels int64
+	}
+	costs := make(map[string]*bucketCost)
+	for _, row := range modelRows {
+		acc := costs[row.Timestamp]
+		if acc == nil {
+			acc = &bucketCost{}
+			costs[row.Timestamp] = acc
+		}
+		cost, known := s.pricing.Cost(row.Model, row.InputTokens, row.OutputTokens, row.ReasoningTokens, row.CachedTokens)
+		if known {
+			acc.cost += cost
+		} else {
+			acc.unpricedModels++
+		}
+	}
+	for i := range report {
+		if acc := costs[report[i].Timestamp]; acc != nil {
+			report[i].Cost = acc.cost
+			report[i].CostKnown = acc.unpricedModels == 0
+			report[i].UnpricedModels = acc.unpricedModels
+		}
 	}
 	writeJSON(w, report)
 }
@@ -265,9 +299,10 @@ func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {
 	}
 	model := r.URL.Query().Get("model")
 	endpoint := r.URL.Query().Get("endpoint")
+	errorClass := r.URL.Query().Get("error_class")
 	since, _ := parseRange(r)
 
-	rows, err := s.db.Requests(limit, statusMin, statusMax, model, endpoint, since)
+	rows, err := s.db.Requests(limit, statusMin, statusMax, model, endpoint, errorClass, since)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -403,13 +438,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 	meta := event.MetadataReport{
 		Ranges: []event.RangeMeta{
-			{Key: "24h", Label: "Last 24 Hours", Bucket: "10m"},
-			{Key: "today", Label: "Today", Bucket: "10m"},
+			{Key: "24h", Label: "Last 24 Hours", Bucket: "1h"},
+			{Key: "today", Label: "Today", Bucket: "1h"},
 			{Key: "7d", Label: "Last 7 Days", Bucket: "1h"},
 			{Key: "30d", Label: "Last 30 Days", Bucket: "1d"},
 		},
 		Buckets: []event.BucketMeta{
-			{Key: "10m", Label: "10 Minutes"},
 			{Key: "1h", Label: "1 Hour"},
 			{Key: "1d", Label: "1 Day"},
 		},

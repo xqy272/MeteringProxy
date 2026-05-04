@@ -7,307 +7,237 @@
 <meta name="api-base" content="__METERING_API_BASE__">
 <link rel="icon" href="__METERING_BASE__/mark.svg" type="image/svg+xml">
 <link rel="stylesheet" href="__METERING_BASE__/styles.css">
+<script>!function(){try{var t=localStorage.getItem('mp-theme'),l=t==='light'||(!t&&window.matchMedia&&!window.matchMedia('(prefers-color-scheme:dark)').matches);document.documentElement.setAttribute('data-theme',l?'light':'dark')}catch(e){document.documentElement.setAttribute('data-theme','dark')}}()</script>
 </head>
 <body>
-<header class="app-header">
-  <div class="header-inner">
-    <div class="brand">
-      <div class="mark"><img class="brand-mark" src="__METERING_BASE__/mark.svg" alt="" aria-hidden="true"></div>
-      <div>
-        <h1>Metering Proxy</h1>
-        <div class="subtitle" data-i18n="app.subtitle">Transparent AI gateway metering</div>
-      </div>
-    </div>
-    <div class="controls">
-      <a class="button github-link" href="https://github.com/xqy272/MeteringProxy" target="_blank" rel="noreferrer" data-i18n="action.github">GitHub</a>
-      <select id="language-select" class="control language-control" aria-label="Language">
-        <option value="en">English</option>
-        <option value="zh">中文</option>
-      </select>
-      <select id="range-select" class="control" aria-label="Range"></select>
-      <label class="toggle"><input type="checkbox" id="auto-refresh"> <span data-i18n="action.auto_refresh">Auto 30s</span></label>
-      <button class="button" id="refresh-btn" type="button" data-i18n="action.refresh">Refresh</button>
-    </div>
+
+<header class="topbar">
+  <div class="topbar-brand">
+    <div class="topbar-logo"><img src="__METERING_BASE__/mark.svg" alt=""></div>
+    <span class="topbar-name">Metering Proxy</span>
+  </div>
+  <div class="topbar-actions">
+    <a class="ctrl-btn github-link" href="https://github.com/xqy272/MeteringProxy" target="_blank" rel="noreferrer" data-i18n="action.github" data-i18n-aria="action.open_github">GitHub</a>
+    <select id="language-select" class="ctrl-select" aria-label="Language" data-i18n-aria="action.language">
+      <option value="en">EN</option>
+      <option value="zh">中文</option>
+    </select>
+    <select id="range-select" class="ctrl-select" aria-label="Range" data-i18n-aria="action.range"></select>
+    <label class="ctrl-toggle"><input type="checkbox" id="auto-refresh"> <span data-i18n="action.auto_refresh">Auto</span></label>
+    <button class="ctrl-btn primary" id="refresh-btn" type="button" data-i18n="action.refresh">Refresh</button>
+    <button class="theme-btn" id="theme-toggle" type="button" aria-label="Toggle theme" data-i18n-aria="action.toggle_theme" data-i18n-title="action.toggle_theme">
+      <svg id="theme-icon-sun" class="hidden" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+      <svg id="theme-icon-moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    </button>
   </div>
 </header>
 
-<main>
-  <div class="status-strip" id="status-strip">
-    <div class="status-pill ok" id="status-pill">Live</div>
-    <div class="status-text">
-      <div class="status-title" id="status-title" data-i18n="status.ready">Dashboard ready</div>
-      <div class="status-detail" id="status-detail" data-i18n="status.waiting">Waiting for data refresh.</div>
-    </div>
-    <div class="last-refresh" id="last-refresh">Last refresh: never</div>
+<main class="dashboard">
+  <!-- Status -->
+  <div class="status-bar" id="status-strip" role="status" aria-live="polite">
+    <span class="status-dot" id="status-dot"></span>
+    <span class="status-label" id="status-title" data-i18n="status.ready">Ready</span>
+    <span class="status-sep">&middot;</span>
+    <span id="status-detail" data-i18n="status.waiting">Waiting for refresh</span>
+    <span class="status-time" id="last-refresh"></span>
   </div>
 
-  <section class="grid overview-grid" aria-label="Overview">
-    <div class="card metric">
-      <div>
-        <div class="metric-label" data-i18n="metric.requests">Requests</div>
-        <div class="metric-value mono" id="total-requests">-</div>
-      </div>
-      <div class="metric-sub" id="requests-sub">-</div>
+  <!-- Metrics -->
+  <section id="overview" class="metrics-grid">
+    <div class="metric-card">
+      <div class="mc-label" data-i18n="metric.estimated_cost">Estimated Cost</div>
+      <div class="mc-value mono mc-green" id="total-cost">-</div>
+      <div class="mc-sub" id="cost-sub">-</div>
     </div>
-    <div class="card metric accent-red">
-      <div>
-        <div class="metric-label" data-i18n="metric.failure_rate">Failure Rate</div>
-        <div class="metric-value mono" id="failure-rate">-</div>
-      </div>
-      <div class="metric-sub" id="failure-sub">-</div>
+    <div class="metric-card">
+      <div class="mc-label" data-i18n="metric.requests">Requests</div>
+      <div class="mc-value mono mc-accent" id="total-requests">-</div>
+      <div class="mc-sub" id="requests-sub">-</div>
     </div>
-    <div class="card metric accent-violet">
-      <div>
-        <div class="metric-label" data-i18n="metric.tokens">Tokens</div>
-        <div class="metric-value mono" id="total-tokens">-</div>
-      </div>
-      <div class="metric-sub" id="tokens-sub">-</div>
+    <div class="metric-card">
+      <div class="mc-label" data-i18n="metric.tokens">Tokens</div>
+      <div class="mc-value mono" id="total-tokens">-</div>
+      <div class="mc-sub" id="tokens-sub">-</div>
     </div>
-    <div class="card metric accent-amber">
-      <div>
-        <div class="metric-label" data-i18n="metric.estimated_cost">Estimated Cost</div>
-        <div class="metric-value mono" id="total-cost">-</div>
-      </div>
-      <div class="metric-sub" id="cost-sub">-</div>
-    </div>
-    <div class="card metric accent-blue">
-      <div>
-        <div class="metric-label" data-i18n="metric.p95_latency">P95 Latency</div>
-        <div class="metric-value mono" id="p95-latency">-</div>
-      </div>
-      <div class="metric-sub" id="latency-sub">-</div>
-    </div>
-    <div class="card metric accent-green">
-      <div>
-        <div class="metric-label" data-i18n="metric.capture_quality">Capture Quality</div>
-        <div class="metric-value mono" id="capture-quality">-</div>
-      </div>
-      <div class="metric-sub" id="capture-sub">-</div>
+    <div class="metric-card">
+      <div class="mc-label" data-i18n="metric.p95_latency">P95 Latency</div>
+      <div class="mc-value mono mc-cyan" id="p95-latency">-</div>
+      <div class="mc-sub" id="latency-sub">-</div>
     </div>
   </section>
 
-  <section class="grid main-grid">
-    <div class="panel">
-      <div class="panel-header">
-        <div>
-          <h2 class="panel-title" data-i18n="panel.tokens">Tokens</h2>
-          <div class="panel-subtitle" id="tokens-chart-summary">-</div>
-        </div>
-        <div class="legend">
-          <span class="legend-item"><span class="swatch cached"></span><span data-i18n="legend.cached_input">Cached input</span></span>
-          <span class="legend-item"><span class="swatch uncached"></span><span data-i18n="legend.uncached_input">Uncached input</span></span>
-          <span class="legend-item"><span class="swatch output"></span><span data-i18n="legend.output">Output</span></span>
-          <span class="legend-item"><span class="swatch reasoning"></span><span data-i18n="legend.reasoning">Reasoning</span></span>
-        </div>
+  <!-- Usage -->
+  <section id="usage" class="card usage-card section-gap">
+    <div class="usage-tabs" role="tablist" aria-label="Usage display mode">
+      <button class="usage-tab active" type="button" role="tab" aria-selected="true" data-usage-mode="cost" data-i18n="usage.mode.cost">Cost</button>
+      <button class="usage-tab" type="button" role="tab" aria-selected="false" data-usage-mode="tokens" data-i18n="usage.mode.tokens">Token Usage</button>
+      <button class="usage-tab" type="button" role="tab" aria-selected="false" data-usage-mode="requests" data-i18n="usage.mode.requests">Requests</button>
+    </div>
+    <div class="usage-summary">
+      <div>
+        <div class="section-label" data-i18n="usage.trend">Usage Trend</div>
+        <div class="card-desc" id="usage-chart-summary">-</div>
       </div>
-      <div class="panel-body">
-        <div class="chart-shell"><div class="stacked-chart" id="tokens-chart"></div></div>
-        <div class="chart-footer">
-          <span id="tokens-chart-left">-</span>
-          <span id="tokens-chart-right">-</span>
-        </div>
+      <div class="usage-total">
+        <span class="mono" id="usage-total-value">-</span>
+        <span id="usage-total-sub">-</span>
       </div>
     </div>
-
-    <div class="panel">
-      <div class="panel-header">
-        <div>
-          <h2 class="panel-title" data-i18n="panel.requests">Requests</h2>
-          <div class="panel-subtitle" id="requests-chart-summary">-</div>
-        </div>
-        <div class="legend">
-          <span class="legend-item"><span class="swatch requests"></span><span data-i18n="legend.requests">Requests</span></span>
-          <span class="legend-item"><span class="swatch failed"></span><span data-i18n="legend.failed">Failed</span></span>
-        </div>
+    <div class="card-body usage-body">
+      <div class="legend" id="usage-legend"></div>
+      <div class="chart-area chart-container usage-chart" id="usage-trend-chart"></div>
+      <div class="chart-footer">
+        <span id="usage-chart-left">-</span>
+        <span id="usage-chart-right">-</span>
       </div>
-      <div class="panel-body">
-        <div class="trend-chart" id="requests-chart"></div>
-        <div class="chart-footer">
-          <span id="requests-chart-left">-</span>
-          <span id="requests-chart-right">-</span>
+      <div class="distribution-section">
+        <div class="subsection-head">
+          <div class="section-label" data-i18n="usage.distribution">Distribution</div>
+          <div class="card-desc" id="models-summary">-</div>
+        </div>
+        <div class="distribution-layout">
+          <div class="distribution-chart" id="model-distribution-chart"></div>
+          <div class="distribution-list" id="model-distribution-list"></div>
         </div>
       </div>
     </div>
   </section>
 
-  <section class="grid ops-grid">
-    <div class="panel">
-      <div class="panel-header">
-        <div>
-          <h2 class="panel-title" data-i18n="panel.request_health">Request Health</h2>
-          <div class="panel-subtitle" id="request-health-summary">-</div>
-        </div>
-        <button class="button secondary" id="toggle-requests" type="button" data-i18n="action.show_requests">Show recent requests</button>
-      </div>
-      <div class="panel-body">
-        <div class="request-health">
-          <div class="request-card">
-            <div class="label" data-i18n="metric.success">Success</div>
-            <div class="value mono" id="activity-success-rate">-</div>
-            <div class="small" id="activity-success-detail">-</div>
-          </div>
-          <div class="request-card">
-            <div class="label" data-i18n="metric.p95_ttfb">P95 TTFB</div>
-            <div class="value mono" id="p95-ttfb">-</div>
-            <div class="small" id="ttfb-detail">-</div>
-          </div>
-          <div class="request-card">
-            <div class="label" data-i18n="metric.capture_issues">Capture Issues</div>
-            <div class="value mono" id="capture-issues">-</div>
-            <div class="small" id="capture-issues-detail">-</div>
-          </div>
-          <div class="request-card wide">
-            <div class="label" data-i18n="metric.latest_error">Latest Error</div>
-            <div class="value mono" id="latest-error-status">-</div>
-            <div class="small" id="latest-error-detail">-</div>
-          </div>
-        </div>
-
-        <div class="details-panel hidden" id="request-details">
-          <div class="filters">
-            <select id="filter-status" aria-label="Status">
-              <option value="" data-i18n="filter.all_status">All status</option>
-              <option value="success" data-i18n="filter.success">2xx success</option>
-              <option value="4xx" data-i18n="filter.client_error">4xx client</option>
-              <option value="5xx" data-i18n="filter.server_error">5xx server</option>
-            </select>
-            <select id="filter-model" aria-label="Model"><option value="" data-i18n="filter.all_models">All models</option></select>
-            <select id="filter-endpoint" aria-label="Endpoint"><option value="" data-i18n="filter.all_endpoints">All endpoints</option></select>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th data-i18n="table.time">Time</th>
-                  <th data-i18n="table.status">Status</th>
-                  <th data-i18n="table.endpoint">Endpoint</th>
-                  <th data-i18n="table.model">Model</th>
-                  <th class="numeric" data-i18n="table.input">Input</th>
-                  <th class="numeric" data-i18n="table.output">Output</th>
-                  <th class="numeric" data-i18n="table.total">Total</th>
-                  <th class="numeric">TTFB</th>
-                  <th class="numeric" data-i18n="table.latency">Latency</th>
-                  <th data-i18n="table.capture">Capture</th>
-                  <th data-i18n="table.key_hash">Key Hash</th>
-                </tr>
-              </thead>
-              <tbody id="requests-table"><tr><td colspan="11" class="empty" data-i18n="state.not_loaded">Not loaded</td></tr></tbody>
-            </table>
-          </div>
-        </div>
+  <!-- API Keys -->
+  <section id="keys" class="card section-gap">
+    <div class="card-head">
+      <div class="card-head-left">
+        <div class="card-title" data-i18n="panel.api_keys">API Keys</div>
+        <div class="card-desc" id="keys-summary">-</div>
       </div>
     </div>
-
-    <div class="panel">
-      <div class="panel-header">
-        <div>
-          <h2 class="panel-title" data-i18n="panel.capture_health">Capture Health</h2>
-          <div class="panel-subtitle" id="health-summary">-</div>
-        </div>
-      </div>
-      <div class="panel-body">
-        <div class="health-grid">
-          <div class="health-tile">
-            <div class="name" data-i18n="health.queue">Queue</div>
-            <div class="value mono" id="queue-depth">-</div>
-            <div class="detail" data-i18n="health.pending_writes">pending writes</div>
-          </div>
-          <div class="health-tile">
-            <div class="name" data-i18n="health.dropped">Dropped</div>
-            <div class="value mono" id="dropped-events">-</div>
-            <div class="detail" data-i18n="health.events">events</div>
-          </div>
-          <div class="health-tile">
-            <div class="name" data-i18n="health.parse">Parse</div>
-            <div class="value mono" id="parse-errors">-</div>
-            <div class="detail" data-i18n="health.errors">errors</div>
-          </div>
-          <div class="health-tile">
-            <div class="name" data-i18n="health.db_write">DB Write</div>
-            <div class="value mono" id="db-errors">-</div>
-            <div class="detail" data-i18n="health.errors">errors</div>
-          </div>
-        </div>
-      </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th data-i18n="table.key_hash">Key Hash</th>
+          <th class="numeric" data-i18n="table.requests">Requests</th>
+          <th class="numeric" data-i18n="table.failed">Failed</th>
+          <th class="numeric" data-i18n="table.failure_rate">Fail %</th>
+          <th class="numeric" data-i18n="table.tokens">Tokens</th>
+        </tr></thead>
+        <tbody id="keys-table"><tr><td colspan="5" class="empty-state" data-i18n="state.loading">Loading...</td></tr></tbody>
+      </table>
     </div>
   </section>
 
-  <section class="grid section-grid">
-    <div class="panel">
-      <div class="panel-header">
-        <div>
-          <h2 class="panel-title" data-i18n="panel.models">Models</h2>
-          <div class="panel-subtitle" id="models-summary">-</div>
+  <!-- Requests and Issues -->
+  <section id="requests" class="card request-workbench section-gap">
+    <div class="card-head">
+      <div class="card-head-left">
+        <div class="card-title" data-i18n="panel.request_workbench">Requests & Issues</div>
+        <div class="card-desc" id="request-health-summary">-</div>
+      </div>
+      <button class="ctrl-btn" id="toggle-requests" type="button" data-toggle-requests data-i18n="action.show_requests">Show requests</button>
+    </div>
+    <div class="card-body">
+      <div class="request-summary-grid">
+        <div class="rh-grid">
+          <div class="rh-card">
+            <div class="rh-label" data-i18n="metric.success">Success</div>
+            <div class="rh-value mono" id="activity-success-rate">-</div>
+            <div class="rh-detail" id="activity-success-detail">-</div>
+          </div>
+          <div class="rh-card">
+            <div class="rh-label" data-i18n="metric.p95_ttfb">P95 TTFB</div>
+            <div class="rh-value mono" id="p95-ttfb">-</div>
+            <div class="rh-detail" id="ttfb-detail">-</div>
+          </div>
+          <div class="rh-card">
+            <div class="rh-label" data-i18n="metric.capture_issues">Capture Issues</div>
+            <div class="rh-value mono" id="capture-issues">-</div>
+            <div class="rh-detail" id="capture-issues-detail">-</div>
+          </div>
+          <div class="rh-card">
+            <div class="rh-label" data-i18n="metric.latest_error">Latest Error</div>
+            <div class="rh-value mono" id="latest-error-status">-</div>
+            <div class="rh-detail" id="latest-error-detail">-</div>
+          </div>
+        </div>
+        <div class="issues-panel" id="issues">
+          <div class="subsection-head">
+            <div class="section-label" data-i18n="issues.title">Recent Issues</div>
+            <div class="card-desc" id="issues-summary">-</div>
+          </div>
+          <div id="issues-state">
+            <div class="issues-empty"><span data-i18n="state.loading">Loading...</span></div>
+          </div>
+          <div id="issues-overview"></div>
+          <div id="issues-list" class="issue-class-panel"></div>
         </div>
       </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
+      <div class="detail-section hidden" id="request-details">
+        <div class="filters">
+          <select id="filter-status"><option value="" data-i18n="filter.all_status">All status</option><option value="success" data-i18n="filter.success">2xx</option><option value="4xx" data-i18n="filter.client_error">4xx</option><option value="5xx" data-i18n="filter.server_error">5xx</option></select>
+          <select id="filter-model"><option value="" data-i18n="filter.all_models">All models</option></select>
+          <select id="filter-endpoint"><option value="" data-i18n="filter.all_endpoints">All endpoints</option></select>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th data-i18n="table.time">Time</th>
+              <th data-i18n="table.status">Status</th>
+              <th data-i18n="table.endpoint">Endpoint</th>
               <th data-i18n="table.model">Model</th>
-              <th class="numeric" data-i18n="table.requests">Requests</th>
-              <th class="numeric" data-i18n="table.tokens">Tokens</th>
-              <th class="numeric" data-i18n="table.avg_request">Avg / Request</th>
-              <th class="numeric" data-i18n="table.cost_share">Cost Share</th>
-              <th class="numeric" data-i18n="table.est_cost">Est. Cost</th>
-              <th data-i18n="table.pricing">Pricing</th>
-            </tr>
-          </thead>
-          <tbody id="models-table"><tr><td colspan="7" class="empty" data-i18n="state.loading">Loading...</td></tr></tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="panel">
-      <div class="panel-header">
-        <div>
-          <h2 class="panel-title" data-i18n="panel.errors">Errors</h2>
-          <div class="panel-subtitle" id="errors-summary">-</div>
+              <th class="numeric" data-i18n="table.input">In</th>
+              <th class="numeric" data-i18n="table.output">Out</th>
+              <th class="numeric" data-i18n="table.total">Total</th>
+              <th class="numeric">TTFB</th>
+              <th class="numeric" data-i18n="table.latency">Latency</th>
+              <th data-i18n="table.capture">Capture</th>
+              <th data-i18n="table.key_hash">Key</th>
+            </tr></thead>
+            <tbody id="requests-table"><tr><td colspan="11" class="empty-state" data-i18n="state.not_loaded">-</td></tr></tbody>
+          </table>
         </div>
       </div>
-      <div class="panel-body" id="errors-state">
-        <div class="state-box"><strong data-i18n="state.loading_errors">Loading errors</strong><span data-i18n="state.checking_error_buckets">Checking non-zero error buckets.</span></div>
+    </div>
+  </section>
+
+  <!-- Diagnostics -->
+  <section id="diagnostics" class="card">
+    <div class="card-head">
+      <div class="card-head-left">
+        <div class="card-title" data-i18n="panel.capture_diagnostics">Capture Diagnostics</div>
+        <div class="card-desc" id="health-summary">-</div>
       </div>
-      <div class="table-wrap hidden" id="errors-table-wrap">
-        <table>
-          <thead>
-            <tr>
+    </div>
+    <div class="card-body">
+      <div class="diag-grid">
+        <div class="diag-tile"><div class="dt-name" data-i18n="health.queue">Queue</div><div class="dt-val mono" id="queue-depth">-</div><div class="dt-unit" data-i18n="health.pending_writes">pending</div></div>
+        <div class="diag-tile"><div class="dt-name" data-i18n="health.dropped">Dropped</div><div class="dt-val mono" id="dropped-events">-</div><div class="dt-unit" data-i18n="health.events">events</div></div>
+        <div class="diag-tile"><div class="dt-name" data-i18n="health.parse">Parse</div><div class="dt-val mono" id="parse-errors">-</div><div class="dt-unit" data-i18n="health.errors">errors</div></div>
+        <div class="diag-tile"><div class="dt-name" data-i18n="health.db_write">DB Write</div><div class="dt-val mono" id="db-errors">-</div><div class="dt-unit" data-i18n="health.errors">errors</div></div>
+      </div>
+      <details class="diag-details">
+        <summary data-i18n="action.show_diagnostics">Show diagnostics</summary>
+        <div class="empty-state hidden" id="errors-state"><span data-i18n="state.loading">Loading...</span></div>
+        <div class="table-wrap hidden" id="errors-table-wrap" style="margin-top:10px">
+          <table>
+            <thead><tr>
               <th data-i18n="table.bucket">Bucket</th>
-              <th class="numeric" data-i18n="table.request_errors">Request Errors</th>
-              <th class="numeric" data-i18n="table.parse_errors">Parse Errors</th>
-              <th class="numeric" data-i18n="table.db_errors">DB Errors</th>
-              <th class="numeric" data-i18n="table.dropped_events">Dropped Events</th>
-            </tr>
-          </thead>
-          <tbody id="errors-table"><tr><td colspan="5" class="empty" data-i18n="state.loading">Loading...</td></tr></tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="panel">
-      <div class="panel-header">
-        <div>
-          <h2 class="panel-title" data-i18n="panel.api_keys">API Keys</h2>
-          <div class="panel-subtitle" id="keys-summary">-</div>
+              <th class="numeric" data-i18n="table.request_errors">Req Err</th>
+              <th class="numeric" data-i18n="table.parse_errors">Parse</th>
+              <th class="numeric" data-i18n="table.db_errors">DB</th>
+              <th class="numeric" data-i18n="table.dropped_events">Dropped</th>
+            </tr></thead>
+            <tbody id="errors-table"><tr><td colspan="5" class="empty-state">-</td></tr></tbody>
+          </table>
         </div>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th data-i18n="table.key_hash">Key Hash</th>
-              <th class="numeric" data-i18n="table.requests">Requests</th>
-              <th class="numeric" data-i18n="table.failed">Failed</th>
-              <th class="numeric" data-i18n="table.failure_rate">Failure Rate</th>
-              <th class="numeric" data-i18n="table.tokens">Tokens</th>
-            </tr>
-          </thead>
-          <tbody id="keys-table"><tr><td colspan="5" class="empty" data-i18n="state.loading">Loading...</td></tr></tbody>
-        </table>
-      </div>
+      </details>
     </div>
   </section>
 </main>
+
+<!-- Hidden elements for JS compatibility -->
+<div class="hidden" id="health-card"></div>
+<div class="hidden" id="capture-quality"></div>
+<div class="hidden" id="capture-sub"></div>
+<div class="hidden" id="status-pill"></div>
 
 <div class="chart-tooltip hidden" id="chart-tooltip" role="tooltip"></div>
 <script src="__METERING_BASE__/i18n.js" defer></script>

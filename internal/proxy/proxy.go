@@ -257,13 +257,33 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 		captureReason := event.ReasonUsageNotPresent
 		p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, true,
 			clientIPHash, apiKeyHash, modelRequested, nil, cr.bytesRead, written, errStr,
-			captureOutcome, captureReason)
+			captureOutcome, captureReason, nil)
 		return
 	}
 
 	var lastUsage *extractor.UsageInfo
 	var totalBytes int64
 	var sseParseErrs int64
+
+	var errPayloads *errorPayloadSampler
+	if status >= 400 {
+		errPayloads = newErrorPayloadSampler()
+	}
+
+	finalizeStreamErrInfo := func() *extractor.ErrorInfo {
+		if errPayloads == nil {
+			return nil
+		}
+		sample := errPayloads.finalize()
+		if len(sample) == 0 {
+			return nil
+		}
+		info, ierr := extractor.ExtractErrorInfo(sample, status, resp.Header.Get("Content-Type"))
+		if ierr != nil || info == nil {
+			return nil
+		}
+		return info
+	}
 
 	reportParseErrors := func() {
 		for i := int64(0); i < sseParseErrs; i++ {
@@ -299,7 +319,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 			}
 			p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, true,
 				clientIPHash, apiKeyHash, modelRequested, lastUsage, cr.bytesRead, totalBytes, errStr,
-				captureOutcome, captureReason)
+				captureOutcome, captureReason, finalizeStreamErrInfo())
 			return
 		default:
 		}
@@ -318,7 +338,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 				}
 				p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, true,
 					clientIPHash, apiKeyHash, modelRequested, lastUsage, cr.bytesRead, totalBytes, werr.Error(),
-					captureOutcome, captureReason)
+					captureOutcome, captureReason, finalizeStreamErrInfo())
 				return
 			}
 			flusher.Flush()
@@ -361,6 +381,9 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 				chunk = chunk[nl+1:]
 
 				if len(line) > 0 {
+					if errPayloads != nil {
+						errPayloads.addStrippedPayload(stripSSEDataLine(line, prof))
+					}
 					u, err := p.tryExtractSSEUsage(line, prof)
 					if err != nil {
 						sseParseErrs++
@@ -385,7 +408,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 			}
 			p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, true,
 				clientIPHash, apiKeyHash, modelRequested, lastUsage, cr.bytesRead, totalBytes, errStr,
-				captureOutcome, captureReason)
+				captureOutcome, captureReason, finalizeStreamErrInfo())
 			return
 		}
 	}
@@ -411,6 +434,75 @@ func (p *Proxy) tryExtractSSEUsage(line []byte, prof *profile.EndpointProfile) (
 		return prof.StreamExtractor(trimmed)
 	}
 	return nil, nil
+}
+
+// errorPayloadSampler collects SSE data: payloads for error classification.
+type errorPayloadSampler struct {
+	payloads   [][]byte
+	totalBytes int
+	overflow   bool
+	locked     bool
+}
+
+func newErrorPayloadSampler() *errorPayloadSampler {
+	return &errorPayloadSampler{}
+}
+
+func (s *errorPayloadSampler) addStrippedPayload(payload []byte) {
+	if len(payload) == 0 {
+		return
+	}
+	if s.locked || s.overflow {
+		return
+	}
+	if len(s.payloads) >= 5 {
+		s.overflow = true
+		s.payloads = nil
+		return
+	}
+	pl := make([]byte, len(payload))
+	copy(pl, payload)
+	s.payloads = append(s.payloads, pl)
+	s.totalBytes += len(pl)
+	if s.totalBytes > 8*1024 {
+		s.overflow = true
+		s.payloads = nil
+	}
+}
+
+func (s *errorPayloadSampler) finalize() []byte {
+	s.locked = true
+	if s.overflow || len(s.payloads) == 0 {
+		return nil
+	}
+	var result []byte
+	for i, p := range s.payloads {
+		if i > 0 {
+			result = append(result, '\n')
+		}
+		result = append(result, p...)
+	}
+	return result
+}
+
+// stripSSEDataLine strips the "data:" prefix from an SSE line.
+func stripSSEDataLine(line []byte, prof *profile.EndpointProfile) []byte {
+	trimmed := bytes.TrimSpace(line)
+	if !bytes.HasPrefix(trimmed, []byte("data:")) {
+		return nil
+	}
+	data := bytes.TrimSpace(trimmed[5:])
+	if len(data) == 0 {
+		return nil
+	}
+	if prof != nil && prof.StreamProtocol.CompletionMarker != "" {
+		if bytes.Equal(data, []byte(prof.StreamProtocol.CompletionMarker)) {
+			return nil
+		}
+	} else if bytes.Equal(data, []byte("[DONE]")) {
+		return nil
+	}
+	return data
 }
 
 // ---------- non-streaming path ----------
@@ -474,13 +566,21 @@ func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, resp *ht
 		captureOutcome = event.OutcomeSkipped
 	}
 
+	var errInfo *extractor.ErrorInfo
+	if status >= 400 && len(sample) > 0 {
+		contentType := resp.Header.Get("Content-Type")
+		if info, ierr := extractor.ExtractErrorInfo(sample, status, contentType); ierr == nil && info != nil {
+			errInfo = info
+		}
+	}
+
 	errStr := ""
 	if copyErr != nil {
 		errStr = copyErr.Error()
 	}
 	p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, false,
 		clientIPHash, apiKeyHash, modelRequested, usage, cr.bytesRead, written, errStr,
-		captureOutcome, captureReason)
+		captureOutcome, captureReason, errInfo)
 }
 
 // ---------- recording ----------
@@ -488,7 +588,7 @@ func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, resp *ht
 func (p *Proxy) recordUsage(start time.Time, ttfb time.Duration, prof *profile.EndpointProfile, endpoint, method, requestID string, status int, stream bool,
 	clientIPHash, apiKeyHash, modelRequested string, usage *extractor.UsageInfo,
 	requestBytes, responseBytes int64, errStr string,
-	captureOutcome, captureReason string) {
+	captureOutcome, captureReason string, errInfo *extractor.ErrorInfo) {
 
 	if requestBytes < 0 {
 		requestBytes = 0
@@ -534,6 +634,15 @@ func (p *Proxy) recordUsage(start time.Time, ttfb time.Duration, prof *profile.E
 		CaptureReason:  captureReason,
 	}
 
+	if errInfo != nil {
+		ev.ErrorClass = errInfo.Class
+		ev.ErrorType = errInfo.Type
+		ev.ErrorCode = errInfo.Code
+		ev.ErrorParam = errInfo.Param
+		ev.ErrorMessage = errInfo.Message
+		ev.ErrorMessageTruncated = errInfo.MessageTruncated
+	}
+
 	if usage != nil {
 		ev.ModelReturned = usage.Model
 		ev.InputTokens = usage.InputTokens
@@ -569,23 +678,25 @@ func (p *Proxy) writeError(w http.ResponseWriter, start time.Time, ttfb time.Dur
 	log.Printf("upstream request error: endpoint=%q method=%q status=%d error=%v", endpoint, method, status, err)
 
 	captureOutcome := event.OutcomeFailed
+	errInfo := &extractor.ErrorInfo{
+		Class:   "proxy_upstream_error",
+		Message: "upstream request failed",
+	}
 
 	p.recordUsage(start, ttfb, prof, endpoint, method, "", status, false,
 		clientIPHash, apiKeyHash, modelRequested, nil, requestBytes, 0, event.ReasonUpstreamError,
-		captureOutcome, event.ReasonUpstreamError)
+		captureOutcome, event.ReasonUpstreamError, errInfo)
 }
 
 // ---------- helpers ----------
 
 func extractModel(body []byte) string {
-	if len(body) == 0 {
+	tok, ok := topLevelJSONToken(body, "model")
+	if !ok {
 		return ""
 	}
-	var req struct {
-		Model string `json:"model"`
-	}
-	if err := json.Unmarshal(body, &req); err == nil && req.Model != "" {
-		return req.Model
+	if model, ok := tok.(string); ok {
+		return model
 	}
 	return ""
 }
@@ -637,14 +748,79 @@ func requestIDFromHeaders(respHeader, reqHeader http.Header) string {
 }
 
 func streamFromJSON(body []byte) bool {
+	tok, ok := topLevelJSONToken(body, "stream")
+	if !ok {
+		return false
+	}
+	stream, _ := tok.(bool)
+	return stream
+}
+
+func topLevelJSONToken(body []byte, key string) (json.Token, bool) {
 	if len(body) == 0 {
-		return false
+		return nil, false
 	}
-	var req struct {
-		Stream bool `json:"stream"`
+	dec := json.NewDecoder(bytes.NewReader(body))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, false
 	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		return false
+	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+		return nil, false
 	}
-	return req.Stream
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return nil, false
+		}
+		field, ok := keyTok.(string)
+		if !ok {
+			return nil, false
+		}
+		if field == key {
+			valueTok, err := dec.Token()
+			if err != nil {
+				return nil, false
+			}
+			return valueTok, true
+		}
+		if err := skipJSONValue(dec); err != nil {
+			return nil, false
+		}
+	}
+	return nil, false
+}
+
+func skipJSONValue(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{':
+		for dec.More() {
+			if _, err := dec.Token(); err != nil {
+				return err
+			}
+			if err := skipJSONValue(dec); err != nil {
+				return err
+			}
+		}
+		_, err := dec.Token()
+		return err
+	case '[':
+		for dec.More() {
+			if err := skipJSONValue(dec); err != nil {
+				return err
+			}
+		}
+		_, err := dec.Token()
+		return err
+	default:
+		return nil
+	}
 }

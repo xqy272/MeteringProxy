@@ -41,11 +41,15 @@ type ReportStore interface {
 	Models(since time.Time) ([]db.ModelRow, error)
 	Keys(since time.Time) ([]db.KeyRow, error)
 	Timeseries(since time.Time, bucketMin int) ([]db.TimeseriesRow, error)
+	ModelTimeseries(since time.Time, bucketMin int) ([]db.ModelTimeseriesRow, error)
 	Activity(since time.Time) (*db.ActivityRow, error)
-	Requests(limit int, statusMin, statusMax int, model, endpoint string, since time.Time) ([]db.RequestRow, error)
+	Requests(limit int, statusMin, statusMax int, model, endpoint, errorClass string, since time.Time) ([]db.RequestRow, error)
 	ErrorTimeline(since time.Time) ([]db.ErrorTimelineRow, error)
 	ErrorTimelineFromRequests(since time.Time) ([]db.ErrorTimelineRow, error)
 	LatestHealth() (*db.HealthRow, error)
+	Overview(since time.Time) *db.OverviewRow
+	Issues(since time.Time, limit int) []db.IssueRow
+	OverviewCaptureStats(since time.Time, failed, skipped *int64)
 }
 
 // HealthWriter is the write-side interface for health metrics.

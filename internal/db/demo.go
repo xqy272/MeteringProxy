@@ -70,37 +70,85 @@ func SeedDemo(database *DB) error {
 
 		errMsg := ""
 		captureOutcome := demoOutcomeCaptured
+		var errClass, errType, errCode, errMessage string
 		if status >= 400 {
-			errType := []string{"upstream_error", "rate_limited", "bad_request"}[rng.Intn(3)]
-			errMsg = errType
+			errClasses := []string{"quota_exhausted", "rate_limited", "auth_failed", "upstream_5xx", "invalid_request", "context_length", "proxy_upstream_error"}
+			errClass = errClasses[rng.Intn(len(errClasses))]
+			switch errClass {
+			case "quota_exhausted":
+				errType = "insufficient_quota"
+				errCode = "insufficient_quota"
+				errMessage = "You exceeded your current quota, please check your plan and billing details."
+			case "rate_limited":
+				errType = "rate_limit_error"
+				errCode = "rate_limit_exceeded"
+				errMessage = "Rate limit reached for requests to this model."
+			case "auth_failed":
+				errType = "invalid_request_error"
+				errCode = "invalid_api_key"
+				errMessage = "Incorrect API key provided."
+			case "upstream_5xx":
+				errType = "server_error"
+				errCode = "internal_error"
+				errMessage = "The server had an error processing your request."
+			case "invalid_request":
+				errType = "invalid_request_error"
+				errCode = "invalid_request"
+				errMessage = "Invalid request parameters."
+			case "context_length":
+				errType = "invalid_request_error"
+				errCode = "context_length_exceeded"
+				errMessage = "This model's maximum context length is 128000 tokens."
+			case "proxy_upstream_error":
+				errType = ""
+				errCode = ""
+				errMessage = "dial tcp: connection refused"
+			}
+			errMsg = errClass
 			captureOutcome = demoOutcomeFailed
 		}
 
+		// ~10% of records have model_returned empty (fallback to requested)
+		var modelReturned string = model
+		if rng.Intn(10) == 0 {
+			modelReturned = ""
+		}
+
+		// Add an unpriced model for ~5 models
+		if rng.Intn(20) == 0 {
+			model = "unpriced-model-v1"
+			modelReturned = "unpriced-model-v1"
+		}
+
 		records = append(records, UsageRecord{
-			CreatedAt:       createdAt,
-			RequestID:       fmt.Sprintf("%s%06d", prefix, i),
-			Endpoint:        endpoint,
-			Method:          "POST",
-			Status:          status,
-			LatencyMs:       latency,
-			TTFBMs:          ttfb,
-			Stream:          rng.Intn(2) == 1,
-			ClientIPHash:    ipHash,
-			APIKeyHash:      keyHash,
-			ModelRequested:  model,
-			ModelReturned:   model,
-			InputTokens:     inputTokens,
-			OutputTokens:    outputTokens,
-			ReasoningTokens: reasoningTokens,
-			CachedTokens:    cachedTokens,
-			TotalTokens:     totalTokens,
-			RequestBytes:    requestBytes,
-			ResponseBytes:   responseBytes,
-			Error:           errMsg,
-			EndpointProfile: endpoint,
-			CaptureMode:     demoCaptureUsageMetered,
-			CaptureOutcome:  captureOutcome,
-			MeteringKind:    demoMeteringLLMTokens,
+			CreatedAt:              createdAt,
+			RequestID:              fmt.Sprintf("%s%06d", prefix, i),
+			Endpoint:               endpoint,
+			Method:                 "POST",
+			Status:                 status,
+			LatencyMs:              latency,
+			TTFBMs:                 ttfb,
+			Stream:                 rng.Intn(2) == 1,
+			ClientIPHash:           ipHash,
+			APIKeyHash:             keyHash,
+			ModelRequested:         model,
+			ModelReturned:          modelReturned,
+			InputTokens:            inputTokens,
+			OutputTokens:           outputTokens,
+			ReasoningTokens:        reasoningTokens,
+			CachedTokens:           cachedTokens,
+			TotalTokens:            totalTokens,
+			RequestBytes:           requestBytes,
+			ResponseBytes:          responseBytes,
+			Error:                  errMsg,
+			EndpointProfile:        endpoint,
+			CaptureMode:            demoCaptureUsageMetered,
+			CaptureOutcome:         captureOutcome,
+			MeteringKind:           demoMeteringLLMTokens,
+			ErrorClass:             errClass,
+			ErrorType:              errType,
+			ErrorCode:              errCode,
+			ErrorMessage:           errMessage,
 		})
 	}
 

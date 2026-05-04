@@ -1,7 +1,11 @@
-﻿const apiBaseMeta = document.querySelector('meta[name="api-base"]');
+/* ============================================================
+   MeteringProxy - Dashboard Application
+   ============================================================ */
+const apiBaseMeta = document.querySelector('meta[name="api-base"]');
 const BASE = apiBaseMeta && apiBaseMeta.content ? apiBaseMeta.content : '/metering/api/';
-const LANG_KEY = 'metering-proxy-language';
-
+const LANG_KEY = 'mp-lang';
+const THEME_KEY = 'mp-theme';
+const USAGE_MODE_KEY = 'mp-usage-mode';
 const I18N = window.METERING_I18N || {};
 
 let metadata = null;
@@ -10,837 +14,925 @@ let autoRefreshTimer = null;
 let isRefreshing = false;
 let lastRefreshAt = 0;
 let requestsExpanded = false;
-let currentLang = detectLanguage();
-let lastTimeseriesRows = [];
-let lastTimeseriesBucket = '';
+let currentLang = detectLang();
+let currentTheme = detectTheme();
+let currentUsageMode = detectUsageMode();
+let lastTSRows = [];
+let lastTSBucket = '';
+let latestOverview = null;
+let latestIssueItems = [];
+let latestHealth = null;
+let latestActivity = null;
+let selectedIssueSeverity = '';
+let currentIssueClassFilter = '';
 
 const fallbackRanges = [
-  { key: '24h', label: 'Last 24 Hours', bucket: '10m' },
-  { key: 'today', label: 'Today', bucket: '10m' },
+  { key: '24h', label: 'Last 24 Hours', bucket: '1h' },
+  { key: 'today', label: 'Today', bucket: '1h' },
   { key: '7d', label: 'Last 7 Days', bucket: '1h' },
   { key: '30d', label: 'Last 30 Days', bucket: '1d' }
 ];
 
 const $ = id => document.getElementById(id);
 
-function detectLanguage() {
-  try {
-    const saved = localStorage.getItem(LANG_KEY);
-    if (saved === 'en' || saved === 'zh') return saved;
-  } catch (_) {}
-  return (navigator.language || '').toLowerCase().startsWith('zh') ? 'zh' : 'en';
+/* --- Language / Theme -------------------------------------- */
+function detectLang() {
+  try { const s = localStorage.getItem(LANG_KEY); if (s === 'en' || s === 'zh') return s; } catch (_) {}
+  return (navigator.language || '').startsWith('zh') ? 'zh' : 'en';
 }
-
-function locale() {
-  return currentLang === 'zh' ? 'zh-CN' : 'en-US';
+function detectTheme() {
+  try { const s = localStorage.getItem(THEME_KEY); if (s === 'light' || s === 'dark') return s; } catch (_) {}
+  return 'dark';
 }
-
+function detectUsageMode() {
+  try { const s = localStorage.getItem(USAGE_MODE_KEY); if (s === 'cost' || s === 'tokens' || s === 'requests') return s; } catch (_) {}
+  return 'cost';
+}
+function applyTheme(theme) {
+  currentTheme = theme;
+  document.documentElement.setAttribute('data-theme', theme);
+  try { localStorage.setItem(THEME_KEY, theme); } catch (_) {}
+  const sun = $('theme-icon-sun'), moon = $('theme-icon-moon');
+  if (sun) sun.classList.toggle('hidden', theme === 'light');
+  if (moon) moon.classList.toggle('hidden', theme === 'dark');
+}
+function toggleTheme() {
+  applyTheme(currentTheme === 'light' ? 'dark' : 'light');
+  rerenderCharts();
+}
+function locale() { return currentLang === 'zh' ? 'zh-CN' : 'en-US'; }
 function t(key, vars) {
-  const fallback = I18N.en || {};
-  const dict = I18N[currentLang] || fallback;
-  let text = dict[key] || fallback[key] || key;
-  if (!vars) return text;
-  return text.replace(/\{([a-zA-Z0-9_]+)\}/g, (_, name) => vars[name] == null ? '' : String(vars[name]));
+  const fb = I18N.en || {}, dict = I18N[currentLang] || fb;
+  let s = dict[key] || fb[key] || key;
+  if (!vars) return s;
+  return s.replace(/\{([a-zA-Z0-9_]+)\}/g, (_, n) => vars[n] == null ? '' : String(vars[n]));
 }
-
 function esc(s) {
   if (s == null) return '';
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
-
-function formatNum(n) {
-  n = Number(n || 0);
-  if (Math.abs(n) >= 1e9) return (n / 1e9).toFixed(1) + 'B';
-  if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1) + 'M';
-  if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(1) + 'K';
-  return String(n);
-}
-
-function formatFull(n) {
-  return Number(n || 0).toLocaleString(locale());
-}
-
-function formatCost(c) {
-  c = Number(c || 0);
-  if (c === 0) return '$0.00';
-  if (c > 0 && c < 0.01) return '<$0.01';
-  return '$' + c.toFixed(2);
-}
-
-function formatPercent(value, total) {
-  value = Number(value || 0);
-  total = Number(total || 0);
-  if (total <= 0) return '0.0%';
-  return (value / total * 100).toFixed(1) + '%';
-}
-
-function formatLat(ms) {
-  ms = Number(ms || 0);
-  if (ms <= 0) return '-';
-  if (ms < 1000) return ms + 'ms';
-  return (ms / 1000).toFixed(1) + 's';
-}
-
-function formatBytes(bytes) {
-  bytes = Number(bytes || 0);
-  if (bytes >= 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MiB';
-  if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KiB';
-  return bytes + ' B';
-}
-
-function formatTime(value) {
-  if (!value) return '-';
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return value;
-  return d.toLocaleString(locale());
-}
-
-function formatShortTime(value) {
-  if (!value) return '-';
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return value;
-  return d.toLocaleString(locale(), { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-}
-
-function shortHash(h) {
-  if (!h) return '-';
-  return String(h).slice(0, 12) + '...';
-}
-
-function getRange() {
-  return $('range-select').value || '24h';
-}
-
-function rangeLabel(r) {
-  return t('range.' + r.key) || r.label || r.key;
-}
-
-function bucketForRange(range) {
-  const ranges = metadata && metadata.ranges ? metadata.ranges : fallbackRanges;
-  const item = ranges.find(r => r.key === range);
-  return item && item.bucket ? item.bucket : '10m';
-}
-
-function setStatus(kind, title, detail) {
-  const pill = $('status-pill');
-  pill.className = 'status-pill ' + (kind === 'error' ? 'err' : kind === 'partial' ? 'warn' : 'ok');
-  pill.textContent = kind === 'error' ? t('status.error') : kind === 'partial' ? t('status.partial') : t('status.live');
-  $('status-title').textContent = title;
-  $('status-detail').textContent = detail || '';
-}
-
-function setLastRefresh(date) {
-  lastRefreshAt = date ? date.getTime() : 0;
-  $('last-refresh').textContent = date ? t('status.last_refresh', { time: date.toLocaleString(locale()) }) : t('status.last_refresh_never');
-}
-
-function applyStaticI18N() {
-  document.documentElement.lang = currentLang === 'zh' ? 'zh-CN' : 'en';
-  document.querySelectorAll('[data-i18n]').forEach(el => {
-    el.textContent = t(el.dataset.i18n);
-  });
-  const select = $('language-select');
-  if (select) select.value = currentLang;
-}
-
-function setLanguage(lang) {
+function setLang(lang) {
   if (lang !== 'en' && lang !== 'zh') return;
   currentLang = lang;
   try { localStorage.setItem(LANG_KEY, lang); } catch (_) {}
-  applyStaticI18N();
-  applyMetadata();
+  applyI18N(); applyMeta();
   setLastRefresh(lastRefreshAt ? new Date(lastRefreshAt) : null);
   refresh();
 }
 
+function resetIssueSelection() {
+  selectedIssueSeverity='';
+  currentIssueClassFilter='';
+  closeRequestDetails();
+  const list=$('issues-list');
+  if(list) list.innerHTML=`<div class="issue-class-placeholder">${esc(t('issues.select_severity_hint'))}</div>`;
+}
+function applyI18N() {
+  document.documentElement.lang = currentLang === 'zh' ? 'zh-CN' : 'en';
+  document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll('[data-i18n-aria]').forEach(el => { el.setAttribute('aria-label', t(el.dataset.i18nAria)); });
+  document.querySelectorAll('[data-i18n-title]').forEach(el => { el.setAttribute('title', t(el.dataset.i18nTitle)); });
+  const s = $('language-select'); if (s) s.value = currentLang;
+  const zh = document.querySelector('#language-select option[value="zh"]'); if (zh) zh.textContent = '中文';
+  updateToggleLabels();
+}
+
+/* --- Formatters -------------------------------------------- */
+function fmtNum(n) { n = Number(n||0); if (Math.abs(n)>=1e9) return (n/1e9).toFixed(1)+'B'; if (Math.abs(n)>=1e6) return (n/1e6).toFixed(1)+'M'; if (Math.abs(n)>=1e3) return (n/1e3).toFixed(1)+'K'; return String(n); }
+function fmtFull(n) { return Number(n||0).toLocaleString(locale()); }
+function fmtCost(c) { c=Number(c||0); if(c===0)return'$0.00'; if(c>0&&c<0.01)return'<$0.01'; return'$'+c.toFixed(2); }
+function fmtPct(v,total) { v=Number(v||0);total=Number(total||0); return total<=0?'0%':(v/total*100).toFixed(1)+'%'; }
+function fmtLat(ms) { ms=Number(ms||0); if(ms<=0)return'-'; if(ms<1000)return ms+'ms'; return(ms/1000).toFixed(1)+'s'; }
+function fmtTime(v) { if(!v)return'-'; const d=new Date(v); return isNaN(d)?v:d.toLocaleString(locale()); }
+function fmtShort(v) { if(!v)return'-'; const d=new Date(v); return isNaN(d)?v:d.toLocaleString(locale(),{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}); }
+function shortHash(h) { return h ? String(h).slice(0,10)+'...' : '-'; }
+function modelName(m) { return !m||m==='unknown'||m==='unidentified' ? t('model.unidentified') : m; }
+
+/* --- Status / refresh -------------------------------------- */
+function setStatus(kind, title, detail) {
+  const dot = $('status-dot');
+  if (dot) { dot.className = 'status-dot' + (kind==='error'?' err':kind==='partial'?' warn':''); }
+  const tt = $('status-title'); if(tt) tt.textContent = title;
+  const dd = $('status-detail'); if(dd) dd.textContent = detail||'';
+  // legacy compat
+  const pill = $('status-pill');
+  if (pill) { pill.className = 'status-pill '+(kind==='error'?'err':kind==='partial'?'warn':'ok'); pill.textContent = title; }
+}
+function setLastRefresh(date) {
+  lastRefreshAt = date ? date.getTime() : 0;
+  const el = $('last-refresh');
+  if (el) el.textContent = date ? t('status.last_refresh', { time: date.toLocaleString(locale()) }) : '';
+}
+function setText(id, v) { const el=$(id); if(el)el.textContent=v==null||v===''?'-':String(v); }
+function setNodeState() {} // proxy path removed - no-op
+function setRefreshing(active) {
+  document.documentElement.classList.toggle('is-refreshing', active);
+  const strip=$('status-strip');
+  if(strip) strip.setAttribute('aria-busy', active ? 'true' : 'false');
+  const btn=$('refresh-btn');
+  if(btn) {
+    btn.disabled=active;
+    btn.classList.toggle('is-loading', active);
+    btn.setAttribute('aria-busy', active ? 'true' : 'false');
+    btn.textContent=active ? t('action.loading') : t('action.refresh');
+  }
+}
+
+/* --- API --------------------------------------------------- */
 async function fetchJSON(path) {
-  const url = BASE + path;
-  const res = await fetch(url, {
-    cache: 'no-store',
-    credentials: 'same-origin',
-    headers: { 'Accept': 'application/json' }
-  });
+  const res = await fetch(BASE+path, { cache: 'no-store', credentials:'same-origin', headers:{'Accept':'application/json'} });
   if (!res.ok) {
-    let detail = '';
-    try { detail = await res.text(); } catch (_) {}
-    const err = new Error(url + ' returned HTTP ' + res.status);
-    err.status = res.status;
-    err.detail = detail.slice(0, 180);
+    let detail='';
+    try { detail=(await res.text()).trim(); } catch (_) {}
+    const err = new Error(BASE+path+' HTTP '+res.status+(detail?': '+detail.slice(0,180):''));
+    err.status=res.status;
     throw err;
   }
   return res.json();
 }
-
-function emptyRow(colspan, title, detail) {
-  return `<tr><td colspan="${colspan}" class="empty"><strong>${esc(title)}</strong>${esc(detail || '')}</td></tr>`;
+function getRange() { return $('range-select').value || '24h'; }
+function bucketFor(range) {
+  const ranges = metadata && metadata.ranges ? metadata.ranges : fallbackRanges;
+  const item = ranges.find(r => r.key === range);
+  return item && item.bucket ? item.bucket : '1h';
 }
+function emptyRow(cols, title, detail) { return `<tr><td colspan="${cols}" class="empty-state"><strong>${esc(title)}</strong>${esc(detail||'')}</td></tr>`; }
+function errorRow(cols, msg) { return `<tr><td colspan="${cols}" class="empty-state error-text">${esc(msg)}</td></tr>`; }
 
-function errorRow(colspan, message) {
-  return `<tr><td colspan="${colspan}" class="empty error-line">${esc(message)}</td></tr>`;
-}
-
-function emptyChart(title, detail) {
-  return `<div class="empty"><strong>${esc(title)}</strong>${esc(detail || '')}</div>`;
-}
-
-function applyMetadata() {
-  const rangeSelect = $('range-select');
-  const currentRange = rangeSelect.value;
+/* --- Metadata ---------------------------------------------- */
+function applyMeta() {
+  const sel = $('range-select'), cur = sel.value;
   const ranges = metadata && metadata.ranges && metadata.ranges.length ? metadata.ranges : fallbackRanges;
-  rangeSelect.innerHTML = ranges.map(r => `<option value="${esc(r.key)}">${esc(rangeLabel(r))}</option>`).join('');
-  if ([...rangeSelect.options].some(o => o.value === currentRange)) {
-    rangeSelect.value = currentRange;
-  } else {
-    rangeSelect.value = ranges[0].key;
+  sel.innerHTML = ranges.map(r => `<option value="${esc(r.key)}">${esc(t('range.'+r.key)||r.label||r.key)}</option>`).join('');
+  if ([...sel.options].some(o=>o.value===cur)) sel.value=cur; else sel.value=ranges[0].key;
+  const ep = $('filter-endpoint'), curEp = ep.value;
+  const epOpts = ((metadata&&metadata.endpoints)||[]).filter(e=>e.capture_mode!=='passthrough')
+    .map(e=>`<option value="${esc(e.path)}">${esc(e.display_name||e.path)}</option>`).join('');
+  ep.innerHTML = `<option value="">${esc(t('filter.all_endpoints'))}</option>`+epOpts;
+  if([...ep.options].some(o=>o.value===curEp)) ep.value=curEp;
+}
+function applyModelFilter() {
+  const sel=$('filter-model'), cur=sel.value;
+  const opts = currentModels.map(r=>r.model||'unidentified').filter((v,i,a)=>a.indexOf(v)===i)
+    .map(m=>`<option value="${esc(m)}">${esc(modelName(m))}</option>`).join('');
+  sel.innerHTML = `<option value="">${esc(t('filter.all_models'))}</option>`+opts;
+  if([...sel.options].some(o=>o.value===cur)) sel.value=cur;
+}
+async function loadMetadata() { metadata = await fetchJSON('metadata'); applyMeta(); }
+
+/* --- Overview ---------------------------------------------- */
+async function loadOverview() {
+  const data = await fetchJSON('overview?range='+encodeURIComponent(getRange()));
+  if(!data) return; latestOverview = data;
+  if(data.selected && data.selected.data) {
+    const s=data.selected.data, recent=data.recent_1h&&data.recent_1h.data?data.recent_1h.data:{};
+    const toks=Number(s.total_tokens||0), inp=Number(s.total_input_tokens||0), out=Number(s.total_output_tokens||0);
+    const cached=Number(s.total_cached_tokens||0), reas=Number(s.total_reasoning_tokens||0);
+    setText('total-requests', fmtNum(s.total_requests||0));
+    setText('requests-sub', t('metric.recent_failed',{count:fmtFull(recent.failed_requests||0)}));
+    setText('total-tokens', fmtNum(toks));
+    setText('tokens-sub', inp||out?t('metric.token_mix',{input:fmtNum(inp),output:fmtNum(out),cached:fmtNum(cached),reasoning:fmtNum(reas)}):t('metric.total_token_count',{count:fmtFull(toks)}));
+    setText('total-cost', fmtCost(s.total_cost||0));
+    const partial = data.cost&&data.cost.data&&data.cost.data.partial;
+    const unpriced = data.cost&&data.cost.data?Number(data.cost.data.unpriced_models||0):0;
+    setText('cost-sub', partial?t('metric.partial_estimate')+(unpriced?' / '+t('metric.unpriced_models',{count:fmtFull(unpriced)}):''):t('metric.full_estimate'));
+    setText('p95-latency', fmtLat(s.p95_latency_ms||0));
+    setText('latency-sub', 'TTFB '+fmtLat(s.p95_ttfb_ms||0));
+    renderUsagePanel();
   }
-
-  const endpointSelect = $('filter-endpoint');
-  const currentEndpoint = endpointSelect.value;
-  const endpointOptions = ((metadata && metadata.endpoints) || [])
-    .filter(e => e.capture_mode !== 'passthrough')
-    .map(e => `<option value="${esc(e.path)}">${esc(e.display_name || e.path)}</option>`)
-    .join('');
-  endpointSelect.innerHTML = `<option value="">${esc(t('filter.all_endpoints'))}</option>` + endpointOptions;
-  if ([...endpointSelect.options].some(o => o.value === currentEndpoint)) {
-    endpointSelect.value = currentEndpoint;
-  }
 }
 
-function applyModelFilterOptions() {
-  const select = $('filter-model');
-  const current = select.value;
-  const options = currentModels
-    .map(r => r.model || 'unknown')
-    .filter((value, index, arr) => arr.indexOf(value) === index)
-    .map(model => `<option value="${esc(model)}">${esc(model)}</option>`)
-    .join('');
-  select.innerHTML = `<option value="">${esc(t('filter.all_models'))}</option>` + options;
-  if ([...select.options].some(o => o.value === current)) {
-    select.value = current;
-  }
-}
-
-async function loadMetadata() {
-  metadata = await fetchJSON('metadata');
-  applyMetadata();
-}
-
-async function loadSummary() {
-  const data = await fetchJSON('summary?range=' + encodeURIComponent(getRange()));
-  const totalRequests = Number(data.total_requests || 0);
-  const failedRequests = Number(data.failed_requests || 0);
-  const totalTokens = Number(data.total_tokens || 0);
-  const inputTokens = Number(data.total_input_tokens || 0);
-  const cachedTokens = Number(data.total_cached_tokens || 0);
-  const outputTokens = Number(data.total_output_tokens || 0);
-  const reasoningTokens = Number(data.total_reasoning_tokens || 0);
-
-  $('total-requests').textContent = formatNum(totalRequests);
-  $('requests-sub').textContent = t('metric.failed_count', { count: formatFull(failedRequests) });
-  $('failure-rate').textContent = formatPercent(failedRequests, totalRequests);
-  $('failure-sub').textContent = t('metric.failed_of_total', { failed: formatFull(failedRequests), total: formatFull(totalRequests) });
-  $('total-tokens').textContent = formatNum(totalTokens);
-  $('tokens-sub').textContent = t('metric.token_mix', {
-    input: formatNum(inputTokens),
-    output: formatNum(outputTokens),
-    cached: formatNum(cachedTokens),
-    reasoning: formatNum(reasoningTokens)
-  });
-  $('total-cost').textContent = formatCost(data.total_cost);
-  $('cost-sub').textContent = t('metric.query_time_pricing');
-}
-
+/* --- Activity ---------------------------------------------- */
 async function loadActivity() {
-  const data = await fetchJSON('activity?range=' + encodeURIComponent(getRange()));
-  const sample = Number(data.sample_size || 0);
-  const success = Number(data.success_count || 0);
-  const failed = Number(data.failed_count || 0);
-  const captureCaptured = Number(data.capture_captured || 0);
-  const captureFailed = Number(data.capture_failed || 0);
-  const captureSkipped = Number(data.capture_skipped || 0);
-  const captureTotal = captureCaptured + captureFailed + captureSkipped;
-  const captureIssues = captureFailed + captureSkipped;
-
-  $('p95-latency').textContent = formatLat(data.p95_latency_ms);
-  $('latency-sub').textContent = t('metric.avg_latency_ttfb', { avg: formatLat(data.avg_latency_ms), ttfb: formatLat(data.p95_ttfb_ms) });
-  $('capture-quality').textContent = captureTotal ? formatPercent(captureCaptured, captureTotal) : '-';
-  $('capture-sub').textContent = t('metric.capture_issue_count', { count: formatFull(captureIssues) });
-
-  $('request-health-summary').textContent = t('metric.sampled_requests', { count: formatFull(sample) });
-  $('activity-success-rate').textContent = formatPercent(success, sample);
-  $('activity-success-detail').textContent = t('metric.success_failed', { success: formatFull(success), failed: formatFull(failed) });
-  $('p95-ttfb').textContent = formatLat(data.p95_ttfb_ms);
-  $('ttfb-detail').textContent = t('metric.avg_latency_ttfb', { avg: formatLat(data.avg_ttfb_ms), ttfb: formatLat(data.p95_ttfb_ms) });
-  $('capture-issues').textContent = formatFull(captureIssues);
-  $('capture-issues-detail').textContent = t('metric.capture_failed_skipped', { failed: formatFull(captureFailed), skipped: formatFull(captureSkipped) });
-
-  if (Number(data.latest_error_status || 0) > 0) {
-    $('latest-error-status').innerHTML = `<span class="badge err">${esc(data.latest_error_status)}</span>`;
-    const model = data.latest_error_model ? `, ${data.latest_error_model}` : '';
-    const detail = `${formatShortTime(data.latest_error_at)} ${data.latest_error_endpoint || ''}${model}`;
-    $('latest-error-detail').textContent = detail.trim();
+  const data = await fetchJSON('activity?range='+encodeURIComponent(getRange()));
+  latestActivity = data;
+  const sample=Number(data.sample_size||0), success=Number(data.success_count||0), failed=Number(data.failed_count||0);
+  const capF=Number(data.capture_failed||0), capS=Number(data.capture_skipped||0);
+  setText('request-health-summary', t('metric.sampled_requests',{count:fmtFull(sample)}));
+  setText('activity-success-rate', fmtPct(success,sample));
+  setText('activity-success-detail', t('metric.success_failed',{success:fmtFull(success),failed:fmtFull(failed)}));
+  setText('p95-ttfb', fmtLat(data.p95_ttfb_ms));
+  setText('ttfb-detail', t('metric.avg_latency_ttfb',{avg:fmtLat(data.avg_ttfb_ms),ttfb:fmtLat(data.p95_ttfb_ms)}));
+  setText('capture-issues', fmtFull(capF+capS));
+  setText('capture-issues-detail', t('metric.capture_failed_skipped',{failed:fmtFull(capF),skipped:fmtFull(capS)}));
+  if(Number(data.latest_error_status||0)>0) {
+    $('latest-error-status').innerHTML=`<span class="badge err">${esc(data.latest_error_status)}</span>`;
+    $('latest-error-detail').textContent=[fmtShort(data.latest_error_at),data.latest_error_endpoint||'',data.latest_error_model||''].filter(Boolean).join(' / ');
   } else {
-    $('latest-error-status').innerHTML = `<span class="badge ok">${esc(t('badge.none'))}</span>`;
-    $('latest-error-detail').textContent = t('metric.no_request_errors');
+    $('latest-error-status').innerHTML=`<span class="badge ok">${esc(t('badge.none'))}</span>`;
+    $('latest-error-detail').textContent=t('metric.no_request_errors');
   }
 }
 
+/* --- Models ------------------------------------------------ */
 async function loadModels() {
-  const data = await fetchJSON('models?range=' + encodeURIComponent(getRange()));
-  currentModels = Array.isArray(data) ? data : [];
-  applyModelFilterOptions();
-
-  const tbody = $('models-table');
-  if (!currentModels.length) {
-    tbody.innerHTML = emptyRow(7, t('state.no_model_data'), t('state.model_hint'));
-    $('models-summary').textContent = t('summary.zero_models');
-    return;
+  const data = await fetchJSON('models?range='+encodeURIComponent(getRange()));
+  currentModels = Array.isArray(data)?data:[];
+  applyModelFilter();
+  const tbody=$('models-table');
+  renderUsagePanel();
+  if(!currentModels.length) {
+    if(tbody) tbody.innerHTML=emptyRow(7,t('state.no_model_data'),t('state.model_hint'));
+    setText('models-summary',t('summary.zero_models')); return;
   }
-
-  const totalCost = currentModels.reduce((sum, r) => sum + (r.cost_known ? Number(r.cost || 0) : 0), 0);
-  const totalTokens = currentModels.reduce((sum, r) => sum + Number(r.total_tokens || 0), 0);
-  const unknownPricing = currentModels.filter(r => !r.cost_known).length;
-  $('models-summary').textContent = t('summary.models', { count: currentModels.length, unknown: unknownPricing });
-
-  tbody.innerHTML = currentModels.map(r => {
-    const tokens = Number(r.total_tokens || 0);
-    const requestCount = Number(r.request_count || 0);
-    const avgTokens = requestCount ? Math.round(tokens / requestCount) : 0;
-    const cost = Number(r.cost || 0);
-    const costShare = r.cost_known && totalCost > 0 ? cost / totalCost * 100 : 0;
-    const tokenShare = totalTokens > 0 ? tokens / totalTokens * 100 : 0;
-    const share = r.cost_known ? costShare : tokenShare;
-    const shareLabel = r.cost_known ? `${costShare.toFixed(1)}%` : `${tokenShare.toFixed(1)}% ${t('table.tokens').toLowerCase()}`;
-    const pricing = r.cost_known ? `<span class="badge ok">${esc(t('badge.matched'))}</span>` : `<span class="badge warn">${esc(t('badge.pricing_unknown'))}</span>`;
-    const costStr = r.cost_known ? formatCost(cost) : '-';
+  const unkn=currentModels.filter(r=>!r.cost_known).length;
+  setText('models-summary',t('summary.models',{count:currentModels.length,unknown:unkn}));
+  if(!tbody) return;
+  const maxReq=Math.max(...currentModels.map(r=>Number(r.request_count||0)),1);
+  tbody.innerHTML=currentModels.map(r=>{
+    const tok=Number(r.total_tokens||0), inp=Number(r.input_tokens||0), cached=Number(r.cached_tokens||0);
+    const req=Number(r.request_count||0), fail=Number(r.failed_count||0), cost=Number(r.cost||0);
+    const cache=inp>0?(cached/inp*100).toFixed(1)+'%':'0%';
+    const pct=Math.max(3,Math.round(req/maxReq*100));
+    const pricing=r.cost_known?`<span class="badge ok">${esc(t('badge.matched'))}</span>`:`<span class="badge warn">${esc(t('model.unpriced'))}</span>`;
+    const src=r.model_source==='returned'?t('model.source_returned'):r.model_source==='requested'?t('model.source_requested'):'';
     return `<tr>
-      <td><div class="model-name" title="${esc(r.model || 'unknown')}">${esc(r.model || 'unknown')}</div></td>
-      <td class="numeric mono">${formatFull(requestCount)}</td>
-      <td class="numeric mono">${formatNum(tokens)}</td>
-      <td class="numeric mono">${formatFull(avgTokens)}</td>
-      <td class="numeric"><span class="rank-bar"><span style="width:${Math.max(2, Math.min(100, share)).toFixed(1)}%"></span></span>${shareLabel}</td>
-      <td class="numeric mono">${costStr}</td>
+      <td><div class="model-name" title="${esc(modelName(r.model))}">${esc(modelName(r.model))}</div>${src?`<div class="model-source">${esc(src)}</div>`:''}</td>
+      <td class="numeric"><span class="usage-bar" style="--pct:${pct}%"><span></span></span><span class="mono">${fmtFull(req)}</span></td>
+      <td class="numeric mono">${fmtFull(fail)}</td>
+      <td class="numeric mono">${fmtNum(tok)}</td>
+      <td class="numeric mono">${cache}</td>
+      <td class="numeric mono">${r.cost_known?fmtCost(cost):'-'}</td>
       <td>${pricing}</td>
     </tr>`;
   }).join('');
 }
 
+/* --- Keys -------------------------------------------------- */
 async function loadKeys() {
-  const data = await fetchJSON('keys?range=' + encodeURIComponent(getRange()));
-  const rows = Array.isArray(data) ? data : [];
-  const tbody = $('keys-table');
-  $('keys-summary').textContent = t('summary.keys', { count: rows.length });
-  if (!rows.length) {
-    tbody.innerHTML = emptyRow(5, t('state.no_key_data'), t('state.key_hint'));
-    return;
-  }
-  tbody.innerHTML = rows.map(r => {
-    const count = Number(r.request_count || 0);
-    const failed = Number(r.failed_count || 0);
-    return `<tr>
-      <td><code>${esc(shortHash(r.key_hash))}</code></td>
-      <td class="numeric mono">${formatFull(count)}</td>
-      <td class="numeric mono">${formatFull(failed)}</td>
-      <td class="numeric mono">${formatPercent(failed, count)}</td>
-      <td class="numeric mono">${formatNum(r.total_tokens)}</td>
-    </tr>`;
+  const data = await fetchJSON('keys?range='+encodeURIComponent(getRange()));
+  const rows=Array.isArray(data)?data:[];
+  const tbody=$('keys-table');
+  setText('keys-summary',t('summary.keys',{count:rows.length}));
+  if(!rows.length){tbody.innerHTML=emptyRow(5,t('state.no_key_data'),t('state.key_hint'));return;}
+  tbody.innerHTML=rows.map(r=>{
+    const c=Number(r.request_count||0),f=Number(r.failed_count||0);
+    return `<tr><td><code>${esc(shortHash(r.key_hash))}</code></td><td class="numeric mono">${fmtFull(c)}</td><td class="numeric mono">${fmtFull(f)}</td><td class="numeric mono">${fmtPct(f,c)}</td><td class="numeric mono">${fmtNum(r.total_tokens)}</td></tr>`;
   }).join('');
 }
 
+/* --- Requests ---------------------------------------------- */
 async function loadRequests() {
-  const params = new URLSearchParams({ limit: '100', range: getRange() });
-  const status = $('filter-status').value;
-  const model = $('filter-model').value;
-  const endpoint = $('filter-endpoint').value;
-  if (status) params.set('status', status);
-  if (model) params.set('model', model);
-  if (endpoint) params.set('endpoint', endpoint);
-
-  const data = await fetchJSON('requests?' + params.toString());
-  const rows = Array.isArray(data) ? data : [];
-  const tbody = $('requests-table');
-  if (!rows.length) {
-    tbody.innerHTML = emptyRow(11, t('state.no_matching_requests'), t('state.adjust_filters'));
-    return;
-  }
-  tbody.innerHTML = rows.map(r => {
-    const statusClass = r.status < 400 ? 'ok' : r.status < 500 ? 'warn' : 'err';
-    const model = r.model_returned || r.model_requested || '-';
-    const capture = captureBadge(r);
-    const endpoint = r.stream ? `${esc(r.endpoint)} <span class="badge info">stream</span>` : esc(r.endpoint);
-    const bytesTitle = t('bytes.request_response', { request: formatBytes(r.request_bytes), response: formatBytes(r.response_bytes) });
-    return `<tr title="${esc(bytesTitle)}">
-      <td class="mono">${esc(formatTime(r.created_at))}</td>
-      <td><span class="badge ${statusClass}">${esc(r.status)}</span></td>
-      <td>${endpoint}</td>
-      <td><div class="model-name" title="${esc(model)}">${esc(model)}</div></td>
-      <td class="numeric mono">${formatNum(r.input_tokens)}</td>
-      <td class="numeric mono">${formatNum(r.output_tokens)}</td>
-      <td class="numeric mono">${formatNum(r.total_tokens)}</td>
-      <td class="numeric mono">${formatLat(r.ttfb_ms)}</td>
-      <td class="numeric mono">${formatLat(r.latency_ms)}</td>
-      <td>${capture}</td>
-      <td><code>${esc(shortHash(r.api_key_hash))}</code></td>
-    </tr>`;
+  const p=new URLSearchParams({limit:'100',range:getRange()});
+  const st=$('filter-status').value,md=$('filter-model').value,ep=$('filter-endpoint').value;
+  if(st)p.set('status',st); if(md)p.set('model',md); if(ep)p.set('endpoint',ep);
+  if(currentIssueClassFilter)p.set('error_class',currentIssueClassFilter);
+  const data=await fetchJSON('requests?'+p.toString());
+  let rows=Array.isArray(data)?data:[];
+  if(currentIssueClassFilter) rows=rows.filter(r=>r.error_class===currentIssueClassFilter);
+  const tbody=$('requests-table');
+  if(!rows.length){tbody.innerHTML=emptyRow(11,t('state.no_matching_requests'),t('state.adjust_filters'));return;}
+  tbody.innerHTML=rows.map(r=>{
+    const sc=r.status<400?'ok':r.status<500?'warn':'err';
+    const md2=modelName(r.model_returned||r.model_requested||'unidentified');
+    const cap=r.capture_outcome==='captured'?`<span class="badge ok">${esc(t('badge.captured'))}</span>`:r.capture_outcome==='failed'?`<span class="badge err">${esc(t('badge.failed'))}</span>`:r.capture_outcome==='skipped'?`<span class="badge warn">${esc(t('badge.skipped'))}</span>`:`<span class="badge neutral">${esc(r.capture_reason||t('badge.not_recorded'))}</span>`;
+    const ep2=r.stream?`${esc(r.endpoint)} <span class="badge info">SSE</span>`:esc(r.endpoint);
+    return `<tr><td class="mono">${esc(fmtTime(r.created_at))}</td><td><span class="badge ${sc}">${esc(r.status)}</span></td><td>${ep2}</td><td><div class="model-name" title="${esc(md2)}">${esc(md2)}</div></td><td class="numeric mono">${fmtNum(r.input_tokens)}</td><td class="numeric mono">${fmtNum(r.output_tokens)}</td><td class="numeric mono">${fmtNum(r.total_tokens)}</td><td class="numeric mono">${fmtLat(r.ttfb_ms)}</td><td class="numeric mono">${fmtLat(r.latency_ms)}</td><td>${cap}</td><td><code>${esc(shortHash(r.api_key_hash))}</code></td></tr>`;
   }).join('');
 }
 
-function captureBadge(r) {
-  const outcome = r.capture_outcome || '';
-  const reason = r.capture_reason || '';
-  if (outcome === 'captured') return `<span class="badge ok">${esc(t('badge.captured'))}</span>`;
-  if (outcome === 'failed') return `<span class="badge err" title="${esc(reason)}">${esc(t('badge.failed'))}</span>`;
-  if (outcome === 'skipped') return `<span class="badge warn" title="${esc(reason)}">${esc(t('badge.skipped'))}</span>`;
-  if (reason) return `<span class="badge neutral" title="${esc(reason)}">${esc(reason)}</span>`;
-  return `<span class="badge neutral">${esc(t('badge.unknown'))}</span>`;
-}
-
+/* --- Timeseries -------------------------------------------- */
 async function loadTimeseries() {
-  const range = getRange();
-  const bucket = bucketForRange(range);
-  const data = await fetchJSON('timeseries?range=' + encodeURIComponent(range) + '&bucket=' + encodeURIComponent(bucket));
-  const rows = Array.isArray(data) ? data : [];
-  lastTimeseriesRows = rows;
-  lastTimeseriesBucket = bucket;
-  renderTokensChart(rows, bucket);
-  renderRequestsChart(rows, bucket);
+  const range=getRange(), bucket=bucketFor(range);
+  const data=await fetchJSON('timeseries?range='+encodeURIComponent(range)+'&bucket='+encodeURIComponent(bucket));
+  const rows=Array.isArray(data)?data:[];
+  lastTSRows=rows; lastTSBucket=bucket;
+  renderUsagePanel();
 }
 
-function chartDimensions(container) {
-  const rect = container && container.getBoundingClientRect ? container.getBoundingClientRect() : null;
-  const width = Math.max(360, Math.round((rect && rect.width) || (container && container.clientWidth) || 820));
-  const height = Math.max(190, Math.round((rect && rect.height) || (container && container.clientHeight) || 250));
-  return { width, height, left: 54, right: 18, top: 18, bottom: 30 };
+/* --- Chart: shared ----------------------------------------- */
+function chartDims(container) {
+  const rect=container.getBoundingClientRect();
+  const w=Math.max(300,Math.round(rect.width||800)), h=Math.max(160,Math.round(rect.height||240));
+  return {w,h,l:48,r:12,t:14,b:24};
 }
-
-function chartGrid(maxValue, dims) {
-  const plotH = dims.height - dims.top - dims.bottom;
-  return [0, 0.5, 1].map(f => {
-    const value = maxValue * f;
-    const y = dims.height - dims.bottom - plotH * f;
-    return `<line class="chart-grid-line" x1="${dims.left}" y1="${y.toFixed(1)}" x2="${dims.width - dims.right}" y2="${y.toFixed(1)}"></line>
-      <text class="chart-axis-label" x="${dims.left - 8}" y="${(y + 4).toFixed(1)}">${esc(formatNum(value))}</text>`;
+function gridLines(maxVal,dims,format=fmtNum) {
+  const pH=dims.h-dims.t-dims.b;
+  return [0,.5,1].map(f=>{
+    const val=maxVal*f, y=dims.h-dims.b-pH*f;
+    return `<line class="chart-grid-line" x1="${dims.l}" y1="${y.toFixed(1)}" x2="${dims.w-dims.r}" y2="${y.toFixed(1)}"/>
+      <text class="chart-axis-text" x="${dims.l-6}" y="${(y+3).toFixed(1)}">${esc(format(val))}</text>`;
   }).join('');
 }
+function emptyChart(title) { return `<div class="empty-state"><strong>${esc(title)}</strong></div>`; }
 
-function categoryBucket(index, count, dims) {
-  const plotW = dims.width - dims.left - dims.right;
-  const slot = plotW / Math.max(count, 1);
+/* --- Usage mode panel -------------------------------------- */
+const modelColors = ['var(--chart-1)','var(--chart-2)','var(--chart-3)','var(--chart-4)','var(--chart-5)','var(--chart-6)'];
+
+function usageMeta(mode=currentUsageMode) {
+  if(mode==='tokens') return {
+    mode, label:t('usage.mode.tokens'), tooltip:t('tooltip.tokens'),
+    value:r=>Number(r.total_tokens||0), modelValue:r=>Number(r.total_tokens||0),
+    fmt:fmtNum, fmtFull:fmtFull, empty:t('state.no_token_data')
+  };
+  if(mode==='requests') return {
+    mode, label:t('usage.mode.requests'), tooltip:t('tooltip.requests'),
+    value:r=>Number(r.count||0), modelValue:r=>Number(r.request_count||0),
+    fmt:fmtNum, fmtFull:fmtFull, empty:t('state.no_request_data')
+  };
   return {
-    x: dims.left + slot * index,
-    width: slot,
-    center: dims.left + slot * (index + 0.5)
+    mode:'cost', label:t('usage.mode.cost'), tooltip:t('usage.mode.cost'),
+    value:r=>Number(r.cost||0), modelValue:r=>r.cost_known?Number(r.cost||0):0,
+    fmt:fmtCost, fmtFull:fmtCost, empty:t('state.no_cost_data')
   };
 }
 
-function coordinateBucket(index, count, dims, xFor) {
-  const center = xFor(index);
-  const start = index === 0 ? dims.left : (xFor(index - 1) + center) / 2;
-  const end = index === count - 1 ? dims.width - dims.right : (center + xFor(index + 1)) / 2;
-  return {
-    x: start,
-    width: Math.max(4, end - start),
-    center
-  };
+function setUsageMode(mode) {
+  if(mode!=='cost'&&mode!=='tokens'&&mode!=='requests') return;
+  currentUsageMode=mode;
+  try { localStorage.setItem(USAGE_MODE_KEY, mode); } catch (_) {}
+  renderUsagePanel();
 }
 
-function renderTokensChart(rows, bucket) {
-  const chart = $('tokens-chart');
-  if (!rows.length) {
-    chart.innerHTML = emptyChart(t('state.no_token_data'), t('state.no_captured_usage'));
-    $('tokens-chart-summary').textContent = t('summary.chart_buckets', { count: 0, bucket });
-    $('tokens-chart-left').textContent = '-';
-    $('tokens-chart-right').textContent = '-';
+function updateUsageTabs() {
+  document.querySelectorAll('[data-usage-mode]').forEach(btn=>{
+    const active=btn.dataset.usageMode===currentUsageMode;
+    btn.classList.toggle('active',active);
+    btn.setAttribute('aria-selected',active?'true':'false');
+  });
+}
+
+function renderUsagePanel() {
+  updateUsageTabs();
+  renderUsageSummary();
+  renderUsageTrend(lastTSRows,lastTSBucket);
+  renderModelDistribution();
+}
+
+function renderUsageSummary() {
+  const meta=usageMeta();
+  const selected=latestOverview&&latestOverview.selected&&latestOverview.selected.data?latestOverview.selected.data:{};
+  if(currentUsageMode==='tokens') {
+    const toks=Number(selected.total_tokens||0), inp=Number(selected.total_input_tokens||0), out=Number(selected.total_output_tokens||0);
+    const cached=Number(selected.total_cached_tokens||0), reas=Number(selected.total_reasoning_tokens||0);
+    setText('usage-total-value',fmtNum(toks));
+    setText('usage-total-sub',inp||out?t('metric.token_mix',{input:fmtNum(inp),output:fmtNum(out),cached:fmtNum(cached),reasoning:fmtNum(reas)}):t('metric.total_token_count',{count:fmtFull(toks)}));
     return;
   }
+  if(currentUsageMode==='requests') {
+    const recent=latestOverview&&latestOverview.recent_1h&&latestOverview.recent_1h.data?latestOverview.recent_1h.data:{};
+    setText('usage-total-value',fmtNum(selected.total_requests||0));
+    setText('usage-total-sub',t('metric.recent_failed',{count:fmtFull(recent.failed_requests||0)}));
+    return;
+  }
+  const partial=latestOverview&&latestOverview.cost&&latestOverview.cost.data&&latestOverview.cost.data.partial;
+  const unpriced=latestOverview&&latestOverview.cost&&latestOverview.cost.data?Number(latestOverview.cost.data.unpriced_models||0):0;
+  setText('usage-total-value',meta.fmt(selected.total_cost||0));
+  setText('usage-total-sub',partial?t('metric.partial_estimate')+(unpriced?' / '+t('metric.unpriced_models',{count:fmtFull(unpriced)}):''):t('metric.full_estimate'));
+}
 
-  const totals = rows.map(r => {
-    const reasoning = Number(r.reasoning_tokens || 0);
-    const rawOutput = Number(r.output_tokens || 0);
-    return {
-      cached: Number(r.cached_tokens || 0),
-      uncached: Math.max(0, Number(r.input_tokens || 0) - Number(r.cached_tokens || 0)),
-      output: Math.max(0, rawOutput - reasoning),
-      reasoning,
-      total: Number(r.total_tokens || 0)
-    };
-  });
-  const stackTotals = totals.map(r => r.cached + r.uncached + r.output + r.reasoning);
-  const maxStack = Math.max(...stackTotals, 1);
-  const totalTokens = totals.reduce((sum, r) => sum + r.total, 0);
-  const peakTokens = Math.max(...totals.map(r => r.total), 0);
-  const dims = chartDimensions(chart);
-  const plotW = dims.width - dims.left - dims.right;
-  const plotH = dims.height - dims.top - dims.bottom;
-  const slot = plotW / rows.length;
-  const barW = Math.max(2, Math.min(16, slot * 0.58));
-  const yFor = value => dims.height - dims.bottom - plotH * Number(value || 0) / maxStack;
+function renderUsageLegend(mode=currentUsageMode) {
+  const el=$('usage-legend'); if(!el) return;
+  if(mode==='tokens') {
+    el.innerHTML=[
+      ['dot-cyan','legend.cached_input'],
+      ['dot-accent','legend.uncached_input'],
+      ['dot-green','legend.output'],
+      ['dot-violet','legend.reasoning']
+    ].map(([cls,key])=>`<span class="legend-item"><span class="legend-dot ${cls}"></span><span>${esc(t(key))}</span></span>`).join('');
+    return;
+  }
+  if(mode==='requests') {
+    el.innerHTML=[
+      ['dot-accent','legend.requests'],
+      ['dot-red','legend.failed']
+    ].map(([cls,key])=>`<span class="legend-item"><span class="legend-dot ${cls}"></span><span>${esc(t(key))}</span></span>`).join('');
+    return;
+  }
+  el.innerHTML=`<span class="legend-item"><span class="legend-dot dot-accent"></span><span>${esc(t('usage.mode.cost'))}</span></span>`;
+}
 
-  const bars = rows.map((r, i) => {
-    const bucketRect = categoryBucket(i, rows.length, dims);
-    const x = bucketRect.center - barW / 2;
-    let yCursor = dims.height - dims.bottom;
-    const parts = [
-      ['cached', totals[i].cached],
-      ['uncached', totals[i].uncached],
-      ['output', totals[i].output],
-      ['reasoning', totals[i].reasoning]
-    ];
-    const rects = parts.map(([kind, value]) => {
-      if (value <= 0) return '';
-      const y = yFor(value + (dims.height - dims.bottom - yCursor) / plotH * maxStack);
-      let h = yCursor - y;
-      if (h > 0 && h < 1) h = 1;
-      yCursor -= h;
-      return `<rect class="token-segment ${kind}" x="${x.toFixed(1)}" y="${yCursor.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" rx="2"></rect>`;
-    }).join('');
-    const stackTop = yCursor;
-    const stackH = Math.max(0, dims.height - dims.bottom - stackTop);
-    const outline = stackH > 0 ? `<rect class="token-outline" x="${(x - 1.5).toFixed(1)}" y="${(stackTop - 1.5).toFixed(1)}" width="${(barW + 3).toFixed(1)}" height="${(stackH + 3).toFixed(1)}" rx="3"></rect>` : '';
-    return `<g class="chart-bucket" tabindex="0" data-tooltip="${esc(tokenTooltip(r, totals[i]))}">
-      <rect class="bucket-band" x="${bucketRect.x.toFixed(1)}" y="${dims.top}" width="${bucketRect.width.toFixed(1)}" height="${plotH}"></rect>
-      <line class="bucket-ruler" x1="${bucketRect.center.toFixed(1)}" y1="${dims.top}" x2="${bucketRect.center.toFixed(1)}" y2="${dims.height - dims.bottom}"></line>
-      ${outline}
-      ${rects}
-      <rect class="chart-hit" x="${bucketRect.x.toFixed(1)}" y="${dims.top}" width="${bucketRect.width.toFixed(1)}" height="${plotH}"></rect>
+function renderUsageTrend(rows,bucket) {
+  const el=$('usage-trend-chart'); if(!el) return;
+  renderUsageLegend(currentUsageMode);
+  if(currentUsageMode==='tokens') renderTokenTrend(el,rows,bucket);
+  else renderSingleTrend(el,rows,bucket,usageMeta());
+}
+
+function renderSingleTrend(el,rows,bucket,meta) {
+  if(!rows.length){el.innerHTML=emptyChart(meta.empty);setText('usage-chart-summary','');setText('usage-chart-left','-');setText('usage-chart-right','-');return;}
+  const dims=chartDims(el);
+  const pW=dims.w-dims.l-dims.r, pH=dims.h-dims.t-dims.b;
+  const values=rows.map(meta.value);
+  const maxV=Math.max(...values,1);
+  const total=values.reduce((s,v)=>s+v,0);
+  const slot=pW/rows.length;
+  const barW=Math.max(2,Math.min(28,slot*.6));
+  const yFor=v=>dims.h-dims.b-pH*Number(v||0)/maxV;
+  const bars=rows.map((r,i)=>{
+    const cx=dims.l+slot*(i+.5), x=cx-barW/2, v=values[i];
+    const y=yFor(v), h=Math.max(0,dims.h-dims.b-y);
+    const failed=Number(r.failed_count||0), failedH=currentUsageMode==='requests'?pH*Math.min(failed,maxV)/maxV:0;
+    const failedY=dims.h-dims.b-failedH;
+    const tt=currentUsageMode==='requests'?reqTooltip(r):ttHtml(fmtShort(r.timestamp),'',[
+      ['requests',meta.tooltip,meta.fmtFull(v)],
+      ['tokens',t('tooltip.tokens'),fmtFull(r.total_tokens||0)],
+      ['failed',t('tooltip.failed'),fmtFull(r.failed_count||0)]
+    ]);
+    return `<g class="chart-hover-group" tabindex="0" data-tooltip="${esc(tt)}">
+      <rect class="chart-hover-band" x="${(dims.l+slot*i).toFixed(1)}" y="${dims.t}" width="${slot.toFixed(1)}" height="${pH}"/>
+      <line class="chart-hover-ruler" x1="${cx.toFixed(1)}" y1="${dims.t}" x2="${cx.toFixed(1)}" y2="${dims.h-dims.b}"/>
+      ${h>0?`<rect class="chart-bar requests chart-bar-rect" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}"/>`:''}
+      ${failedH>0?`<rect class="chart-bar failed chart-bar-rect" x="${(x+barW*.62).toFixed(1)}" y="${failedY.toFixed(1)}" width="${Math.max(2,barW*.34).toFixed(1)}" height="${failedH.toFixed(1)}"/>`:''}
     </g>`;
   }).join('');
-
-  chart.innerHTML = `<svg class="svg-chart" viewBox="0 0 ${dims.width} ${dims.height}" role="img" aria-label="${esc(t('panel.tokens'))}">
-    ${chartGrid(maxStack, dims)}
-    <line class="axis-line" x1="${dims.left}" y1="${dims.height - dims.bottom}" x2="${dims.width - dims.right}" y2="${dims.height - dims.bottom}"></line>
+  el.innerHTML=`<svg viewBox="0 0 ${dims.w} ${dims.h}" role="img" aria-label="${esc(meta.label)}">
+    ${gridLines(maxV,dims,meta.fmt)}
+    <line stroke="var(--chart-grid)" stroke-width="1" x1="${dims.l}" y1="${dims.h-dims.b}" x2="${dims.w-dims.r}" y2="${dims.h-dims.b}"/>
     ${bars}
   </svg>`;
-  attachTooltips(chart);
-
-  $('tokens-chart-summary').textContent = t('summary.tokens_chart', { count: rows.length, bucket, tokens: formatFull(totalTokens) });
-  $('tokens-chart-left').textContent = formatShortTime(rows[0].timestamp);
-  $('tokens-chart-right').textContent = t('summary.peak_tokens', { tokens: formatFull(peakTokens) });
+  attachTT(el);
+  const summaryKey=currentUsageMode==='cost'?'summary.cost_chart':currentUsageMode==='requests'?'summary.requests_chart':'summary.tokens_chart';
+  setText('usage-chart-summary',currentUsageMode==='requests'
+    ?t(summaryKey,{count:rows.length,bucket,peak:fmtFull(maxV)})
+    :t(summaryKey,{count:rows.length,bucket,value:meta.fmtFull(total),peak:meta.fmtFull(maxV)}));
+  setText('usage-chart-left',fmtShort(rows[0].timestamp));
+  setText('usage-chart-right',meta.fmtFull(total));
 }
 
-function tokenTooltip(row, values) {
-  return tooltipHtml(
-    formatShortTime(row.timestamp),
-    t('tooltip.total_tokens', { value: formatFull(row.total_tokens) }),
-    [
-      ['cached', t('tooltip.cached_input'), formatFull(values.cached)],
-      ['uncached', t('tooltip.uncached_input'), formatFull(values.uncached)],
-      ['output', t('tooltip.output'), formatFull(values.output)],
-      ['reasoning', t('tooltip.reasoning'), formatFull(values.reasoning)]
-    ]
-  );
+function renderTokenTrend(el,rows,bucket) {
+  if(!rows.length){el.innerHTML=emptyChart(t('state.no_token_data'));setText('usage-chart-summary','');setText('usage-chart-left','-');setText('usage-chart-right','-');return;}
+  const dims=chartDims(el);
+  const pW=dims.w-dims.l-dims.r, pH=dims.h-dims.t-dims.b;
+  const totals=rows.map(r=>{
+    const reas=Number(r.reasoning_tokens||0),rawOut=Number(r.output_tokens||0);
+    return {cached:Number(r.cached_tokens||0),uncached:Math.max(0,Number(r.input_tokens||0)-Number(r.cached_tokens||0)),output:Math.max(0,rawOut-reas),reasoning:reas,total:Number(r.total_tokens||0)};
+  });
+  const stacks=totals.map(r=>r.cached+r.uncached+r.output+r.reasoning);
+  const maxStack=Math.max(...stacks,1);
+  const totalTok=totals.reduce((s,r)=>s+r.total,0);
+  const slot=pW/rows.length;
+  const barW=Math.max(2,Math.min(24,slot*.6));
+  const bars=rows.map((r,i)=>{
+    const cx=dims.l+slot*(i+.5), x=cx-barW/2;
+    let cursor=dims.h-dims.b;
+    const parts=[['cached',totals[i].cached],['uncached',totals[i].uncached],['output',totals[i].output],['reasoning',totals[i].reasoning]];
+    const rects=parts.map(([kind,val])=>{
+      if(val<=0)return'';
+      const h=pH*val/maxStack; if(h<.5)return'';
+      cursor-=h;
+      return `<rect class="chart-bar ${kind} chart-bar-rect" x="${x.toFixed(1)}" y="${cursor.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}"/>`;
+    }).join('');
+    return `<g class="chart-hover-group" tabindex="0" data-tooltip="${esc(tokTooltip(r,totals[i]))}">
+      <rect class="chart-hover-band" x="${(dims.l+slot*i).toFixed(1)}" y="${dims.t}" width="${slot.toFixed(1)}" height="${pH}"/>
+      <line class="chart-hover-ruler" x1="${cx.toFixed(1)}" y1="${dims.t}" x2="${cx.toFixed(1)}" y2="${dims.h-dims.b}"/>
+      ${rects}
+    </g>`;
+  }).join('');
+  el.innerHTML=`<svg viewBox="0 0 ${dims.w} ${dims.h}" role="img" aria-label="${esc(t('panel.tokens'))}">
+    ${gridLines(maxStack,dims)}
+    <line stroke="var(--chart-grid)" stroke-width="1" x1="${dims.l}" y1="${dims.h-dims.b}" x2="${dims.w-dims.r}" y2="${dims.h-dims.b}"/>
+    ${bars}
+  </svg>`;
+  attachTT(el);
+  setText('usage-chart-summary',t('summary.tokens_chart',{count:rows.length,bucket,tokens:fmtFull(totalTok)}));
+  setText('usage-chart-left',fmtShort(rows[0].timestamp));
+  setText('usage-chart-right',t('summary.peak_tokens',{tokens:fmtFull(Math.max(...totals.map(r=>r.total)))}));
 }
 
-function renderRequestsChart(rows, bucket) {
-  const chart = $('requests-chart');
-  if (!rows.length) {
-    chart.innerHTML = emptyChart(t('state.no_request_data'), t('state.no_requests_range'));
-    $('requests-chart-summary').textContent = t('summary.chart_buckets', { count: 0, bucket });
-    $('requests-chart-left').textContent = '-';
-    $('requests-chart-right').textContent = '-';
+function renderModelDistribution() {
+  const chart=$('model-distribution-chart'), list=$('model-distribution-list');
+  if(!chart||!list) return;
+  const meta=usageMeta();
+  const rows=currentModels.map(r=>({...r,_value:meta.modelValue(r)})).filter(r=>r._value>0);
+  rows.sort((a,b)=>b._value-a._value);
+  const total=rows.reduce((s,r)=>s+r._value,0);
+  if(!rows.length||total<=0) {
+    chart.innerHTML=emptyChart(meta.mode==='cost'?t('state.no_cost_data'):t('state.no_model_data'));
+    list.innerHTML='';
     return;
   }
+  const display=rows.slice(0,8);
+  const rest=rows.slice(8).reduce((s,r)=>s+r._value,0);
+  if(rest>0) display.push({model:t('model.other'),_value:rest,cost_known:true});
+  chart.innerHTML=pieSvg(display,total,meta);
+  list.innerHTML=display.map((r,i)=>{
+    const share=r._value/total*100, color=modelColors[i%modelColors.length];
+    return `<div class="dist-row" title="${esc(modelName(r.model))}">
+      <span class="dist-swatch" style="--color:${color}"></span>
+      <span class="dist-name">${esc(modelName(r.model))}</span>
+      <span class="dist-value mono">${esc(meta.fmtFull(r._value))}</span>
+      <span class="dist-share mono">${share.toFixed(1)}%</span>
+    </div>`;
+  }).join('')+(meta.mode==='cost'&&currentModels.some(r=>!r.cost_known)?`<div class="dist-note">${esc(t('model.unpriced_excluded'))}</div>`:'');
+}
 
-  const dims = chartDimensions(chart);
-  const plotW = dims.width - dims.left - dims.right;
-  const plotH = dims.height - dims.top - dims.bottom;
-  const maxCount = Math.max(...rows.map(r => Number(r.count || 0)), 1);
-  const maxFailed = Math.max(...rows.map(r => Number(r.failed_count || 0)), 0);
-  const xFor = i => rows.length === 1 ? dims.left + plotW / 2 : dims.left + plotW * i / (rows.length - 1);
-  const yFor = value => dims.height - dims.bottom - plotH * Number(value || 0) / maxCount;
-  const linePath = field => rows.map((r, i) => `${i === 0 ? 'M' : 'L'}${xFor(i).toFixed(1)} ${yFor(r[field]).toFixed(1)}`).join(' ');
-  const requestPath = linePath('count');
-  const failedPath = linePath('failed_count');
-  const areaPath = `${requestPath} L${xFor(rows.length - 1).toFixed(1)} ${dims.height - dims.bottom} L${xFor(0).toFixed(1)} ${dims.height - dims.bottom} Z`;
-  const peakLatency = Math.max(...rows.map(r => Number(r.avg_latency_ms || 0)), 0);
+function pieSvg(rows,total,meta) {
+  const cx=160, cy=160, r=110, c=2*Math.PI*r;
+  let offset=0;
+  const rings=rows.map((row,i)=>{
+    const len=c*(row._value/total);
+    const gap=rows.length>1?2:0;
+    const dash=Math.max(0,len-gap);
+    const ring=`<circle class="distribution-slice" cx="${cx}" cy="${cy}" r="${r}" stroke="${modelColors[i%modelColors.length]}" stroke-dasharray="${dash.toFixed(2)} ${(c-dash).toFixed(2)}" stroke-dashoffset="${(-offset).toFixed(2)}"/>`;
+    offset+=len;
+    return ring;
+  }).join('');
+  return `<svg viewBox="0 0 320 320" role="img" aria-label="${esc(t('usage.distribution'))}">
+    <g transform="rotate(-90 ${cx} ${cy})">
+      <circle class="distribution-ring-track" cx="${cx}" cy="${cy}" r="${r}"/>
+      ${rings}
+    </g>
+    <text class="distribution-center-value" x="${cx}" y="${cy-2}" text-anchor="middle">${esc(meta.fmtFull(total))}</text>
+    <text class="distribution-center-label" x="${cx}" y="${cy+20}" text-anchor="middle">${esc(meta.label)}</text>
+  </svg>`;
+}
 
-  const buckets = rows.map((r, i) => {
-    const bucketRect = coordinateBucket(i, rows.length, dims, xFor);
-    const x = xFor(i);
-    const y = yFor(r.count);
-    const failed = Number(r.failed_count || 0);
-    const failedY = yFor(failed);
-    return `<g class="chart-bucket" tabindex="0" data-tooltip="${esc(requestTooltip(r))}">
-      <rect class="bucket-band" x="${bucketRect.x.toFixed(1)}" y="${dims.top}" width="${bucketRect.width.toFixed(1)}" height="${plotH}"></rect>
-      <line class="bucket-ruler" x1="${x.toFixed(1)}" y1="${dims.top}" x2="${x.toFixed(1)}" y2="${dims.height - dims.bottom}"></line>
-      <circle class="request-point-ring" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="7"></circle>
-      <circle class="request-point" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3.4"></circle>
-      ${failed > 0 ? `<circle class="failed-point" cx="${x.toFixed(1)}" cy="${failedY.toFixed(1)}" r="3"></circle>` : ''}
-      <rect class="chart-hit" x="${bucketRect.x.toFixed(1)}" y="${dims.top}" width="${bucketRect.width.toFixed(1)}" height="${plotH}"></rect>
+/* --- Chart: Requests (bar chart) --------------------------- */
+function renderRequestsChart(rows,bucket) {
+  const el=$('requests-chart');
+  if(!rows.length){el.innerHTML=emptyChart(t('state.no_request_data'));setText('requests-chart-summary','');setText('requests-chart-left','-');setText('requests-chart-right','-');return;}
+  const dims=chartDims(el);
+  const pW=dims.w-dims.l-dims.r, pH=dims.h-dims.t-dims.b;
+  const maxC=Math.max(...rows.map(r=>Number(r.count||0)),1);
+  const slot=pW/rows.length;
+  const barW=Math.max(2,Math.min(20,slot*.55));
+  const yFor=v=>dims.h-dims.b-pH*Number(v||0)/maxC;
+  const totalReqs=rows.reduce((s,r)=>s+Number(r.count||0),0);
+
+  const bars=rows.map((r,i)=>{
+    const cx=dims.l+slot*(i+.5), x=cx-barW/2;
+    const count=Number(r.count||0), failed=Number(r.failed_count||0);
+    const yC=yFor(count), hC=Math.max(0,dims.h-dims.b-yC);
+    const yF=yFor(failed), hF=Math.max(0,dims.h-dims.b-yF);
+    const bx=dims.l+slot*i;
+    return `<g class="chart-hover-group" tabindex="0" data-tt="${esc(reqTooltip(r))}">
+      <rect class="chart-hover-band" x="${bx.toFixed(1)}" y="${dims.t}" width="${slot.toFixed(1)}" height="${pH}"/>
+      <line class="chart-hover-ruler" x1="${cx.toFixed(1)}" y1="${dims.t}" x2="${cx.toFixed(1)}" y2="${dims.h-dims.b}"/>
+      ${hC>0?`<rect class="chart-bar requests chart-bar-rect" x="${x.toFixed(1)}" y="${yC.toFixed(1)}" width="${barW.toFixed(1)}" height="${hC.toFixed(1)}"/>`:''}
+      ${failed>0&&hF>0?`<rect class="chart-bar failed chart-bar-rect" x="${(x+barW+1).toFixed(1)}" y="${yF.toFixed(1)}" width="${Math.max(2,barW*.4).toFixed(1)}" height="${hF.toFixed(1)}"/>`:''}
     </g>`;
   }).join('');
 
-  chart.innerHTML = `<svg class="svg-chart" viewBox="0 0 ${dims.width} ${dims.height}" role="img" aria-label="${esc(t('panel.requests'))}">
-    ${chartGrid(maxCount, dims)}
-    <line class="axis-line" x1="${dims.left}" y1="${dims.height - dims.bottom}" x2="${dims.width - dims.right}" y2="${dims.height - dims.bottom}"></line>
-    <path class="request-area" d="${areaPath}"></path>
-    <path class="request-line" d="${requestPath}"></path>
-    ${maxFailed > 0 ? `<path class="failed-line" d="${failedPath}"></path>` : ''}
-    ${buckets}
+  el.innerHTML=`<svg viewBox="0 0 ${dims.w} ${dims.h}" role="img" aria-label="${esc(t('panel.requests'))}">
+    ${gridLines(maxC,dims)}
+    <line stroke="var(--chart-grid)" stroke-width="1" x1="${dims.l}" y1="${dims.h-dims.b}" x2="${dims.w-dims.r}" y2="${dims.h-dims.b}"/>
+    ${bars}
   </svg>`;
-  attachTooltips(chart);
-
-  $('requests-chart-summary').textContent = t('summary.requests_chart', { count: rows.length, bucket, peak: formatFull(maxCount) });
-  $('requests-chart-left').textContent = formatShortTime(rows[0].timestamp);
-  $('requests-chart-right').textContent = t('summary.peak_latency', { latency: formatLat(peakLatency) });
+  attachTT(el);
+  setText('requests-chart-summary',t('summary.requests_chart',{count:rows.length,bucket,peak:fmtFull(maxC)}));
+  setText('requests-chart-left',fmtShort(rows[0].timestamp));
+  setText('requests-chart-right',fmtFull(totalReqs)+' '+t('tooltip.requests').toLowerCase());
 }
 
-function requestTooltip(row) {
-  const count = Number(row.count || 0);
-  const failed = Number(row.failed_count || 0);
-  return tooltipHtml(
-    formatShortTime(row.timestamp),
-    '',
-    [
-      ['requests', t('tooltip.requests'), formatFull(count)],
-      ['failed', t('tooltip.failed'), formatFull(failed)],
-      ['failed', t('tooltip.failure_rate'), formatPercent(failed, count)],
-      ['requests', t('tooltip.avg_ttfb'), formatLat(row.avg_ttfb_ms)],
-      ['requests', t('tooltip.avg_latency'), formatLat(row.avg_latency_ms)],
-      ['tokens', t('tooltip.tokens'), formatFull(row.total_tokens)]
-    ]
-  );
+function reqTooltip(r) {
+  const c=Number(r.count||0),f=Number(r.failed_count||0);
+  return ttHtml(fmtShort(r.timestamp),'',[
+    ['requests',t('tooltip.requests'),fmtFull(c)],
+    ['failed',t('tooltip.failed'),fmtFull(f)],
+    ['requests',t('tooltip.avg_ttfb'),fmtLat(r.avg_ttfb_ms)],
+    ['requests',t('tooltip.avg_latency'),fmtLat(r.avg_latency_ms)],
+    ['tokens',t('tooltip.tokens'),fmtFull(r.total_tokens)]
+  ]);
 }
 
-function tooltipHtml(title, meta, rows) {
-  return `<div class="tooltip-title"><span>${esc(title)}</span>${meta ? `<strong>${esc(meta)}</strong>` : ''}</div>` +
-    rows.map(([kind, label, value]) => `<div class="tooltip-row"><span><i class="tooltip-swatch ${kind}"></i>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('');
+/* --- Chart: Tokens (stacked bar chart) --------------------- */
+function renderTokensChart(rows,bucket) {
+  const el=$('tokens-chart');
+  if(!rows.length){el.innerHTML=emptyChart(t('state.no_token_data'));setText('tokens-chart-summary','');setText('tokens-chart-left','-');setText('tokens-chart-right','-');return;}
+  const dims=chartDims(el);
+  const pW=dims.w-dims.l-dims.r, pH=dims.h-dims.t-dims.b;
+  const totals=rows.map(r=>{
+    const reas=Number(r.reasoning_tokens||0),rawOut=Number(r.output_tokens||0);
+    return {cached:Number(r.cached_tokens||0),uncached:Math.max(0,Number(r.input_tokens||0)-Number(r.cached_tokens||0)),output:Math.max(0,rawOut-reas),reasoning:reas,total:Number(r.total_tokens||0)};
+  });
+  const stacks=totals.map(r=>r.cached+r.uncached+r.output+r.reasoning);
+  const maxStack=Math.max(...stacks,1);
+  const totalTok=totals.reduce((s,r)=>s+r.total,0);
+  const slot=pW/rows.length;
+  const barW=Math.max(2,Math.min(18,slot*.55));
+  const yFor=v=>dims.h-dims.b-pH*Number(v||0)/maxStack;
+
+  const bars=rows.map((r,i)=>{
+    const cx=dims.l+slot*(i+.5), x=cx-barW/2;
+    let cursor=dims.h-dims.b;
+    const parts=[['cached',totals[i].cached],['uncached',totals[i].uncached],['output',totals[i].output],['reasoning',totals[i].reasoning]];
+    const rects=parts.map(([kind,val])=>{
+      if(val<=0)return'';
+      const h=pH*val/maxStack; if(h<.5)return'';
+      cursor-=h;
+      return `<rect class="chart-bar ${kind} chart-bar-rect" x="${x.toFixed(1)}" y="${cursor.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}"/>`;
+    }).join('');
+    const bx=dims.l+slot*i;
+    return `<g class="chart-hover-group" tabindex="0" data-tt="${esc(tokTooltip(r,totals[i]))}">
+      <rect class="chart-hover-band" x="${bx.toFixed(1)}" y="${dims.t}" width="${slot.toFixed(1)}" height="${pH}"/>
+      <line class="chart-hover-ruler" x1="${cx.toFixed(1)}" y1="${dims.t}" x2="${cx.toFixed(1)}" y2="${dims.h-dims.b}"/>
+      ${rects}
+    </g>`;
+  }).join('');
+
+  el.innerHTML=`<svg viewBox="0 0 ${dims.w} ${dims.h}" role="img" aria-label="${esc(t('panel.tokens'))}">
+    ${gridLines(maxStack,dims)}
+    <line stroke="var(--chart-grid)" stroke-width="1" x1="${dims.l}" y1="${dims.h-dims.b}" x2="${dims.w-dims.r}" y2="${dims.h-dims.b}"/>
+    ${bars}
+  </svg>`;
+  attachTT(el);
+  setText('tokens-chart-summary',t('summary.tokens_chart',{count:rows.length,bucket,tokens:fmtFull(totalTok)}));
+  setText('tokens-chart-left',fmtShort(rows[0].timestamp));
+  setText('tokens-chart-right',t('summary.peak_tokens',{tokens:fmtFull(Math.max(...totals.map(r=>r.total)))}));
 }
 
-function attachTooltips(container) {
-  const svg = container.querySelector('.svg-chart');
-  container.querySelectorAll('.chart-bucket').forEach(el => {
-    el.addEventListener('mouseenter', event => activateBucket(container, svg, el, event));
-    el.addEventListener('mousemove', event => moveTooltip(event, el));
-    el.addEventListener('mouseleave', () => deactivateBucket(container, svg, el));
-    el.addEventListener('focus', event => activateBucket(container, svg, el, event));
-    el.addEventListener('blur', () => deactivateBucket(container, svg, el));
+function tokTooltip(row,vals) {
+  return ttHtml(fmtShort(row.timestamp),t('tooltip.total_tokens',{value:fmtFull(row.total_tokens)}),[
+    ['cached',t('tooltip.cached_input'),fmtFull(vals.cached)],
+    ['uncached',t('tooltip.uncached_input'),fmtFull(vals.uncached)],
+    ['output',t('tooltip.output'),fmtFull(vals.output)],
+    ['reasoning',t('tooltip.reasoning'),fmtFull(vals.reasoning)]
+  ]);
+}
+
+function ttHtml(title,meta,rows) {
+  return `<div class="tt-title"><span>${esc(title)}</span>${meta?`<small>${esc(meta)}</small>`:''}</div>`+
+    rows.map(([k,label,val])=>`<div class="tt-row"><span><i class="tt-dot ${k}"></i>${esc(label)}</span><strong>${esc(val)}</strong></div>`).join('');
+}
+
+/* --- Tooltip system ---------------------------------------- */
+function attachTT(container) {
+  container.querySelectorAll('.chart-hover-group').forEach(el=>{
+    el.addEventListener('mouseenter', e=>activateHover(container,el,e));
+    el.addEventListener('mousemove', e=>moveTT(e));
+    el.addEventListener('mouseleave',()=>deactivateHover(container,el));
+    el.addEventListener('focus', e=>activateHover(container,el,e));
+    el.addEventListener('blur',()=>deactivateHover(container,el));
+  });
+}
+function activateHover(c,el,e) {
+  c.querySelectorAll('.chart-hover-group.active').forEach(a=>{if(a!==el)a.classList.remove('active');});
+  c.classList.add('has-active'); el.classList.add('active');
+  showTT(e,el.dataset.tooltip||el.dataset.tt);
+}
+function deactivateHover(c,el) {
+  el.classList.remove('active');
+  if(!c.querySelector('.chart-hover-group.active')) c.classList.remove('has-active');
+  hideTT();
+}
+function showTT(e,html) {
+  const tt=$('chart-tooltip'); tt.innerHTML=html||''; tt.classList.remove('hidden'); moveTT(e);
+}
+function moveTT(e) {
+  const tt=$('chart-tooltip'); if(!tt||tt.classList.contains('hidden'))return;
+  const pad=10, rect=tt.getBoundingClientRect();
+  let x=(e.clientX||0)-rect.width/2, y=(e.clientY||0)-rect.height-12;
+  if(y<pad)y=(e.clientY||0)+16;
+  if(x+rect.width+pad>window.innerWidth)x=window.innerWidth-rect.width-pad;
+  tt.style.left=Math.max(pad,x)+'px'; tt.style.top=Math.max(pad,y)+'px';
+}
+function hideTT() { const tt=$('chart-tooltip'); if(tt)tt.classList.add('hidden'); }
+
+/* --- Issues ------------------------------------------------ */
+async function loadIssues() {
+  const data = await fetchJSON('issues?range='+encodeURIComponent(getRange())+'&limit=20');
+  if(!data) return;
+  const reqItems = Array.isArray(data.items)?data.items:[];
+  const sysItems = data.system&&Array.isArray(data.system.items)?data.system.items.map(i=>({...i,system:true})):[];
+  const items = reqItems.concat(sysItems);
+  const sevRank={error:0,warning:1,info:2};
+  items.sort((a,b)=>{
+    const d=(sevRank[a.severity]??3)-(sevRank[b.severity]??3); if(d)return d;
+    const at=Date.parse(a.latest_at||'')||0, bt=Date.parse(b.latest_at||'')||0;
+    if(bt!==at)return bt-at; return Number(b.count||0)-Number(a.count||0);
+  });
+  latestIssueItems=items;
+  setText('issues-summary',items.length?t('issues.summary',{count:fmtFull(items.length)}):t('issues.empty'));
+  const state=$('issues-state'), overview=$('issues-overview'), list=$('issues-list');
+  if(!items.length){
+    state.classList.remove('hidden');
+    state.innerHTML=`<div class="issues-empty"><strong>${esc(t('issues.empty'))}</strong><span>${esc(t('issues.empty_detail'))}</span></div>`;
+    if(overview) overview.innerHTML='';
+    list.innerHTML=`<div class="issue-class-placeholder">${esc(t('issues.no_issue_types'))}</div>`; return;
+  }
+  state.classList.add('hidden');
+  const issueClassLabel=(cls,fb)=>{const k='issues.class.'+(cls||'unknown'),fb2=I18N.en||{},d=I18N[currentLang]||fb2;return d[k]||fb2[k]||fb||'';};
+  const issueSevLabel=sev=>{const k='issues.severity.'+(sev||'info'),fb=I18N.en||{},d=I18N[currentLang]||fb;return d[k]||fb[k]||sev||'';};
+  const countsBySeverity={error:0,warning:0,info:0};
+  items.forEach(item=>{const sev=item.severity||'info'; countsBySeverity[sev]=(countsBySeverity[sev]||0)+Number(item.count||0);});
+  if(selectedIssueSeverity && !countsBySeverity[selectedIssueSeverity]) selectedIssueSeverity='';
+  const statHtml=['error','warning','info'].map(sev=>{
+    const total=countsBySeverity[sev]||0;
+    const active=selectedIssueSeverity===sev;
+    return `<button class="issue-stat ${active?'active':''}" type="button" data-issue-severity="${sev}" ${total?'':'disabled'}>
+      <div class="issue-stat-label">${esc(issueSevLabel(sev))}</div>
+      <div class="issue-stat-value mono">${esc(fmtFull(total))}</div>
+    </button>`;
+  }).join('');
+  if(overview) overview.innerHTML=`<div class="issue-summary-strip">${statHtml}</div>`;
+  const renderClassPanel=()=>{
+    if(!selectedIssueSeverity){
+      list.innerHTML=`<div class="issue-class-placeholder">${esc(t('issues.select_severity_hint'))}</div>`;
+      return;
+    }
+    const groups=new Map();
+    items.filter(item=>(item.severity||'info')===selectedIssueSeverity).forEach(item=>{
+      const cls=item.class||'unknown';
+      const g=groups.get(cls)||{class:cls,label:issueClassLabel(cls,item.label),count:0,latestAt:'',messages:[],models:new Set(),endpoints:new Set(),statuses:new Set(),systemOnly:true};
+      g.count+=Number(item.count||0);
+      if((Date.parse(item.latest_at||'')||0)>(Date.parse(g.latestAt||'')||0)) g.latestAt=item.latest_at||g.latestAt;
+      if(item.message||item.error_code||item.error_type) g.messages.push(item.message||item.error_code||item.error_type);
+      if(item.model) g.models.add(modelName(item.model));
+      if(item.endpoint) g.endpoints.add(item.endpoint);
+      if(item.status) g.statuses.add(String(item.status));
+      if(!item.system) g.systemOnly=false;
+      groups.set(cls,g);
+    });
+    const rows=[...groups.values()].sort((a,b)=>b.count-a.count);
+    list.classList.remove('hidden');
+    list.innerHTML=`<div class="issue-class-head">${esc(issueSevLabel(selectedIssueSeverity))}${esc(t('issues.class_breakdown_suffix'))}</div>
+      <div class="issue-filter-grid">${rows.map(g=>{
+        const bits=[...g.statuses].slice(0,2).concat([...g.models].slice(0,1),[...g.endpoints].slice(0,1)).filter(Boolean);
+        const detail=bits.join(' / ') || (g.systemOnly?t('issues.scope_process'):t('issues.no_message'));
+        const msg=g.messages[0]||'';
+        const active=currentIssueClassFilter===g.class;
+        const cardClass=g.systemOnly?'issue-filter-card':`issue-filter-card clickable ${active?'active':''}`;
+        const attrs=g.systemOnly?'':` role="button" tabindex="0" data-issue-class="${esc(g.class)}"`;
+        return `<div class="${cardClass}"${attrs}>
+          <div class="issue-filter-top">
+            <span class="issue-sev ${selectedIssueSeverity}"></span>
+            <span class="issue-label">${esc(g.label)}</span>
+            <span class="issue-count mono">${esc(fmtFull(g.count))}</span>
+          </div>
+          <div class="issue-detail">${esc(detail)}${msg?' - '+esc(msg):''}</div>
+          <div class="issue-filter-foot"><span class="mono">${esc(g.latestAt?fmtShort(g.latestAt):'-')}</span>${g.systemOnly?'':`<span>${esc(t('action.show_matching_requests'))}</span>`}</div>
+        </div>`;
+      }).join('')}</div>`;
+    list.querySelectorAll('.issue-filter-card[data-issue-class]').forEach(row=>{
+      const open=()=>showReqForIssueClass(row.dataset.issueClass);
+      row.addEventListener('click',open);
+      row.addEventListener('keydown',e=>{
+        if(e.key==='Enter'||e.key===' '){e.preventDefault();open();}
+      });
+    });
+  };
+  if(overview) overview.querySelectorAll('[data-issue-severity]').forEach(card=>{
+    const open=()=>{
+      const sev=card.dataset.issueSeverity;
+      selectedIssueSeverity=selectedIssueSeverity===sev?'':sev;
+      currentIssueClassFilter='';
+      closeRequestDetails();
+      loadIssues();
+    };
+    card.addEventListener('click',open);
+  });
+  renderClassPanel();
+  list.querySelectorAll('.issue-filter-card[data-issue]').forEach(row=>{
+    const open=()=>showReqForIssue(items[Number(row.dataset.issue||0)]);
+    row.addEventListener('click',open);
+    row.addEventListener('keydown',e=>{
+      if(e.key==='Enter'||e.key===' '){e.preventDefault();open();}
+    });
   });
 }
 
-function activateBucket(container, svg, el, event) {
-  container.querySelectorAll('.chart-bucket.is-active').forEach(active => {
-    if (active !== el) active.classList.remove('is-active');
-  });
-  if (svg) svg.classList.add('chart-active');
-  el.classList.add('is-active');
-  showTooltip(event, el.dataset.tooltip, el);
-}
-
-function deactivateBucket(container, svg, el) {
-  el.classList.remove('is-active');
-  if (svg && !container.querySelector('.chart-bucket.is-active')) svg.classList.remove('chart-active');
-  hideTooltip();
-}
-
-function showTooltip(event, html, anchor) {
-  const tooltip = $('chart-tooltip');
-  tooltip.innerHTML = html || '';
-  tooltip.classList.remove('hidden');
-  moveTooltip(event, anchor);
-}
-
-function moveTooltip(event, anchor) {
-  const tooltip = $('chart-tooltip');
-  if (!tooltip || tooltip.classList.contains('hidden')) return;
-  const pad = 12;
-  const rect = tooltip.getBoundingClientRect();
-  const target = anchor || event.currentTarget;
-  const targetRect = target && target.getBoundingClientRect ? target.getBoundingClientRect() : null;
-  const clientX = targetRect ? targetRect.left + targetRect.width / 2 : Number.isFinite(event.clientX) ? event.clientX : window.innerWidth / 2;
-  const clientY = targetRect ? targetRect.top + 8 : Number.isFinite(event.clientY) ? event.clientY : window.innerHeight / 2;
-  let x = clientX - rect.width / 2;
-  let y = clientY - rect.height - 10;
-  if (y < pad && targetRect) y = targetRect.bottom + 10;
-  if (x + rect.width + pad > window.innerWidth) x = window.innerWidth - rect.width - pad;
-  if (y + rect.height + pad > window.innerHeight) y = window.innerHeight - rect.height - pad;
-  tooltip.style.left = Math.max(pad, x) + 'px';
-  tooltip.style.top = Math.max(pad, y) + 'px';
-}
-
-function hideTooltip() {
-  const tooltip = $('chart-tooltip');
-  if (tooltip) tooltip.classList.add('hidden');
-}
-
+/* --- Health / Diagnostics ---------------------------------- */
 async function loadHealth() {
-  const data = await fetchJSON('health');
-  $('queue-depth').textContent = formatFull(data.queue_depth);
-  $('dropped-events').textContent = formatFull(data.dropped_events);
-  $('parse-errors').textContent = formatFull(data.parse_errors);
-  $('db-errors').textContent = formatFull(data.db_write_errors);
-
-  const unhealthy = Number(data.dropped_events || 0) + Number(data.parse_errors || 0) + Number(data.db_write_errors || 0);
-  if (data.capture_disabled || !data.metering_enabled) {
-    $('health-summary').innerHTML = `<span class="badge warn">${esc(t('badge.capture_off'))}</span>`;
-  } else if (unhealthy > 0 || Number(data.queue_depth || 0) > 0) {
-    $('health-summary').innerHTML = `<span class="badge warn">${esc(t('badge.attention'))}</span>`;
-  } else {
-    $('health-summary').innerHTML = `<span class="badge ok">${esc(t('badge.healthy'))}</span>`;
+  const data=await fetchJSON('health');
+  latestHealth=data;
+  setText('queue-depth',fmtFull(data.queue_depth));
+  setText('dropped-events',fmtFull(data.dropped_events));
+  setText('parse-errors',fmtFull(data.parse_errors));
+  setText('db-errors',fmtFull(data.db_write_errors));
+  const hasIssue=Number(data.dropped_events||0)>0||Number(data.parse_errors||0)>0||Number(data.db_write_errors||0)>0;
+  const hs=$('health-summary');
+  if(hs) {
+    if(data.capture_disabled||!data.metering_enabled) hs.innerHTML=`<span class="badge warn">${esc(t('badge.capture_off'))}</span>`;
+    else if(hasIssue) hs.innerHTML=`<span class="badge warn">${esc(t('badge.attention'))}</span>`;
+    else hs.innerHTML=`<span class="badge ok">${esc(t('badge.healthy'))}</span>`;
   }
 }
 
 async function loadErrors() {
-  const data = await fetchJSON('errors?range=' + encodeURIComponent(getRange()) + '&nonzero=true');
-  const rows = Array.isArray(data.timeline) ? data.timeline : [];
-  const source = data.source || 'unknown';
-  const bucketCount = Number(data.bucket_count || rows.length || 0);
-  const nonzeroBucketCount = Number(data.nonzero_bucket_count || rows.length || 0);
-  $('errors-summary').textContent = t('summary.error_buckets', { source, buckets: bucketCount, nonzero: nonzeroBucketCount });
-
-  if (!rows.length) {
+  const data=await fetchJSON('errors?range='+encodeURIComponent(getRange())+'&nonzero=true');
+  const rows=Array.isArray(data.timeline)?data.timeline:[];
+  if(!rows.length){
     $('errors-table-wrap').classList.add('hidden');
     $('errors-state').classList.remove('hidden');
-    $('errors-state').innerHTML = `<div class="state-box"><strong>${esc(t('state.no_errors'))}</strong>${esc(t('state.all_error_buckets_zero'))}</div>`;
+    $('errors-state').innerHTML=`<div class="empty-state"><strong>${esc(t('state.no_errors'))}</strong>${esc(t('state.all_error_buckets_zero'))}</div>`;
     return;
   }
-
   $('errors-state').classList.add('hidden');
   $('errors-table-wrap').classList.remove('hidden');
-  $('errors-table').innerHTML = rows.map(r => `<tr>
-    <td class="mono">${esc(formatTime(r.timestamp))}</td>
-    <td class="numeric mono">${formatFull(r.count)}</td>
-    <td class="numeric mono">${formatFull(r.parse_errors)}</td>
-    <td class="numeric mono">${formatFull(r.db_errors)}</td>
-    <td class="numeric mono">${formatFull(r.dropped_events)}</td>
-  </tr>`).join('');
+  $('errors-table').innerHTML=rows.map(r=>`<tr><td class="mono">${esc(fmtTime(r.timestamp))}</td><td class="numeric mono">${fmtFull(r.count)}</td><td class="numeric mono">${fmtFull(r.parse_errors)}</td><td class="numeric mono">${fmtFull(r.db_errors)}</td><td class="numeric mono">${fmtFull(r.dropped_events)}</td></tr>`).join('');
 }
 
+/* --- Refresh ----------------------------------------------- */
 async function refresh() {
-  if (isRefreshing) return;
-  isRefreshing = true;
-  const btn = $('refresh-btn');
-  btn.textContent = t('action.loading');
-  btn.disabled = true;
-
+  if(isRefreshing)return; isRefreshing=true;
+  setRefreshing(true);
   try {
-    const tasks = [];
-    if (!metadata) {
-      tasks.push(['metadata', loadMetadata]);
-    }
-    tasks.push(
-      ['summary', loadSummary],
-      ['activity', loadActivity],
-      ['models', loadModels],
-      ['keys', loadKeys],
-      ['timeseries', loadTimeseries],
-      ['health', loadHealth],
-      ['errors', loadErrors]
-    );
-    if (requestsExpanded) {
-      tasks.push(['requests', loadRequests]);
-    }
-
-    const settled = await Promise.allSettled(tasks.map(([name, fn]) => fn().then(() => name)));
-    const failures = settled
-      .map((result, index) => ({ result, name: tasks[index][0] }))
-      .filter(item => item.result.status === 'rejected')
-      .map(item => ({ name: item.name, error: item.result.reason }));
-
-    if (failures.length === 0) {
-      setStatus('live', t('status.dashboard_live'), t('status.all_panels'));
-    } else if (failures.length === tasks.length) {
-      setStatus('error', t('status.refresh_failed'), failures.map(f => `${f.name}: ${f.error.message}`).join(' | '));
-      markFailedPanels(failures);
-    } else {
-      setStatus('partial', t('status.partial_refresh'), failures.map(f => `${f.name}: ${f.error.message}`).join(' | '));
-      markFailedPanels(failures);
-    }
-
+    const tasks=[]; if(!metadata) tasks.push(['metadata',loadMetadata]);
+    tasks.push(['overview',loadOverview],['issues',loadIssues],['activity',loadActivity],['models',loadModels],['keys',loadKeys],['timeseries',loadTimeseries],['errors',loadErrors],['health',loadHealth]);
+    if(requestsExpanded) tasks.push(['requests',loadRequests]);
+    const settled=await Promise.allSettled(tasks.map(([,fn])=>fn()));
+    const failures=settled.map((res,i)=>({res,name:tasks[i][0]})).filter(x=>x.res.status==='rejected').map(x=>({name:x.name,error:x.res.reason}));
+    if(!failures.length) setStatus('live',t('status.dashboard_live'),t('status.all_panels'));
+    else if(failures.length===tasks.length) setStatus('error',t('status.refresh_failed'),failures.map(f=>f.name).join(', '));
+    else setStatus('partial',t('status.partial_refresh'),failures.map(f=>f.name).join(', '));
+    markFailed(failures);
     setLastRefresh(new Date());
-  } finally {
-    btn.textContent = t('action.refresh');
-    btn.disabled = false;
-    isRefreshing = false;
-  }
+  } finally { setRefreshing(false); isRefreshing=false; }
+}
+function markFailed(failures) {
+  const fm=new Map(failures.map(f=>[f.name,f.error]));
+  if(fm.has('models')){const mt=$('models-table');if(mt)mt.innerHTML=errorRow(7,fm.get('models').message);const dc=$('model-distribution-chart');if(dc)dc.innerHTML=`<div class="empty-state error-text">${esc(fm.get('models').message)}</div>`;}
+  if(fm.has('keys'))$('keys-table').innerHTML=errorRow(5,fm.get('keys').message);
+  if(fm.has('requests'))$('requests-table').innerHTML=errorRow(11,fm.get('requests').message);
+  if(fm.has('issues')){$('issues-state').classList.remove('hidden');$('issues-state').innerHTML=`<div class="issues-empty error-text">${esc(fm.get('issues').message)}</div>`;const io=$('issues-overview');if(io)io.innerHTML='';$('issues-list').innerHTML=`<div class="issue-class-placeholder">${esc(t('issues.select_severity_hint'))}</div>`;}
+  if(fm.has('timeseries')){const el=$('usage-trend-chart');if(el)el.innerHTML=`<div class="empty-state error-text">${esc(fm.get('timeseries').message)}</div>`;}
 }
 
-function markFailedPanels(failures) {
-  const failed = new Map(failures.map(f => [f.name, f.error]));
-  if (failed.has('models')) $('models-table').innerHTML = errorRow(7, failed.get('models').message);
-  if (failed.has('keys')) $('keys-table').innerHTML = errorRow(5, failed.get('keys').message);
-  if (failed.has('requests')) $('requests-table').innerHTML = errorRow(11, failed.get('requests').message);
-  if (failed.has('errors')) {
-    $('errors-table-wrap').classList.add('hidden');
-    $('errors-state').classList.remove('hidden');
-    $('errors-state').innerHTML = `<div class="state-box error-line">${esc(failed.get('errors').message)}</div>`;
-  }
-  if (failed.has('timeseries')) {
-    $('tokens-chart').innerHTML = `<div class="empty error-line">${esc(failed.get('timeseries').message)}</div>`;
-    $('requests-chart').innerHTML = `<div class="empty error-line">${esc(failed.get('timeseries').message)}</div>`;
-  }
-}
-
-function configureAutoRefresh() {
-  const enabled = $('auto-refresh').checked;
-  if (autoRefreshTimer) {
-    clearInterval(autoRefreshTimer);
-    autoRefreshTimer = null;
-  }
-  if (enabled) {
-    autoRefreshTimer = setInterval(refresh, 30000);
-  }
-}
-
-async function reloadRequestsFromFilter() {
-  if (!requestsExpanded) return;
-  try {
-    await loadRequests();
-  } catch (err) {
-    $('requests-table').innerHTML = errorRow(11, err.message);
-    setStatus('partial', t('status.requests_failed'), err.message);
-  }
-}
-
+/* --- Toggle requests / nav --------------------------------- */
 async function toggleRequests() {
-  requestsExpanded = !requestsExpanded;
-  $('request-details').classList.toggle('hidden', !requestsExpanded);
-  $('toggle-requests').textContent = requestsExpanded ? t('action.hide_requests') : t('action.show_requests');
-  if (requestsExpanded) {
-    $('requests-table').innerHTML = emptyRow(11, t('state.loading_requests'), t('state.fetching_requests'));
-    await reloadRequestsFromFilter();
+  const next=!requestsExpanded;
+  if(currentIssueClassFilter){
+    currentIssueClassFilter='';
+    loadIssues();
   }
+  requestsExpanded=next;
+  $('request-details').classList.toggle('hidden',!requestsExpanded);
+  updateToggleLabels();
+  if(requestsExpanded){$('requests-table').innerHTML=emptyRow(11,t('state.loading_requests'));await reloadReqFilter();}
 }
-
-function debounce(fn, wait) {
-  let timer;
-  return function debounced() {
-    clearTimeout(timer);
-    timer = setTimeout(fn, wait);
-  };
+function updateToggleLabels() {
+  document.querySelectorAll('[data-toggle-requests]').forEach(b=>{b.textContent=requestsExpanded?t('action.hide_requests'):t('action.show_requests');});
 }
-
-function refreshFromFocus() {
-  if (Date.now() - lastRefreshAt < 10000) return;
-  refresh();
+function closeRequestDetails() {
+  requestsExpanded=false;
+  const details=$('request-details');
+  if(details) details.classList.add('hidden');
+  const table=$('requests-table');
+  if(table) table.innerHTML=emptyRow(11,t('state.not_loaded'));
+  updateToggleLabels();
 }
-
-function rerenderTimeseriesCharts() {
-  if (!lastTimeseriesRows.length) return;
-  renderTokensChart(lastTimeseriesRows, lastTimeseriesBucket);
-  renderRequestsChart(lastTimeseriesRows, lastTimeseriesBucket);
+async function reloadReqFilter() { if(!requestsExpanded)return; try{await loadRequests();}catch(e){$('requests-table').innerHTML=errorRow(11,e.message);} }
+function setSelectValue(sel,val,label){if(!sel||!val)return;const sv=String(val);if(![...sel.options].some(o=>o.value===sv)){const o=document.createElement('option');o.value=sv;o.textContent=label||sv;sel.appendChild(o);}sel.value=sv;}
+async function showReqForIssue(item) {
+  if(!item||item.system)return;
+  currentIssueClassFilter=item.class||'';
+  const st=Number(item.status||0);
+  $('filter-status').value=st>=500?'5xx':st>=400?'4xx':'';
+  $('filter-model').value='';$('filter-endpoint').value='';
+  setSelectValue($('filter-model'),item.model||'unidentified',modelName(item.model||'unidentified'));
+  if(item.endpoint)setSelectValue($('filter-endpoint'),item.endpoint,item.endpoint);
+  if(!requestsExpanded){requestsExpanded=true;$('request-details').classList.remove('hidden');updateToggleLabels();}
+  $('requests-table').innerHTML=emptyRow(11,t('state.loading_requests'));
+  await reloadReqFilter();
+  $('request-details').scrollIntoView({block:'start',behavior:'smooth'});
 }
+async function showReqForIssueClass(errorClass) {
+  if(!errorClass)return;
+  if(currentIssueClassFilter===errorClass && requestsExpanded){
+    currentIssueClassFilter='';
+    closeRequestDetails();
+    loadIssues();
+    return;
+  }
+  currentIssueClassFilter=errorClass;
+  $('filter-status').value='';
+  $('filter-model').value='';
+  $('filter-endpoint').value='';
+  if(!requestsExpanded){requestsExpanded=true;$('request-details').classList.remove('hidden');updateToggleLabels();}
+  $('requests-table').innerHTML=emptyRow(11,t('state.loading_requests'));
+  await reloadReqFilter();
+  loadIssues();
+  $('request-details').scrollIntoView({block:'start',behavior:'smooth'});
+}
+function bindNav() {
+  const links=document.querySelectorAll('.nav-link');
+  const setA=item=>{links.forEach(l=>l.classList.toggle('active',l===item));};
+  links.forEach(l=>l.addEventListener('click',()=>setA(l)));
+  const cur=[...links].find(l=>l.hash&&l.hash===location.hash);
+  if(cur)setA(cur);
+}
+function configAutoRefresh() {
+  if(autoRefreshTimer){clearInterval(autoRefreshTimer);autoRefreshTimer=null;}
+  if($('auto-refresh').checked) autoRefreshTimer=setInterval(refresh,30000);
+}
+function debounce(fn,ms){let t;return()=>{clearTimeout(t);t=setTimeout(fn,ms);};}
+function rerenderCharts(){renderUsagePanel();}
 
-document.addEventListener('DOMContentLoaded', async () => {
-  applyStaticI18N();
-  applyMetadata();
-  setStatus('live', t('status.ready'), t('status.waiting'));
+// legacy stubs for removed sections
+function renderOpsBoard() {}
+function renderCaptureDiagnosticSummary() {}
+function renderHealthCard() {}
+function captureSnapshot() { return latestHealth || {}; }
+
+/* --- Init -------------------------------------------------- */
+document.addEventListener('DOMContentLoaded', async ()=>{
+  applyTheme(currentTheme);
+  applyI18N(); applyMeta();
+  setStatus('live',t('status.ready'),t('status.waiting'));
   setLastRefresh(null);
-  $('language-select').addEventListener('change', event => setLanguage(event.target.value));
-  $('refresh-btn').addEventListener('click', refresh);
-  $('range-select').addEventListener('change', refresh);
-  $('filter-status').addEventListener('change', reloadRequestsFromFilter);
-  $('filter-model').addEventListener('change', reloadRequestsFromFilter);
-  $('filter-endpoint').addEventListener('change', reloadRequestsFromFilter);
-  $('toggle-requests').addEventListener('click', toggleRequests);
-  $('auto-refresh').addEventListener('change', configureAutoRefresh);
-  window.addEventListener('focus', debounce(refreshFromFocus, 2000));
-  window.addEventListener('resize', debounce(rerenderTimeseriesCharts, 160));
+  $('language-select').addEventListener('change',e=>setLang(e.target.value));
+  $('refresh-btn').addEventListener('click',refresh);
+  $('range-select').addEventListener('change',()=>{resetIssueSelection();refresh();});
+  $('filter-status').addEventListener('change',()=>{currentIssueClassFilter='';reloadReqFilter();});
+  $('filter-model').addEventListener('change',()=>{currentIssueClassFilter='';reloadReqFilter();});
+  $('filter-endpoint').addEventListener('change',()=>{currentIssueClassFilter='';reloadReqFilter();});
+  document.querySelectorAll('[data-usage-mode]').forEach(b=>b.addEventListener('click',()=>setUsageMode(b.dataset.usageMode)));
+  document.querySelectorAll('[data-toggle-requests]').forEach(b=>b.addEventListener('click',toggleRequests));
+  $('auto-refresh').addEventListener('change',configAutoRefresh);
+  const tb=$('theme-toggle'); if(tb)tb.addEventListener('click',toggleTheme);
+  window.addEventListener('focus',debounce(()=>{if(Date.now()-lastRefreshAt<10000)return;refresh();},2000));
+  window.addEventListener('resize',debounce(rerenderCharts,160));
+  bindNav();
   await refresh();
 });
-

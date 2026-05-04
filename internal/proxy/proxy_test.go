@@ -154,6 +154,17 @@ func TestStreamFromJSON(t *testing.T) {
 	}
 }
 
+func TestRequestMetadataFromTruncatedPrefix(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4","stream":true,"messages":[{"role":"user","content":"` + strings.Repeat("x", 10*1024))
+	prefix := body[:4096]
+	if got := extractModel(prefix); got != "gpt-5.4" {
+		t.Fatalf("extractModel from truncated prefix = %q, want gpt-5.4", got)
+	}
+	if !streamFromJSON(prefix) {
+		t.Fatal("streamFromJSON should read stream:true before truncated message content")
+	}
+}
+
 func TestBearerToken(t *testing.T) {
 	tests := []struct {
 		auth string
@@ -360,6 +371,46 @@ func TestProxyStreaming_ByteTransparent(t *testing.T) {
 
 	if rec.Body.String() != rawLines {
 		t.Errorf("SSE response modified: got %q, want %q", rec.Body.String(), rawLines)
+	}
+}
+
+func TestProxyStreaming_ErrorResponseClassifiedAfterForwarding(t *testing.T) {
+	streamBody := "data: {\"type\":\"message_start\"}\n\n" +
+		"data: {\"error\":{\"message\":\"Quota exhausted\",\"type\":\"insufficient_quota\",\"code\":\"insufficient_quota\"}}\n\n" +
+		"data: [DONE]\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(429)
+		w.Write([]byte(streamBody))
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o","stream":true}`))
+	req.Header.Set("Accept", "text/event-stream")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != 429 {
+		t.Fatalf("status = %d, want 429", rec.Code)
+	}
+	if rec.Body.String() != streamBody {
+		t.Fatal("streaming error response body was modified")
+	}
+	if len(rw.events) == 0 {
+		t.Fatal("no usage event recorded")
+	}
+	ev := lastEvent(rw)
+	if ev.ErrorClass != "quota_exhausted" {
+		t.Fatalf("error_class = %q, want quota_exhausted", ev.ErrorClass)
+	}
+	if ev.ErrorMessage != "Quota exhausted" {
+		t.Fatalf("error_message = %q, want Quota exhausted", ev.ErrorMessage)
+	}
+	if ev.ModelRequested != "gpt-4o" {
+		t.Fatalf("model_requested = %q, want gpt-4o", ev.ModelRequested)
 	}
 }
 

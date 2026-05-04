@@ -169,6 +169,55 @@ func TestAPIResponsesAreNotCacheable(t *testing.T) {
 	}
 }
 
+func TestAPIOverviewAndIssuesAreRoutedNoStore(t *testing.T) {
+	s, database := newTestServer(t, "/metering")
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := database.InsertBatch([]db.UsageRecord{
+		{
+			CreatedAt: now.Add(-10 * time.Minute).Format(time.RFC3339),
+			Endpoint:  "/v1/chat/completions", Method: "POST", Status: 429,
+			LatencyMs: 200, TTFBMs: 40, ModelRequested: "gpt-4o",
+			ErrorClass: "quota_exhausted", ErrorMessage: "Quota exhausted",
+		},
+	}); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/metering/api/overview?range=7d", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("overview HTTP %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store, no-cache, must-revalidate" {
+		t.Fatalf("overview Cache-Control = %q, want no-store", got)
+	}
+	var overview event.OverviewReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &overview); err != nil {
+		t.Fatalf("unmarshal overview: %v", err)
+	}
+	if overview.Range != "7d" || overview.Recent1h.Data == nil {
+		t.Fatalf("overview = %+v, want range=7d with recent_1h data", overview)
+	}
+
+	req = httptest.NewRequest("GET", "/metering/api/issues?range=24h", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("issues HTTP %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store, no-cache, must-revalidate" {
+		t.Fatalf("issues Cache-Control = %q, want no-store", got)
+	}
+	var issues event.IssuesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &issues); err != nil {
+		t.Fatalf("unmarshal issues: %v", err)
+	}
+	if issues.Total != 1 || len(issues.Items) != 1 || issues.Items[0].Class != "quota_exhausted" {
+		t.Fatalf("issues = %+v, want quota_exhausted item", issues)
+	}
+}
+
 func TestIndexRequiresRevalidation(t *testing.T) {
 	s, _ := newTestServer(t, "/metering")
 	req := httptest.NewRequest("GET", "/metering", nil)
@@ -410,6 +459,32 @@ func TestAPIRequestsStatusCategories(t *testing.T) {
 				t.Fatalf("status %s row %d = %d, want %d", tc.status, i, rows[i].Status, want)
 			}
 		}
+	}
+}
+
+func TestAPIRequestsErrorClassFilter(t *testing.T) {
+	s, database := newTestServer(t, "/metering")
+	now := time.Now().UTC()
+	records := []db.UsageRecord{
+		{CreatedAt: now.Add(-time.Hour).Format(time.RFC3339), Endpoint: "/v1/responses", Method: "POST", Status: 429, ErrorClass: "quota_exhausted", ErrorMessage: "quota"},
+		{CreatedAt: now.Add(-time.Hour).Format(time.RFC3339), Endpoint: "/v1/responses", Method: "POST", Status: 401, ErrorClass: "auth_failed", ErrorMessage: "auth"},
+	}
+	if err := database.InsertBatch(records); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/metering/api/requests?range=24h&error_class=quota_exhausted", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("HTTP %d, want 200", rec.Code)
+	}
+	var rows []event.RequestReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ErrorClass != "quota_exhausted" {
+		t.Fatalf("rows = %+v, want one quota_exhausted row", rows)
 	}
 }
 

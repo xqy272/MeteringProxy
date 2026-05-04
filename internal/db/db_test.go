@@ -124,7 +124,7 @@ func TestMigrateAddsMissingColumnsToLegacyDB(t *testing.T) {
 		t.Fatalf("InsertHealthMetric after legacy migration: %v", err)
 	}
 
-	rows, err := d.Requests(10, 0, 0, "", "", time.Time{})
+	rows, err := d.Requests(10, 0, 0, "", "", "", time.Time{})
 	if err != nil {
 		t.Fatalf("Requests after legacy migration: %v", err)
 	}
@@ -199,8 +199,8 @@ func TestModelsAndKeysTreatEmptyAsUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Models: %v", err)
 	}
-	if len(models) != 1 || models[0].Model != "unknown" {
-		t.Fatalf("models = %+v, want one unknown row", models)
+	if len(models) != 1 || models[0].Model != "unidentified" {
+		t.Fatalf("models = %+v, want one unidentified row", models)
 	}
 
 	keys, err := d.Keys(time.Now().Add(-24 * time.Hour))
@@ -209,6 +209,63 @@ func TestModelsAndKeysTreatEmptyAsUnknown(t *testing.T) {
 	}
 	if len(keys) != 1 || keys[0].KeyHash != "unknown" {
 		t.Fatalf("keys = %+v, want one unknown row", keys)
+	}
+}
+
+func TestRequestsModelFilterUsesEffectiveModel(t *testing.T) {
+	d := newTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := d.InsertBatch([]UsageRecord{
+		{CreatedAt: now.Add(-10 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/chat/completions", Method: "POST", Status: 429, LatencyMs: 10, ModelRequested: "gpt-4o"},
+		{CreatedAt: now.Add(-9 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/chat/completions", Method: "POST", Status: 200, LatencyMs: 10, ModelReturned: "gpt-4o"},
+	}); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	rows, err := d.Requests(10, 0, 0, "gpt-4o", "", "", now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("Requests: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %+v, want both returned and requested model rows", rows)
+	}
+}
+
+func TestIssuesAggregatesByEffectiveModelAndUsesLatestSample(t *testing.T) {
+	d := newTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := d.InsertBatch([]UsageRecord{
+		{
+			CreatedAt: now.Add(-30 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/chat/completions", Method: "POST",
+			Status: 429, LatencyMs: 10, APIKeyHash: "key-a", ModelRequested: "gpt-4o",
+			ErrorClass: "rate_limited", ErrorCode: "old", ErrorMessage: "old sample", RequestID: "req-old",
+		},
+		{
+			CreatedAt: now.Add(-20 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/chat/completions", Method: "POST",
+			Status: 429, LatencyMs: 10, APIKeyHash: "key-a", ModelRequested: "gpt-4o",
+			ErrorClass: "rate_limited", ErrorCode: "new", ErrorMessage: "new sample", RequestID: "req-new",
+		},
+		{
+			CreatedAt: now.Add(-25 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/responses", Method: "POST",
+			Status: 401, LatencyMs: 10, APIKeyHash: "key-b", ModelRequested: "gpt-5.4",
+			ErrorClass: "auth_failed", ErrorMessage: "bad key", RequestID: "req-auth",
+		},
+	}); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	rows := d.Issues(now.Add(-time.Hour), 20)
+	if len(rows) != 2 {
+		t.Fatalf("issues = %+v, want 2 grouped rows", rows)
+	}
+	if rows[0].Class != "auth_failed" {
+		t.Fatalf("first issue class = %q, want auth_failed sorted before warning", rows[0].Class)
+	}
+	if rows[1].Class != "rate_limited" || rows[1].Count != 2 || rows[1].Message != "new sample" || rows[1].RequestID != "req-new" {
+		t.Fatalf("rate limit issue = %+v, want count=2 with latest sample", rows[1])
+	}
+	if rows[1].Model != "gpt-4o" || rows[1].ModelSource != "requested" {
+		t.Fatalf("rate limit model attribution = %+v, want requested gpt-4o", rows[1])
 	}
 }
 
@@ -263,7 +320,7 @@ func TestRequests_StatusCategories(t *testing.T) {
 	insertRecord(t, d, ts(-30*time.Minute), "/v1/chat/completions", 500, "gpt-4o", 0, 0, 0)
 	insertRecord(t, d, ts(-15*time.Minute), "/v1/chat/completions", 502, "gpt-4o", 0, 0, 0)
 
-	all, err := d.Requests(100, 0, 0, "", "", time.Time{})
+	all, err := d.Requests(100, 0, 0, "", "", "", time.Time{})
 	if err != nil {
 		t.Fatalf("Requests(all): %v", err)
 	}
@@ -271,7 +328,7 @@ func TestRequests_StatusCategories(t *testing.T) {
 		t.Errorf("all: got %d rows, want 7", len(all))
 	}
 
-	success, err := d.Requests(100, 200, 300, "", "", time.Time{})
+	success, err := d.Requests(100, 200, 300, "", "", "", time.Time{})
 	if err != nil {
 		t.Fatalf("Requests(success): %v", err)
 	}
@@ -284,7 +341,7 @@ func TestRequests_StatusCategories(t *testing.T) {
 		}
 	}
 
-	clientErrors, err := d.Requests(100, 400, 500, "", "", time.Time{})
+	clientErrors, err := d.Requests(100, 400, 500, "", "", "", time.Time{})
 	if err != nil {
 		t.Fatalf("Requests(4xx): %v", err)
 	}
@@ -297,7 +354,7 @@ func TestRequests_StatusCategories(t *testing.T) {
 		}
 	}
 
-	serverErrors, err := d.Requests(100, 500, 0, "", "", time.Time{})
+	serverErrors, err := d.Requests(100, 500, 0, "", "", "", time.Time{})
 	if err != nil {
 		t.Fatalf("Requests(5xx): %v", err)
 	}
@@ -338,7 +395,7 @@ func TestRequests_RangeFilter(t *testing.T) {
 	}
 
 	since24h := now.Add(-24 * time.Hour)
-	rows, err := d.Requests(100, 0, 0, "", "", since24h)
+	rows, err := d.Requests(100, 0, 0, "", "", "", since24h)
 	if err != nil {
 		t.Fatalf("Requests with 24h range: %v", err)
 	}
@@ -350,7 +407,7 @@ func TestRequests_RangeFilter(t *testing.T) {
 	}
 
 	since7d := now.Add(-7 * 24 * time.Hour)
-	rowsAll, err := d.Requests(100, 0, 0, "", "", since7d)
+	rowsAll, err := d.Requests(100, 0, 0, "", "", "", since7d)
 	if err != nil {
 		t.Fatalf("Requests with 7d range: %v", err)
 	}
@@ -358,7 +415,7 @@ func TestRequests_RangeFilter(t *testing.T) {
 		t.Errorf("7d range: got %d rows, want 2 (both records)", len(rowsAll))
 	}
 
-	rowsZeroSince, err := d.Requests(100, 0, 0, "", "", time.Time{})
+	rowsZeroSince, err := d.Requests(100, 0, 0, "", "", "", time.Time{})
 	if err != nil {
 		t.Fatalf("Requests with zero since: %v", err)
 	}

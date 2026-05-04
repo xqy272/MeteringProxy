@@ -45,6 +45,13 @@ type Event struct {
 	CaptureOutcome string
 	CaptureReason  string
 
+	ErrorClass            string
+	ErrorType             string
+	ErrorCode             string
+	ErrorParam            string
+	ErrorMessage          string
+	ErrorMessageTruncated bool
+
 	RequestBytes  int64
 	ResponseBytes int64
 	Error         string

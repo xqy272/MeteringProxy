@@ -44,6 +44,13 @@ type UsageRecord struct {
 	BillableUnit      string
 	CaptureOutcome    string
 	CaptureReason     string
+
+	ErrorClass            string
+	ErrorType             string
+	ErrorCode             string
+	ErrorParam            string
+	ErrorMessage          string
+	ErrorMessageTruncated bool
 }
 
 type SummaryRow struct {
@@ -59,7 +66,9 @@ type SummaryRow struct {
 
 type ModelRow struct {
 	Model           string `json:"model"`
+	ModelSource     string `json:"model_source"`
 	RequestCount    int64  `json:"request_count"`
+	FailedCount     int64  `json:"failed_count"`
 	InputTokens     int64  `json:"input_tokens"`
 	OutputTokens    int64  `json:"output_tokens"`
 	ReasoningTokens int64  `json:"reasoning_tokens"`
@@ -89,6 +98,15 @@ type TimeseriesRow struct {
 	AvgTTFBMs       int64  `json:"avg_ttfb_ms"`
 }
 
+type ModelTimeseriesRow struct {
+	Timestamp       string `json:"timestamp"`
+	Model           string `json:"model"`
+	InputTokens     int64  `json:"input_tokens"`
+	OutputTokens    int64  `json:"output_tokens"`
+	ReasoningTokens int64  `json:"reasoning_tokens"`
+	CachedTokens    int64  `json:"cached_tokens"`
+}
+
 type ActivityRow struct {
 	SampleSize          int64   `json:"sample_size"`
 	SuccessCount        int64   `json:"success_count"`
@@ -109,32 +127,38 @@ type ActivityRow struct {
 }
 
 type RequestRow struct {
-	ID              int64  `json:"id"`
-	CreatedAt       string `json:"created_at"`
-	RequestID       string `json:"request_id"`
-	Endpoint        string `json:"endpoint"`
-	Method          string `json:"method"`
-	Status          int    `json:"status"`
-	LatencyMs       int64  `json:"latency_ms"`
-	TTFBMs          int64  `json:"ttfb_ms"`
-	Stream          bool   `json:"stream"`
-	ClientIPHash    string `json:"client_ip_hash"`
-	APIKeyHash      string `json:"api_key_hash"`
-	ModelRequested  string `json:"model_requested"`
-	ModelReturned   string `json:"model_returned"`
-	InputTokens     int64  `json:"input_tokens"`
-	OutputTokens    int64  `json:"output_tokens"`
-	ReasoningTokens int64  `json:"reasoning_tokens"`
-	CachedTokens    int64  `json:"cached_tokens"`
-	TotalTokens     int64  `json:"total_tokens"`
-	RequestBytes    int64  `json:"request_bytes"`
-	ResponseBytes   int64  `json:"response_bytes"`
-	Error           string `json:"error"`
-	EndpointProfile string `json:"endpoint_profile"`
-	CaptureMode     string `json:"capture_mode"`
-	MeteringKind    string `json:"metering_kind"`
-	CaptureOutcome  string `json:"capture_outcome"`
-	CaptureReason   string `json:"capture_reason"`
+	ID                    int64  `json:"id"`
+	CreatedAt             string `json:"created_at"`
+	RequestID             string `json:"request_id"`
+	Endpoint              string `json:"endpoint"`
+	Method                string `json:"method"`
+	Status                int    `json:"status"`
+	LatencyMs             int64  `json:"latency_ms"`
+	TTFBMs                int64  `json:"ttfb_ms"`
+	Stream                bool   `json:"stream"`
+	ClientIPHash          string `json:"client_ip_hash"`
+	APIKeyHash            string `json:"api_key_hash"`
+	ModelRequested        string `json:"model_requested"`
+	ModelReturned         string `json:"model_returned"`
+	InputTokens           int64  `json:"input_tokens"`
+	OutputTokens          int64  `json:"output_tokens"`
+	ReasoningTokens       int64  `json:"reasoning_tokens"`
+	CachedTokens          int64  `json:"cached_tokens"`
+	TotalTokens           int64  `json:"total_tokens"`
+	RequestBytes          int64  `json:"request_bytes"`
+	ResponseBytes         int64  `json:"response_bytes"`
+	Error                 string `json:"error"`
+	EndpointProfile       string `json:"endpoint_profile"`
+	CaptureMode           string `json:"capture_mode"`
+	MeteringKind          string `json:"metering_kind"`
+	CaptureOutcome        string `json:"capture_outcome"`
+	CaptureReason         string `json:"capture_reason"`
+	ErrorClass            string `json:"error_class"`
+	ErrorType             string `json:"error_type"`
+	ErrorCode             string `json:"error_code"`
+	ErrorParam            string `json:"error_param"`
+	ErrorMessage          string `json:"error_message"`
+	ErrorMessageTruncated bool   `json:"error_message_truncated"`
 }
 
 type HealthRow struct {
@@ -154,13 +178,53 @@ type ErrorTimelineRow struct {
 	DroppedEvents int64  `json:"dropped_events"`
 }
 
+type OverviewSection struct {
+	Data  interface{} `json:"data"`
+	Error string      `json:"error"`
+}
+
+type OverviewRow struct {
+	Range    string          `json:"range"`
+	Selected OverviewSection `json:"selected"`
+	Recent1h OverviewSection `json:"recent_1h"`
+	Capture  OverviewSection `json:"capture"`
+	Cost     OverviewSection `json:"cost"`
+}
+
+type IssueRow struct {
+	Class       string `json:"class"`
+	Label       string `json:"label"`
+	Count       int64  `json:"count"`
+	Severity    string `json:"severity"`
+	LatestAt    string `json:"latest_at"`
+	Status      int    `json:"status"`
+	Endpoint    string `json:"endpoint"`
+	Model       string `json:"model"`
+	ModelSource string `json:"model_source"`
+	APIKeyHash  string `json:"api_key_hash"`
+	ErrorType   string `json:"error_type"`
+	ErrorCode   string `json:"error_code"`
+	Message     string `json:"message"`
+	RequestID   string `json:"request_id"`
+}
+
 type DB struct {
 	sql  *sql.DB
 	read *sql.DB
 	path string
 }
 
-const schemaVersion = 4
+// effectiveModelExpr returns the best available model name for grouping.
+// Falls back: model_returned -> model_requested -> "unidentified".
+const effectiveModelExpr = `COALESCE(NULLIF(TRIM(model_returned), ''), NULLIF(TRIM(model_requested), ''), 'unidentified')`
+
+// modelSourceExpr returns the source of the model for a single row.
+const modelSourceExpr = `CASE WHEN NULLIF(TRIM(model_returned), '') IS NOT NULL THEN 'returned' WHEN NULLIF(TRIM(model_requested), '') IS NOT NULL THEN 'requested' ELSE 'unidentified' END`
+
+// modelSourceAggExpr returns the dominant source across an aggregate group.
+const modelSourceAggExpr = `CASE WHEN SUM(CASE WHEN NULLIF(TRIM(model_returned), '') IS NOT NULL THEN 1 ELSE 0 END) > 0 THEN 'returned' WHEN SUM(CASE WHEN NULLIF(TRIM(model_requested), '') IS NOT NULL THEN 1 ELSE 0 END) > 0 THEN 'requested' ELSE 'unidentified' END`
+
+const schemaVersion = 5
 const activitySampleLimit = 1000
 
 func Open(path string) (*DB, error) {
@@ -301,7 +365,7 @@ func migrate(sqlDB *sql.DB) error {
 	if _, err := sqlDB.Exec(`
 			INSERT OR IGNORE INTO schema_migrations (version, name, applied_at)
 			VALUES (?, ?, ?)
-		`, schemaVersion, "v4_baseline", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		`, schemaVersion, "v5_error_fields", time.Now().UTC().Format(time.RFC3339)); err != nil {
 		return err
 	}
 	_, err := sqlDB.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion))
@@ -317,6 +381,10 @@ func createIndexes(sqlDB *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_request_usage_status ON request_usage(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_request_usage_endpoint_profile ON request_usage(endpoint_profile)`,
 		`CREATE INDEX IF NOT EXISTS idx_request_usage_capture_outcome ON request_usage(capture_outcome)`,
+		`CREATE INDEX IF NOT EXISTS idx_request_usage_status_created_at_unix ON request_usage(status, created_at_unix)`,
+		`CREATE INDEX IF NOT EXISTS idx_request_usage_error_class_created_at_unix ON request_usage(error_class, created_at_unix)`,
+		`CREATE INDEX IF NOT EXISTS idx_request_usage_model_requested_created_at_unix ON request_usage(model_requested, created_at_unix)`,
+		`CREATE INDEX IF NOT EXISTS idx_request_usage_model_returned_created_at_unix ON request_usage(model_returned, created_at_unix)`,
 		`CREATE INDEX IF NOT EXISTS idx_health_metrics_timestamp ON health_metrics(timestamp)`,
 		`CREATE INDEX IF NOT EXISTS idx_health_metrics_timestamp_unix ON health_metrics(timestamp_unix)`,
 	}
@@ -366,6 +434,12 @@ func requestUsageColumns() []columnSpec {
 		{"billable_unit", "billable_unit TEXT DEFAULT ''"},
 		{"capture_outcome", "capture_outcome TEXT DEFAULT ''"},
 		{"capture_reason", "capture_reason TEXT DEFAULT ''"},
+		{"error_class", "error_class TEXT DEFAULT ''"},
+		{"error_type", "error_type TEXT DEFAULT ''"},
+		{"error_code", "error_code TEXT DEFAULT ''"},
+		{"error_param", "error_param TEXT DEFAULT ''"},
+		{"error_message", "error_message TEXT DEFAULT ''"},
+		{"error_message_truncated", "error_message_truncated INTEGER DEFAULT 0"},
 	}
 }
 
@@ -478,6 +552,13 @@ func backfillV4Normalization(tx *sql.Tx) error {
 		`UPDATE request_usage SET billable_unit = COALESCE(billable_unit, '') WHERE billable_unit IS NULL`,
 		`UPDATE request_usage SET capture_outcome = COALESCE(capture_outcome, '') WHERE capture_outcome IS NULL`,
 		`UPDATE request_usage SET capture_reason = COALESCE(capture_reason, '') WHERE capture_reason IS NULL`,
+		// V5: Normalize new error columns.
+		`UPDATE request_usage SET error_class = COALESCE(error_class, '') WHERE error_class IS NULL`,
+		`UPDATE request_usage SET error_type = COALESCE(error_type, '') WHERE error_type IS NULL`,
+		`UPDATE request_usage SET error_code = COALESCE(error_code, '') WHERE error_code IS NULL`,
+		`UPDATE request_usage SET error_param = COALESCE(error_param, '') WHERE error_param IS NULL`,
+		`UPDATE request_usage SET error_message = COALESCE(error_message, '') WHERE error_message IS NULL`,
+		`UPDATE request_usage SET error_message_truncated = COALESCE(error_message_truncated, 0) WHERE error_message_truncated IS NULL`,
 	}
 	for _, stmt := range statements {
 		if _, err := tx.Exec(stmt); err != nil {
@@ -542,9 +623,11 @@ func (db *DB) InsertBatch(records []UsageRecord) error {
 			endpoint_profile, capture_mode, metering_kind,
 			usage_raw_json, usage_raw_truncated,
 			billable_input, billable_output, billable_total, billable_unit,
-			capture_outcome, capture_reason
+			capture_outcome, capture_reason,
+				error_class, error_type, error_code, error_param, error_message, error_message_truncated
 		) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
-		          ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32)
+		          ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32,
+		          ?33, ?34, ?35, ?36, ?37, ?38)
 	`)
 	if err != nil {
 		return err
@@ -574,6 +657,7 @@ func (db *DB) InsertBatch(records []UsageRecord) error {
 			r.UsageRawJSON, truncatedInt(r.UsageRawTruncated),
 			r.BillableInput, r.BillableOutput, r.BillableTotal, r.BillableUnit,
 			r.CaptureOutcome, r.CaptureReason,
+			r.ErrorClass, r.ErrorType, r.ErrorCode, r.ErrorParam, r.ErrorMessage, truncatedInt(r.ErrorMessageTruncated),
 		)
 		if err != nil {
 			return err
@@ -622,15 +706,17 @@ func (db *DB) Summary(since time.Time) (*SummaryRow, error) {
 func (db *DB) Models(since time.Time) ([]ModelRow, error) {
 	rows, err := db.read.Query(`
 		SELECT
-			COALESCE(NULLIF(TRIM(model_returned), ''), 'unknown'),
+			`+effectiveModelExpr+`,
+			`+modelSourceAggExpr+`,
 			COUNT(*),
+			COUNT(CASE WHEN status >= 400 THEN 1 END),
 			COALESCE(SUM(input_tokens), 0),
 			COALESCE(SUM(output_tokens), 0),
 			COALESCE(SUM(reasoning_tokens), 0),
 			COALESCE(SUM(cached_tokens), 0),
 			COALESCE(SUM(total_tokens), 0)
 		FROM request_usage WHERE created_at_unix >= ?
-		GROUP BY COALESCE(NULLIF(TRIM(model_returned), ''), 'unknown') ORDER BY COUNT(*) DESC
+		GROUP BY 1 ORDER BY COUNT(*) DESC
 	`, since.Unix())
 	if err != nil {
 		return nil, err
@@ -640,7 +726,7 @@ func (db *DB) Models(since time.Time) ([]ModelRow, error) {
 	var result []ModelRow
 	for rows.Next() {
 		var r ModelRow
-		if err := rows.Scan(&r.Model, &r.RequestCount, &r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens, &r.TotalTokens); err != nil {
+		if err := rows.Scan(&r.Model, &r.ModelSource, &r.RequestCount, &r.FailedCount, &r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens, &r.TotalTokens); err != nil {
 			return nil, err
 		}
 		result = append(result, r)
@@ -721,6 +807,46 @@ func (db *DB) Timeseries(since time.Time, bucketMin int) ([]TimeseriesRow, error
 	return result, rows.Err()
 }
 
+func (db *DB) ModelTimeseries(since time.Time, bucketMin int) ([]ModelTimeseriesRow, error) {
+	if bucketMin <= 0 {
+		bucketMin = 10
+	}
+	bucketSec := int64(bucketMin) * 60
+	bucketExpr := fmt.Sprintf(
+		`strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', (created_at_unix / %d) * %d, 'unixepoch')`,
+		bucketSec, bucketSec,
+	)
+
+	rows, err := db.read.Query(`
+		SELECT
+			`+bucketExpr+`,
+			`+effectiveModelExpr+`,
+			COALESCE(SUM(input_tokens), 0),
+			COALESCE(SUM(output_tokens), 0),
+			COALESCE(SUM(reasoning_tokens), 0),
+			COALESCE(SUM(cached_tokens), 0)
+		FROM request_usage WHERE created_at_unix >= ?
+		GROUP BY 1, 2 ORDER BY 1 ASC, COUNT(*) DESC
+	`, since.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []ModelTimeseriesRow
+	for rows.Next() {
+		var r ModelTimeseriesRow
+		if err := rows.Scan(
+			&r.Timestamp, &r.Model,
+			&r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens,
+		); err != nil {
+			return nil, err
+		}
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}
+
 func (db *DB) Activity(since time.Time) (*ActivityRow, error) {
 	row := &ActivityRow{}
 	err := db.read.QueryRow(`
@@ -776,7 +902,7 @@ func (db *DB) Activity(since time.Time) (*ActivityRow, error) {
 			COALESCE(created_at, ''),
 			COALESCE(error, ''),
 			COALESCE(endpoint, ''),
-			COALESCE(NULLIF(TRIM(model_returned), ''), NULLIF(TRIM(model_requested), ''), '')
+			`+effectiveModelExpr+`
 		FROM sampled
 		WHERE status >= 400
 		ORDER BY id DESC LIMIT 1
@@ -845,8 +971,8 @@ func (db *DB) percentileInt(since time.Time, column string, percentile float64, 
 	return value, err
 }
 
-func (db *DB) Requests(limit int, statusMin, statusMax int, model, endpoint string, since time.Time) ([]RequestRow, error) {
-	query := "SELECT id, COALESCE(created_at, ''), COALESCE(request_id, ''), COALESCE(endpoint, ''), COALESCE(method, ''), COALESCE(status, 0), COALESCE(latency_ms, 0), COALESCE(ttfb_ms, 0), COALESCE(stream, 0), COALESCE(client_ip_hash, ''), COALESCE(api_key_hash, ''), COALESCE(model_requested, ''), COALESCE(model_returned, ''), COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), COALESCE(reasoning_tokens, 0), COALESCE(cached_tokens, 0), COALESCE(total_tokens, 0), COALESCE(request_bytes, 0), COALESCE(response_bytes, 0), COALESCE(error, ''), COALESCE(endpoint_profile, ''), COALESCE(capture_mode, ''), COALESCE(metering_kind, ''), COALESCE(capture_outcome, ''), COALESCE(capture_reason, '') FROM request_usage WHERE 1=1"
+func (db *DB) Requests(limit int, statusMin, statusMax int, model, endpoint, errorClass string, since time.Time) ([]RequestRow, error) {
+	query := "SELECT id, COALESCE(created_at, ''), COALESCE(request_id, ''), COALESCE(endpoint, ''), COALESCE(method, ''), COALESCE(status, 0), COALESCE(latency_ms, 0), COALESCE(ttfb_ms, 0), COALESCE(stream, 0), COALESCE(client_ip_hash, ''), COALESCE(api_key_hash, ''), COALESCE(model_requested, ''), COALESCE(model_returned, ''), COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), COALESCE(reasoning_tokens, 0), COALESCE(cached_tokens, 0), COALESCE(total_tokens, 0), COALESCE(request_bytes, 0), COALESCE(response_bytes, 0), COALESCE(error, ''), COALESCE(endpoint_profile, ''), COALESCE(capture_mode, ''), COALESCE(metering_kind, ''), COALESCE(capture_outcome, ''), COALESCE(capture_reason, ''), COALESCE(error_class, ''), COALESCE(error_type, ''), COALESCE(error_code, ''), COALESCE(error_param, ''), COALESCE(error_message, ''), COALESCE(error_message_truncated, 0) FROM request_usage WHERE 1=1"
 	var args []any
 
 	if !since.IsZero() {
@@ -862,12 +988,16 @@ func (db *DB) Requests(limit int, statusMin, statusMax int, model, endpoint stri
 		args = append(args, statusMax)
 	}
 	if model != "" {
-		query += " AND model_returned = ?"
+		query += " AND " + effectiveModelExpr + " = ?"
 		args = append(args, model)
 	}
 	if endpoint != "" {
 		query += " AND endpoint = ?"
 		args = append(args, endpoint)
+	}
+	if errorClass != "" {
+		query += " AND error_class = ?"
+		args = append(args, errorClass)
 	}
 
 	query += " ORDER BY id DESC LIMIT ?"
@@ -882,7 +1012,7 @@ func (db *DB) Requests(limit int, statusMin, statusMax int, model, endpoint stri
 	var result []RequestRow
 	for rows.Next() {
 		var r RequestRow
-		if err := rows.Scan(&r.ID, &r.CreatedAt, &r.RequestID, &r.Endpoint, &r.Method, &r.Status, &r.LatencyMs, &r.TTFBMs, &r.Stream, &r.ClientIPHash, &r.APIKeyHash, &r.ModelRequested, &r.ModelReturned, &r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens, &r.TotalTokens, &r.RequestBytes, &r.ResponseBytes, &r.Error, &r.EndpointProfile, &r.CaptureMode, &r.MeteringKind, &r.CaptureOutcome, &r.CaptureReason); err != nil {
+		if err := rows.Scan(&r.ID, &r.CreatedAt, &r.RequestID, &r.Endpoint, &r.Method, &r.Status, &r.LatencyMs, &r.TTFBMs, &r.Stream, &r.ClientIPHash, &r.APIKeyHash, &r.ModelRequested, &r.ModelReturned, &r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens, &r.TotalTokens, &r.RequestBytes, &r.ResponseBytes, &r.Error, &r.EndpointProfile, &r.CaptureMode, &r.MeteringKind, &r.CaptureOutcome, &r.CaptureReason, &r.ErrorClass, &r.ErrorType, &r.ErrorCode, &r.ErrorParam, &r.ErrorMessage, &r.ErrorMessageTruncated); err != nil {
 			return nil, err
 		}
 		result = append(result, r)

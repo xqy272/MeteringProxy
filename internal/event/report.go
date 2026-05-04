@@ -16,7 +16,9 @@ type SummaryReport struct {
 
 type ModelReport struct {
 	Model           string  `json:"model"`
+	ModelSource     string  `json:"model_source"`
 	RequestCount    int64   `json:"request_count"`
+	FailedCount     int64   `json:"failed_count"`
 	InputTokens     int64   `json:"input_tokens"`
 	OutputTokens    int64   `json:"output_tokens"`
 	ReasoningTokens int64   `json:"reasoning_tokens"`
@@ -36,16 +38,19 @@ type KeyReport struct {
 }
 
 type TimeseriesReport struct {
-	Timestamp       string `json:"timestamp"`
-	Count           int64  `json:"count"`
-	FailedCount     int64  `json:"failed_count"`
-	InputTokens     int64  `json:"input_tokens"`
-	OutputTokens    int64  `json:"output_tokens"`
-	ReasoningTokens int64  `json:"reasoning_tokens"`
-	CachedTokens    int64  `json:"cached_tokens"`
-	TotalTokens     int64  `json:"total_tokens"`
-	AvgLatencyMs    int64  `json:"avg_latency_ms"`
-	AvgTTFBMs       int64  `json:"avg_ttfb_ms"`
+	Timestamp       string  `json:"timestamp"`
+	Count           int64   `json:"count"`
+	FailedCount     int64   `json:"failed_count"`
+	InputTokens     int64   `json:"input_tokens"`
+	OutputTokens    int64   `json:"output_tokens"`
+	ReasoningTokens int64   `json:"reasoning_tokens"`
+	CachedTokens    int64   `json:"cached_tokens"`
+	TotalTokens     int64   `json:"total_tokens"`
+	AvgLatencyMs    int64   `json:"avg_latency_ms"`
+	AvgTTFBMs       int64   `json:"avg_ttfb_ms"`
+	Cost            float64 `json:"cost"`
+	CostKnown       bool    `json:"cost_known"`
+	UnpricedModels  int64   `json:"unpriced_models"`
 }
 
 type ActivityReport struct {
@@ -68,32 +73,38 @@ type ActivityReport struct {
 }
 
 type RequestReport struct {
-	ID              int64  `json:"id"`
-	CreatedAt       string `json:"created_at"`
-	RequestID       string `json:"request_id"`
-	Endpoint        string `json:"endpoint"`
-	EndpointProfile string `json:"endpoint_profile"`
-	CaptureMode     string `json:"capture_mode"`
-	MeteringKind    string `json:"metering_kind"`
-	Method          string `json:"method"`
-	Status          int    `json:"status"`
-	LatencyMs       int64  `json:"latency_ms"`
-	TTFBMs          int64  `json:"ttfb_ms"`
-	Stream          bool   `json:"stream"`
-	ClientIPHash    string `json:"client_ip_hash"`
-	APIKeyHash      string `json:"api_key_hash"`
-	ModelRequested  string `json:"model_requested"`
-	ModelReturned   string `json:"model_returned"`
-	InputTokens     int64  `json:"input_tokens"`
-	OutputTokens    int64  `json:"output_tokens"`
-	ReasoningTokens int64  `json:"reasoning_tokens"`
-	CachedTokens    int64  `json:"cached_tokens"`
-	TotalTokens     int64  `json:"total_tokens"`
-	RequestBytes    int64  `json:"request_bytes"`
-	ResponseBytes   int64  `json:"response_bytes"`
-	CaptureOutcome  string `json:"capture_outcome"`
-	CaptureReason   string `json:"capture_reason"`
-	Error           string `json:"error"`
+	ID                    int64  `json:"id"`
+	CreatedAt             string `json:"created_at"`
+	RequestID             string `json:"request_id"`
+	Endpoint              string `json:"endpoint"`
+	EndpointProfile       string `json:"endpoint_profile"`
+	CaptureMode           string `json:"capture_mode"`
+	MeteringKind          string `json:"metering_kind"`
+	Method                string `json:"method"`
+	Status                int    `json:"status"`
+	LatencyMs             int64  `json:"latency_ms"`
+	TTFBMs                int64  `json:"ttfb_ms"`
+	Stream                bool   `json:"stream"`
+	ClientIPHash          string `json:"client_ip_hash"`
+	APIKeyHash            string `json:"api_key_hash"`
+	ModelRequested        string `json:"model_requested"`
+	ModelReturned         string `json:"model_returned"`
+	InputTokens           int64  `json:"input_tokens"`
+	OutputTokens          int64  `json:"output_tokens"`
+	ReasoningTokens       int64  `json:"reasoning_tokens"`
+	CachedTokens          int64  `json:"cached_tokens"`
+	TotalTokens           int64  `json:"total_tokens"`
+	RequestBytes          int64  `json:"request_bytes"`
+	ResponseBytes         int64  `json:"response_bytes"`
+	CaptureOutcome        string `json:"capture_outcome"`
+	CaptureReason         string `json:"capture_reason"`
+	Error                 string `json:"error"`
+	ErrorClass            string `json:"error_class"`
+	ErrorType             string `json:"error_type"`
+	ErrorCode             string `json:"error_code"`
+	ErrorParam            string `json:"error_param"`
+	ErrorMessage          string `json:"error_message"`
+	ErrorMessageTruncated bool   `json:"error_message_truncated"`
 }
 
 type ErrorTimelineReport struct {
@@ -139,4 +150,56 @@ type RangeMeta struct {
 type BucketMeta struct {
 	Key   string `json:"key"`
 	Label string `json:"label"`
+}
+
+type OverviewReport struct {
+	Range    string          `json:"range"`
+	Selected OverviewSection `json:"selected"`
+	Recent1h OverviewSection `json:"recent_1h"`
+	Capture  OverviewSection `json:"capture"`
+	Cost     OverviewSection `json:"cost"`
+}
+
+type OverviewSection struct {
+	Data  interface{} `json:"data"`
+	Error string      `json:"error"`
+}
+
+type IssueReport struct {
+	Class       string `json:"class"`
+	Label       string `json:"label"`
+	Count       int64  `json:"count"`
+	Severity    string `json:"severity"`
+	LatestAt    string `json:"latest_at"`
+	Status      int    `json:"status"`
+	Endpoint    string `json:"endpoint"`
+	Model       string `json:"model"`
+	ModelSource string `json:"model_source"`
+	APIKeyHash  string `json:"api_key_hash"`
+	ErrorType   string `json:"error_type"`
+	ErrorCode   string `json:"error_code"`
+	Message     string `json:"message"`
+	RequestID   string `json:"request_id"`
+}
+
+type IssuesResponse struct {
+	Range  string        `json:"range"`
+	Total  int           `json:"total"`
+	Items  []IssueReport `json:"items"`
+	System IssuesSystem  `json:"system"`
+}
+
+type IssuesSystem struct {
+	ParseErrors   int64             `json:"parse_errors"`
+	DBErrors      int64             `json:"db_errors"`
+	DroppedEvents int64             `json:"dropped_events"`
+	Items         []IssueSystemItem `json:"items"`
+}
+
+type IssueSystemItem struct {
+	Class    string `json:"class"`
+	Label    string `json:"label"`
+	Count    int64  `json:"count"`
+	Scope    string `json:"scope"`
+	Severity string `json:"severity"`
 }
