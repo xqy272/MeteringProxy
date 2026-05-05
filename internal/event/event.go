@@ -56,6 +56,12 @@ type Event struct {
 	RequestBytes  int64
 	ResponseBytes int64
 	Error         string
+
+	ModelReturnedSource string
+	UsageSource         string
+	TerminalEvent       string
+	TerminalReason      string
+	SideUsageEventID    int64
 }
 
 // Capture mode constants.
@@ -94,4 +100,37 @@ const (
 	ReasonParseError                = "parse_error"
 	ReasonWriterQueueFull           = "writer_queue_full"
 	ReasonUpstreamError             = "upstream_error"
+	ReasonResponseCompletedWithoutUsage = "response_completed_without_usage"
+	ReasonResponseIncomplete        = "response_incomplete"
+	ReasonStreamEndedWithoutCompleted  = "stream_ended_without_completed"
+	ReasonResponseErrorEvent        = "response_error_event"
+)
+
+// Model returned source constants.
+const (
+	SourceUsage              = "usage"
+	SourceResponseCompleted  = "response_completed"
+	SourceResponseCreated     = "response_created"
+	SourceResponseFailed      = "response_failed"
+	SourceResponseIncomplete  = "response_incomplete"
+	SourceHTTPResponse        = "http_response"
+	SourceSideChannel        = "side_channel"
+)
+
+// Usage source constants.
+const (
+	UsageSourceHTTPResponse    = "http_response"
+	UsageSourceCliproxySide    = "cliproxy_side_channel"
+)
+
+// Terminal event constants.
+const (
+	TerminalResponseCompleted = "response.completed"
+	TerminalResponseFailed    = "response.failed"
+	TerminalResponseIncomplete = "response.incomplete"
+	TerminalStreamEnd         = "stream_end"
+	TerminalStreamError       = "stream_error"
+	TerminalChatFinish        = "chat.finish"
+	TerminalMessageStop       = "message_stop"
+	TerminalGeminiFinish      = "gemini.finish"
 )

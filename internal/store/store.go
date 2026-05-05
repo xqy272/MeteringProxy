@@ -39,6 +39,7 @@ func (s eventSink) InsertEvents(events []event.Event) error {
 type ReportStore interface {
 	Summary(since time.Time) (*db.SummaryRow, error)
 	Models(since time.Time) ([]db.ModelRow, error)
+	ModelSourceCounts(since time.Time, model string) (map[string]int64, map[string]int64, error)
 	Keys(since time.Time) ([]db.KeyRow, error)
 	Timeseries(since time.Time, bucketMin int) ([]db.TimeseriesRow, error)
 	ModelTimeseries(since time.Time, bucketMin int) ([]db.ModelTimeseriesRow, error)
@@ -50,6 +51,9 @@ type ReportStore interface {
 	Overview(since time.Time) *db.OverviewRow
 	Issues(since time.Time, limit int) ([]db.IssueRow, error)
 	OverviewCaptureStats(since time.Time) (failed, skipped int64, err error)
+	CaptureOutcomeCounts(since time.Time) (captured, skipped, failed int64, err error)
+	AllCredentialHealth() ([]db.CredentialHealthRow, error)
+	AllQuotaCurrent() ([]db.QuotaCurrentRow, error)
 }
 
 // HealthWriter is the write-side interface for health metrics.

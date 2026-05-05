@@ -108,6 +108,7 @@ func (s *Server) handleIssues(w http.ResponseWriter, r *http.Request) {
 			Label:       row.Label,
 			Count:       row.Count,
 			Severity:    row.Severity,
+			SourceGroup: row.SourceGroup,
 			LatestAt:    row.LatestAt,
 			Status:      row.Status,
 			Endpoint:    row.Endpoint,

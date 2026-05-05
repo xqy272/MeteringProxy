@@ -49,6 +49,12 @@ func EventToRecord(e Event) db.UsageRecord {
 		ErrorParam:            e.ErrorParam,
 		ErrorMessage:          e.ErrorMessage,
 		ErrorMessageTruncated: e.ErrorMessageTruncated,
+
+		ModelReturnedSource: e.ModelReturnedSource,
+		UsageSource:         e.UsageSource,
+		TerminalEvent:       e.TerminalEvent,
+		TerminalReason:      e.TerminalReason,
+		SideUsageEventID:    e.SideUsageEventID,
 	}
 }
 
@@ -183,11 +189,16 @@ func RequestsFromDB(rows []db.RequestRow) []RequestReport {
 			CaptureReason:         r.CaptureReason,
 			Error:                 r.Error,
 			ErrorClass:            r.ErrorClass,
-			ErrorType:             r.ErrorType,
+			ErrorType:            r.ErrorType,
 			ErrorCode:             r.ErrorCode,
 			ErrorParam:            r.ErrorParam,
 			ErrorMessage:          r.ErrorMessage,
 			ErrorMessageTruncated: r.ErrorMessageTruncated,
+			ModelReturnedSource:   r.ModelReturnedSource,
+			UsageSource:           r.UsageSource,
+			TerminalEvent:         r.TerminalEvent,
+			TerminalReason:        r.TerminalReason,
+			SideUsageEventID:      r.SideUsageEventID,
 		}
 	}
 	return result

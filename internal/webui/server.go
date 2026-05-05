@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"ai-gateway-metering-proxy/internal/db"
 	"ai-gateway-metering-proxy/internal/event"
 	"ai-gateway-metering-proxy/internal/pricing"
 	"ai-gateway-metering-proxy/internal/profile"
@@ -32,6 +33,20 @@ type Server struct {
 
 	staticFS        fs.FS
 	meteringEnabled func() bool
+
+	credPoller interface {
+		Snapshot() ([]db.CredentialHealthRow, time.Time)
+		Refresh()
+	}
+	quotaPoller interface {
+		Snapshot() ([]db.QuotaCurrentRow, time.Time, bool)
+		APICallAvailable() bool
+		Refresh()
+	}
+	usageQueuePoller interface {
+		Snapshot() (bool, time.Time, string)
+	}
+	correlationMode string
 }
 
 // New creates a Server that serves static files from the embedded filesystem.
@@ -90,6 +105,31 @@ func (s *Server) SetMeteringEnabledFunc(fn func() bool) {
 	s.meteringEnabled = fn
 }
 
+func (s *Server) SetCredPoller(p interface {
+	Snapshot() ([]db.CredentialHealthRow, time.Time)
+	Refresh()
+}) {
+	s.credPoller = p
+}
+
+func (s *Server) SetQuotaPoller(p interface {
+	Snapshot() ([]db.QuotaCurrentRow, time.Time, bool)
+	APICallAvailable() bool
+	Refresh()
+}) {
+	s.quotaPoller = p
+}
+
+func (s *Server) SetUsageQueuePoller(p interface {
+	Snapshot() (bool, time.Time, string)
+}) {
+	s.usageQueuePoller = p
+}
+
+func (s *Server) SetCorrelationMode(mode string) {
+	s.correlationMode = mode
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
@@ -120,6 +160,12 @@ func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleHealth(w, r)
 	case strings.HasSuffix(path, "/api/metadata"):
 		s.handleMetadata(w, r)
+	case strings.HasSuffix(path, "/api/quota"):
+		s.handleQuota(w, r)
+	case strings.HasSuffix(path, "/api/quota/refresh"):
+		s.handleQuotaRefresh(w, r)
+	case strings.HasSuffix(path, "/api/observability"):
+		s.handleObservability(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -262,6 +308,16 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		cost, known := s.pricing.CostWithCacheCreation(report[i].Model, report[i].InputTokens, report[i].OutputTokens, report[i].ReasoningTokens, report[i].CachedTokens, report[i].CacheCreationTokens)
 		report[i].Cost = cost
 		report[i].CostKnown = known
+		if rows[i].MissingUsageCount > 0 || len(rows[i].ModelReturnedSourceCounts) > 0 || len(rows[i].UsageSourceCounts) > 0 {
+			report[i].MissingUsageCount = rows[i].MissingUsageCount
+		}
+	}
+	for i := range report {
+		srcCounts, usageCounts, err := s.db.ModelSourceCounts(since, report[i].Model)
+		if err == nil && (len(srcCounts) > 0 || len(usageCounts) > 0) {
+			report[i].ModelReturnedSourceCounts = srcCounts
+			report[i].UsageSourceCounts = usageCounts
+		}
 	}
 	writeJSON(w, report)
 }
@@ -465,4 +521,256 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, meta)
+}
+
+func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
+	credRows, credTime := []db.CredentialHealthRow{}, time.Time{}
+	if s.credPoller != nil {
+		credRows, credTime = s.credPoller.Snapshot()
+	}
+
+	quotaRows, quotaTime, apiCallAvail := []db.QuotaCurrentRow{}, time.Time{}, false
+	if s.quotaPoller != nil {
+		quotaRows, quotaTime, apiCallAvail = s.quotaPoller.Snapshot()
+	}
+
+	if len(quotaRows) > 0 || (s.quotaPoller != nil && apiCallAvail) {
+		type providerSummary struct {
+			Provider         string `json:"provider"`
+			CredentialCount  int    `json:"credential_count"`
+			LowCount         int    `json:"low_count"`
+			ExhaustedCount   int    `json:"exhausted_count"`
+			ErrorCount       int    `json:"error_count"`
+			UnsupportedCount int    `json:"unsupported_count"`
+			UnknownCount     int    `json:"unknown_count"`
+		}
+		summaryMap := map[string]*providerSummary{}
+		for _, q := range quotaRows {
+			ps, ok := summaryMap[q.Provider]
+			if !ok {
+				ps = &providerSummary{Provider: q.Provider}
+				summaryMap[q.Provider] = ps
+			}
+			ps.CredentialCount++
+			switch q.Status {
+			case "low":
+				ps.LowCount++
+			case "exhausted":
+				ps.ExhaustedCount++
+			case "error":
+				ps.ErrorCount++
+			case "unknown":
+				ps.UnknownCount++
+			case "unsupported":
+				ps.UnsupportedCount++
+			}
+		}
+
+		phase := "quota_snapshot"
+		if len(quotaRows) == 0 {
+			phase = "credential_health"
+		}
+
+		providers := make([]providerSummary, 0, len(summaryMap))
+		for _, ps := range summaryMap {
+			providers = append(providers, *ps)
+		}
+
+		checkedAt := quotaTime
+		if checkedAt.IsZero() {
+			checkedAt = credTime
+		}
+
+		resp := map[string]any{
+			"status":               "ok",
+			"phase":                phase,
+			"full_quota_available": apiCallAvail,
+			"module_status":        "available",
+			"stale":                false,
+			"checked_at":           checkedAt.Format(time.RFC3339),
+			"providers":            providers,
+			"items":                quotaRows,
+		}
+		writeJSON(w, resp)
+		return
+	}
+
+	if len(credRows) > 0 {
+		type providerSummary struct {
+			Provider         string `json:"provider"`
+			CredentialCount  int    `json:"credential_count"`
+			ReadyCount       int    `json:"ready_count"`
+			UnavailableCount int    `json:"unavailable_count"`
+			DisabledCount    int    `json:"disabled_count"`
+		}
+		summaryMap := map[string]*providerSummary{}
+		for _, c := range credRows {
+			ps, ok := summaryMap[c.Provider]
+			if !ok {
+				ps = &providerSummary{Provider: c.Provider}
+				summaryMap[c.Provider] = ps
+			}
+			ps.CredentialCount++
+			switch c.Status {
+			case "ready":
+				ps.ReadyCount++
+			case "unavailable":
+				ps.UnavailableCount++
+			case "disabled":
+				ps.DisabledCount++
+			}
+		}
+
+		providers := make([]providerSummary, 0, len(summaryMap))
+		for _, ps := range summaryMap {
+			providers = append(providers, *ps)
+		}
+
+		resp := map[string]any{
+			"status":               "ok",
+			"phase":                "credential_health",
+			"full_quota_available": false,
+			"module_status":        "partial",
+			"checked_at":           credTime.Format(time.RFC3339),
+			"providers":            providers,
+			"items":                credRows,
+		}
+		writeJSON(w, resp)
+		return
+	}
+
+	writeJSON(w, map[string]any{
+		"status":               "ok",
+		"phase":                "credential_health",
+		"full_quota_available": false,
+		"module_status":        "disabled",
+		"checked_at":           "",
+		"providers":            []any{},
+		"items":                []any{},
+	})
+}
+
+func (s *Server) handleQuotaRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	queued := false
+	if s.quotaPoller != nil {
+		s.quotaPoller.Refresh()
+		queued = true
+	}
+	if s.credPoller != nil {
+		s.credPoller.Refresh()
+		queued = true
+	}
+	writeJSON(w, map[string]any{
+		"status":         "ok",
+		"refresh_queued": queued,
+	})
+}
+
+func (s *Server) handleObservability(w http.ResponseWriter, r *http.Request) {
+	resp := map[string]any{
+		"request_capture": map[string]any{
+			"parse_errors":   0,
+			"dropped_events": 0,
+		},
+		"side_channel": map[string]any{
+			"enabled":       s.usageQueuePoller != nil,
+			"connected":     false,
+			"merge_mode":    s.correlationMode,
+			"last_event_at": "",
+			"last_error":    "",
+		},
+		"credential_health": map[string]any{
+			"enabled": s.credPoller != nil,
+		},
+		"quota": map[string]any{
+			"enabled": s.quotaPoller != nil,
+		},
+	}
+
+	if s.usageQueuePoller != nil {
+		connected, lastAt, lastErr := s.usageQueuePoller.Snapshot()
+		resp["side_channel"] = map[string]any{
+			"enabled":       true,
+			"connected":     connected,
+			"merge_mode":    s.correlationMode,
+			"last_event_at": lastAt.Format(time.RFC3339),
+			"last_error":    lastErr,
+		}
+	}
+
+	if s.writer != nil {
+		_, dropped, parseErrors, _ := s.writer.Snapshot()
+		resp["request_capture"] = map[string]any{
+			"parse_errors":   parseErrors,
+			"dropped_events": dropped,
+		}
+	}
+
+	captured1h, skipped1h, failed1h, _ := s.db.CaptureOutcomeCounts(time.Now().Add(-1 * time.Hour))
+	resp["request_capture"] = map[string]any{
+		"parse_errors":   getMapVal(resp["request_capture"], "parse_errors"),
+		"dropped_events": getMapVal(resp["request_capture"], "dropped_events"),
+		"captured_1h":    captured1h,
+		"skipped_1h":     skipped1h,
+		"failed_1h":      failed1h,
+	}
+
+	if s.credPoller != nil {
+		credRows, credTime := s.credPoller.Snapshot()
+		unavailableCount := 0
+		errorCount := 0
+		for _, c := range credRows {
+			if c.Status == "unavailable" {
+				unavailableCount++
+			}
+			if c.Status == "error" {
+				errorCount++
+			}
+		}
+		resp["credential_health"] = map[string]any{
+			"enabled":           true,
+			"last_checked_at":   credTime.Format(time.RFC3339),
+			"unavailable_count": unavailableCount,
+			"error_count":       errorCount,
+		}
+	}
+
+	if s.quotaPoller != nil {
+		quotaRows, quotaTime, apiCallAvail := s.quotaPoller.Snapshot()
+		phase := "credential_health"
+		if len(quotaRows) > 0 || apiCallAvail {
+			phase = "quota_snapshot"
+		}
+		staleCount := 0
+		errorCount := 0
+		for _, q := range quotaRows {
+			if q.Status == "stale" {
+				staleCount++
+			}
+			if q.Status == "error" {
+				errorCount++
+			}
+		}
+		resp["quota"] = map[string]any{
+			"enabled":              true,
+			"phase":                phase,
+			"full_quota_available": apiCallAvail,
+			"last_checked_at":      quotaTime.Format(time.RFC3339),
+			"stale_count":          staleCount,
+			"error_count":          errorCount,
+		}
+	}
+
+	writeJSON(w, resp)
+}
+
+func getMapVal(m any, key string) any {
+	if mm, ok := m.(map[string]any); ok {
+		return mm[key]
+	}
+	return nil
 }

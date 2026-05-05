@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -122,7 +123,13 @@ func (db *DB) Issues(since time.Time, limit int) ([]IssueRow, error) {
 				id,
 				COALESCE(created_at, '') AS created_at,
 				COALESCE(created_at_unix, 0) AS created_at_unix,
-				COALESCE(NULLIF(TRIM(error_class), ''), 'unknown') AS class,
+				CASE
+					WHEN status >= 400 AND NULLIF(TRIM(error_class), '') IS NOT NULL THEN COALESCE(NULLIF(TRIM(error_class), ''), 'unknown')
+					WHEN capture_outcome = 'failed' AND NULLIF(TRIM(capture_reason), '') IS NOT NULL THEN capture_reason
+					WHEN capture_outcome = 'skipped' AND NULLIF(TRIM(capture_reason), '') IS NOT NULL THEN capture_reason
+					WHEN capture_outcome = 'failed' THEN 'capture_failed'
+					ELSE 'unknown'
+				END AS class,
 				COALESCE(status, 0) AS status,
 				COALESCE(endpoint, '') AS endpoint,
 				`+effectiveModelExpr+` AS model,
@@ -134,7 +141,11 @@ func (db *DB) Issues(since time.Time, limit int) ([]IssueRow, error) {
 				COALESCE(error_message, '') AS error_message,
 				COALESCE(request_id, '') AS request_id
 			FROM request_usage
-			WHERE created_at_unix >= ? AND status >= 400
+			WHERE created_at_unix >= ? AND (
+				status >= 400
+				OR (capture_outcome = 'failed' AND capture_reason != '')
+				OR (capture_outcome = 'skipped' AND capture_reason != '')
+			)
 		),
 		agg AS (
 			SELECT
@@ -184,8 +195,10 @@ func (db *DB) Issues(since time.Time, limit int) ([]IssueRow, error) {
 			AND latest.api_key_hash = agg.api_key_hash
 		ORDER BY
 			CASE
-				WHEN agg.class IN ('auth_failed', 'quota_exhausted', 'proxy_upstream_error', 'db_write_error') THEN 0
-				WHEN agg.class IN ('rate_limited', 'upstream_5xx', 'context_length', 'capture_parse_error', 'dropped_event') THEN 1
+				WHEN agg.class IN ('auth_failed', 'quota_exhausted', 'proxy_upstream_error', 'db_write_error', 'response_error_event') THEN 0
+				WHEN agg.class IN ('rate_limited', 'upstream_5xx', 'context_length', 'capture_parse_error', 'dropped_event',
+					'response_completed_without_usage', 'stream_ended_without_completed', 'response_incomplete',
+					'capture_failed', 'parse_error', 'usage_not_present') THEN 1
 				ELSE 2
 			END ASC,
 			agg.latest_unix DESC,
@@ -205,9 +218,156 @@ func (db *DB) Issues(since time.Time, limit int) ([]IssueRow, error) {
 		}
 		r.Label = classLabel(r.Class)
 		r.Severity = classSeverity(r.Class)
+		r.SourceGroup = "request_usage"
 		result = append(result, r)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	result = db.appendSideChannelIssues(result, since)
+	result = db.appendCredentialIssues(result, since)
+	result = db.appendQuotaIssues(result, since)
+	sortIssueRows(result)
+	if len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
+
+func (db *DB) appendSideChannelIssues(result []IssueRow, since time.Time) []IssueRow {
+	rows, err := db.read.Query(`
+		WITH base AS (
+			SELECT
+				CASE match_status
+					WHEN 'conflict' THEN 'side_channel_conflict'
+					WHEN 'duplicate' THEN 'side_channel_duplicate'
+					WHEN 'expired' THEN 'side_channel_expired'
+					WHEN 'invalid_payload' THEN 'side_channel_invalid_payload'
+					ELSE 'side_channel_unmatched'
+				END AS class,
+				COALESCE(received_at, '') AS latest_at,
+				COALESCE(received_at_unix, 0) AS latest_unix,
+				COALESCE(endpoint, '') AS endpoint,
+				COALESCE(model, '') AS model,
+				COALESCE(request_id, '') AS request_id,
+				COALESCE(error_class, '') AS message
+			FROM side_usage_events
+			WHERE received_at_unix >= ? AND match_status IN ('conflict', 'duplicate', 'expired', 'invalid_payload', 'unmatched')
+		),
+		agg AS (
+			SELECT class, endpoint, model, COUNT(*) AS count, MAX(latest_unix) AS latest_unix
+			FROM base GROUP BY class, endpoint, model
+		),
+		latest AS (
+			SELECT *, ROW_NUMBER() OVER (PARTITION BY class, endpoint, model ORDER BY latest_unix DESC) AS rn
+			FROM base
+		)
+		SELECT agg.class, agg.count, latest.latest_at, agg.endpoint, agg.model, latest.request_id, latest.message
+		FROM agg JOIN latest ON latest.rn = 1 AND latest.class = agg.class AND latest.endpoint = agg.endpoint AND latest.model = agg.model
+	`, since.Unix())
+	if err != nil {
+		return result
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var r IssueRow
+		if err := rows.Scan(&r.Class, &r.Count, &r.LatestAt, &r.Endpoint, &r.Model, &r.RequestID, &r.Message); err == nil {
+			r.Label = classLabel(r.Class)
+			r.Severity = classSeverity(r.Class)
+			r.SourceGroup = "side_channel"
+			r.ModelSource = "side_channel"
+			result = append(result, r)
+		}
+	}
+	return result
+}
+
+func (db *DB) appendCredentialIssues(result []IssueRow, since time.Time) []IssueRow {
+	rows, err := db.read.Query(`
+		SELECT
+			CASE status
+				WHEN 'error' THEN 'credential_error'
+				WHEN 'stale' THEN 'credential_stale'
+				ELSE 'credential_unavailable'
+			END AS class,
+			COUNT(*) AS count,
+			MAX(COALESCE(checked_at, '')) AS latest_at,
+			COALESCE(provider, '') AS endpoint,
+			COALESCE(error_class, '') AS message
+		FROM credential_health
+		WHERE checked_at_unix >= ? AND status IN ('unavailable', 'disabled', 'error', 'stale')
+		GROUP BY class, provider, error_class
+	`, since.Unix())
+	if err != nil {
+		return result
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var r IssueRow
+		if err := rows.Scan(&r.Class, &r.Count, &r.LatestAt, &r.Endpoint, &r.Message); err == nil {
+			r.Label = classLabel(r.Class)
+			r.Severity = classSeverity(r.Class)
+			r.SourceGroup = "credential_health"
+			result = append(result, r)
+		}
+	}
+	return result
+}
+
+func (db *DB) appendQuotaIssues(result []IssueRow, since time.Time) []IssueRow {
+	rows, err := db.read.Query(`
+		SELECT
+			CASE status
+				WHEN 'low' THEN 'quota_low'
+				WHEN 'exhausted' THEN 'quota_exhausted'
+				WHEN 'stale' THEN 'quota_stale'
+				ELSE 'quota_refresh_failed'
+			END AS class,
+			COUNT(*) AS count,
+			MAX(COALESCE(checked_at, '')) AS latest_at,
+			COALESCE(provider, '') AS endpoint,
+			COALESCE(error_class, '') AS message
+		FROM quota_current
+		WHERE checked_at_unix >= ? AND status IN ('low', 'exhausted', 'error', 'stale')
+		GROUP BY class, provider, error_class
+	`, since.Unix())
+	if err != nil {
+		return result
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var r IssueRow
+		if err := rows.Scan(&r.Class, &r.Count, &r.LatestAt, &r.Endpoint, &r.Message); err == nil {
+			r.Label = classLabel(r.Class)
+			r.Severity = classSeverity(r.Class)
+			r.SourceGroup = "quota"
+			result = append(result, r)
+		}
+	}
+	return result
+}
+
+func sortIssueRows(rows []IssueRow) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		if severityRank(rows[i].Severity) != severityRank(rows[j].Severity) {
+			return severityRank(rows[i].Severity) < severityRank(rows[j].Severity)
+		}
+		if rows[i].LatestAt != rows[j].LatestAt {
+			return rows[i].LatestAt > rows[j].LatestAt
+		}
+		return rows[i].Count > rows[j].Count
+	})
+}
+
+func severityRank(severity string) int {
+	switch severity {
+	case "error":
+		return 0
+	case "warning":
+		return 1
+	default:
+		return 2
+	}
 }
 
 func classLabel(class string) string {
@@ -232,6 +392,36 @@ func classLabel(class string) string {
 		return "DB write error"
 	case "dropped_event":
 		return "Dropped event"
+	case "response_completed_without_usage":
+		return "Response completed without usage data"
+	case "stream_ended_without_completed":
+		return "Stream ended without completion"
+	case "response_error_event":
+		return "Response error event"
+	case "response_incomplete":
+		return "Response incomplete"
+	case "credential_unavailable":
+		return "Credential unavailable"
+	case "quota_low":
+		return "Quota low"
+	case "quota_refresh_failed":
+		return "Quota refresh failed"
+	case "quota_stale":
+		return "Quota data stale"
+	case "credential_error":
+		return "Credential health error"
+	case "credential_stale":
+		return "Credential health stale"
+	case "side_channel_conflict":
+		return "Side-channel usage conflict"
+	case "side_channel_duplicate":
+		return "Duplicate side-channel usage"
+	case "side_channel_expired":
+		return "Expired side-channel usage"
+	case "side_channel_invalid_payload":
+		return "Invalid side-channel payload"
+	case "side_channel_unmatched":
+		return "Unmatched side-channel usage"
 	default:
 		return "Unclassified issue"
 	}
@@ -239,9 +429,12 @@ func classLabel(class string) string {
 
 func classSeverity(class string) string {
 	switch class {
-	case "auth_failed", "quota_exhausted", "proxy_upstream_error", "db_write_error":
+	case "auth_failed", "quota_exhausted", "proxy_upstream_error", "db_write_error", "response_error_event", "credential_error", "side_channel_conflict":
 		return "error"
-	case "rate_limited", "upstream_5xx", "context_length", "capture_parse_error", "dropped_event":
+	case "rate_limited", "upstream_5xx", "context_length", "capture_parse_error", "dropped_event",
+		"response_completed_without_usage", "stream_ended_without_completed", "response_incomplete",
+		"credential_unavailable", "credential_stale", "quota_low", "quota_refresh_failed", "quota_stale",
+		"side_channel_expired", "side_channel_invalid_payload", "side_channel_unmatched":
 		return "warning"
 	default:
 		return "info"
@@ -262,4 +455,26 @@ func (db *DB) OverviewCaptureStats(since time.Time) (failed, skipped int64, err 
 		return 0, 0, fmt.Errorf("capture skipped stats: %w", err)
 	}
 	return failed, skipped, nil
+}
+
+func (db *DB) CaptureOutcomeCounts(since time.Time) (captured, skipped, failed int64, err error) {
+	if err := db.read.QueryRow(`
+		SELECT COUNT(*) FROM request_usage
+		WHERE created_at_unix >= ? AND capture_outcome = 'captured'
+	`, since.Unix()).Scan(&captured); err != nil {
+		return 0, 0, 0, fmt.Errorf("capture outcome count captured: %w", err)
+	}
+	if err := db.read.QueryRow(`
+		SELECT COUNT(*) FROM request_usage
+		WHERE created_at_unix >= ? AND capture_outcome = 'skipped'
+	`, since.Unix()).Scan(&skipped); err != nil {
+		return 0, 0, 0, fmt.Errorf("capture outcome count skipped: %w", err)
+	}
+	if err := db.read.QueryRow(`
+		SELECT COUNT(*) FROM request_usage
+		WHERE created_at_unix >= ? AND capture_outcome = 'failed'
+	`, since.Unix()).Scan(&failed); err != nil {
+		return 0, 0, 0, fmt.Errorf("capture outcome count failed: %w", err)
+	}
+	return captured, skipped, failed, nil
 }

@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"ai-gateway-metering-proxy/internal/config"
 	"ai-gateway-metering-proxy/internal/event"
 	"ai-gateway-metering-proxy/internal/extractor"
 	"ai-gateway-metering-proxy/internal/hash"
@@ -30,16 +31,18 @@ type RecordWriter interface {
 }
 
 type Proxy struct {
-	upstream        string
-	hasher          *hash.Hasher
-	writer          RecordWriter
-	maxSample       int64
-	meteringEnabled atomic.Bool
-	registry        *profile.Registry
-	transport       *http.Transport
+	upstream          string
+	hasher            *hash.Hasher
+	writer            RecordWriter
+	maxSample         int64
+	meteringEnabled   atomic.Bool
+	registry          *profile.Registry
+	transport         *http.Transport
+	reqMeta           config.RequestMetadataConfig
+	correlationHeader string
 }
 
-func New(upstream string, hasher *hash.Hasher, rw RecordWriter, maxSample int64) *Proxy {
+func New(upstream string, hasher *hash.Hasher, rw RecordWriter, maxSample int64, reqMeta config.RequestMetadataConfig) *Proxy {
 	p := &Proxy{
 		upstream:  upstream,
 		hasher:    hasher,
@@ -54,6 +57,8 @@ func New(upstream string, hasher *hash.Hasher, rw RecordWriter, maxSample int64)
 			ResponseHeaderTimeout: 60 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
 		},
+		reqMeta:           reqMeta,
+		correlationHeader: "X-Request-ID",
 	}
 	p.meteringEnabled.Store(true)
 	return p
@@ -66,6 +71,14 @@ func (p *Proxy) SetMeteringEnabled(enabled bool) {
 
 func (p *Proxy) Registry() *profile.Registry {
 	return p.registry
+}
+
+func (p *Proxy) SetCorrelationHeader(header string) {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		header = "X-Request-ID"
+	}
+	p.correlationHeader = header
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -85,8 +98,41 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var bodyPrefix []byte
+	var streamProbePrefix []byte
 	if r.Body != nil {
-		bodyPrefix, _ = io.ReadAll(io.LimitReader(r.Body, 4096))
+		initialBytes := p.reqMeta.InitialBytes
+		if initialBytes <= 0 {
+			initialBytes = 4096
+		}
+		bodyPrefix, _ = io.ReadAll(io.LimitReader(r.Body, initialBytes))
+		streamProbePrefix = append(streamProbePrefix, bodyPrefix...)
+
+		modelRequested := extractModel(bodyPrefix)
+		if modelRequested != "" || !p.reqMeta.ExtendedModelScan || !prof.IsMetered() {
+			// Model found or extended scan disabled or passthrough
+		} else {
+			maxBytes := p.reqMeta.MaxBytes
+			if maxBytes <= initialBytes {
+				maxBytes = 65536
+			}
+			for int64(len(bodyPrefix)) < maxBytes {
+				remaining := maxBytes - int64(len(bodyPrefix))
+				readSize := int64(4096)
+				if remaining < readSize {
+					readSize = remaining
+				}
+				chunk, readErr := io.ReadAll(io.LimitReader(r.Body, readSize))
+				if len(chunk) > 0 {
+					bodyPrefix = append(bodyPrefix, chunk...)
+					if extractModel(bodyPrefix) != "" {
+						break
+					}
+				}
+				if readErr != nil || len(chunk) == 0 {
+					break
+				}
+			}
+		}
 	}
 	cr := &countingReader{r: &replayReader{prefix: bodyPrefix, src: r.Body}}
 	r.Body = cr
@@ -100,7 +146,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		modelRequested = extractModelFromPath(r.URL.Path)
 	}
 	requestSuggestsStream := r.URL.Query().Get("stream") == "true" ||
-		streamFromJSON(bodyPrefix) ||
+		streamFromJSON(streamProbePrefix) ||
 		isSSEMediaType(r.Header.Get("Accept")) ||
 		streamFromPath(r.URL.Path)
 
@@ -131,7 +177,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	isStream := responseIndicatesStream(resp.Header.Get("Content-Type"), requestSuggestsStream)
-	requestID := requestIDFromHeaders(resp.Header, r.Header)
+	requestID := p.requestIDFromHeaders(resp.Header, r.Header)
 
 	for k, vs := range resp.Header {
 		for _, v := range vs {
@@ -268,13 +314,18 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 		captureReason := event.ReasonUsageNotPresent
 		p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, true,
 			clientIPHash, apiKeyHash, modelRequested, nil, cr.bytesRead, written, errStr,
-			captureOutcome, captureReason, nil)
+			captureOutcome, captureReason, nil, "", "", "", "")
 		return
 	}
 
 	var lastUsage *extractor.UsageInfo
 	var totalBytes int64
 	var sseParseErrs int64
+
+	var responsesState *extractor.ResponsesStreamState
+	if prof != nil && prof.Name == "responses" {
+		responsesState = extractor.NewResponsesStreamState()
+	}
 
 	var errPayloads *errorPayloadSampler
 	if status >= 400 {
@@ -302,6 +353,12 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 		}
 		sseParseErrs = 0
 	}
+	streamErrInfo := func(result streamResult) *extractor.ErrorInfo {
+		if result.errInfo != nil {
+			return result.errInfo
+		}
+		return finalizeStreamErrInfo()
+	}
 
 	maxLine := 256 * 1024
 	if prof != nil && prof.StreamProtocol.MaxLineSize > 0 {
@@ -317,24 +374,51 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 	recordLineSkip := func() {
 		metrics.AddSSELineSkips(1)
 	}
+	assembler := newSSEEventAssembler(maxLine)
+	processSSEEvent := func(line []byte) {
+		if errPayloads != nil {
+			errPayloads.addStrippedPayload(stripSSEDataLine(line, prof))
+		}
+		if responsesState != nil {
+			responsesState.ProcessSSEEvent(line)
+		}
+		u, err := p.tryExtractSSEUsage(line, prof)
+		if err != nil {
+			sseParseErrs++
+		} else if u != nil {
+			lastUsage = mergeUsageInfo(lastUsage, u)
+		}
+	}
+	processPhysicalLine := func(line []byte) {
+		events, skipped := assembler.addLine(line)
+		if skipped {
+			recordLineSkip()
+		}
+		for _, eventLine := range events {
+			processSSEEvent(eventLine)
+		}
+	}
+	flushPendingEvent := func() {
+		if eventLine, skipped := assembler.flush(); skipped {
+			recordLineSkip()
+		} else if len(eventLine) > 0 {
+			processSSEEvent(eventLine)
+		}
+	}
 
 	for {
 		select {
 		case <-r.Context().Done():
-			reportParseErrors()
+			flushPendingEvent()
 			errStr := ""
 			if err := r.Context().Err(); err != nil {
 				errStr = safeOperationalError(err)
 			}
-			captureOutcome := event.OutcomeCaptured
-			captureReason := ""
-			if lastUsage == nil {
-				captureOutcome = event.OutcomeSkipped
-				captureReason = event.ReasonUsageNotPresent
-			}
+			result := p.finalizeStreamUsage(lastUsage, responsesState, prof, sseParseErrs)
+			reportParseErrors()
 			p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, true,
-				clientIPHash, apiKeyHash, modelRequested, lastUsage, cr.bytesRead, totalBytes, errStr,
-				captureOutcome, captureReason, finalizeStreamErrInfo())
+				clientIPHash, apiKeyHash, modelRequested, result.usage, cr.bytesRead, totalBytes, errStr,
+				result.captureOutcome, result.captureReason, streamErrInfo(result), result.modelReturned, result.modelReturnedSource, result.terminalEvent, result.terminalReason)
 			return
 		default:
 		}
@@ -344,16 +428,12 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 			totalBytes += int64(n)
 
 			if _, werr := w.Write(buf[:n]); werr != nil {
+				flushPendingEvent()
+				result := p.finalizeStreamUsage(lastUsage, responsesState, prof, sseParseErrs)
 				reportParseErrors()
-				captureOutcome := event.OutcomeCaptured
-				captureReason := ""
-				if lastUsage == nil {
-					captureOutcome = event.OutcomeSkipped
-					captureReason = event.ReasonUsageNotPresent
-				}
 				p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, true,
-					clientIPHash, apiKeyHash, modelRequested, lastUsage, cr.bytesRead, totalBytes, safeOperationalError(werr),
-					captureOutcome, captureReason, finalizeStreamErrInfo())
+					clientIPHash, apiKeyHash, modelRequested, result.usage, cr.bytesRead, totalBytes, safeOperationalError(werr),
+					result.captureOutcome, result.captureReason, streamErrInfo(result), result.modelReturned, result.modelReturnedSource, result.terminalEvent, result.terminalReason)
 				return
 			}
 			flusher.Flush()
@@ -395,35 +475,21 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 				}
 				chunk = chunk[nl+lineBreakLen:]
 
-				if len(line) > 0 {
-					if errPayloads != nil {
-						errPayloads.addStrippedPayload(stripSSEDataLine(line, prof))
-					}
-					u, err := p.tryExtractSSEUsage(line, prof)
-					if err != nil {
-						sseParseErrs++
-					} else if u != nil {
-						lastUsage = mergeUsageInfo(lastUsage, u)
-					}
-				}
+				processPhysicalLine(line)
 			}
 		}
 
 		if readErr != nil {
+			flushPendingEvent()
 			errStr := ""
 			if readErr != io.EOF {
 				errStr = safeOperationalError(readErr)
 			}
+			result := p.finalizeStreamUsage(lastUsage, responsesState, prof, sseParseErrs)
 			reportParseErrors()
-			captureOutcome := event.OutcomeCaptured
-			captureReason := ""
-			if lastUsage == nil {
-				captureOutcome = event.OutcomeSkipped
-				captureReason = event.ReasonUsageNotPresent
-			}
 			p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, true,
-				clientIPHash, apiKeyHash, modelRequested, lastUsage, cr.bytesRead, totalBytes, errStr,
-				captureOutcome, captureReason, finalizeStreamErrInfo())
+				clientIPHash, apiKeyHash, modelRequested, result.usage, cr.bytesRead, totalBytes, errStr,
+				result.captureOutcome, result.captureReason, streamErrInfo(result), result.modelReturned, result.modelReturnedSource, result.terminalEvent, result.terminalReason)
 			return
 		}
 	}
@@ -443,6 +509,123 @@ func nextLineBreak(chunk []byte) (idx, width int) {
 	default:
 		return nl, 1
 	}
+}
+
+type sseEventAssembler struct {
+	maxBytes int
+	data     [][]byte
+	size     int
+	overflow bool
+}
+
+func newSSEEventAssembler(maxBytes int) *sseEventAssembler {
+	if maxBytes <= 0 {
+		maxBytes = 256 * 1024
+	}
+	return &sseEventAssembler{maxBytes: maxBytes}
+}
+
+func (a *sseEventAssembler) addLine(line []byte) ([][]byte, bool) {
+	if len(line) == 0 {
+		event, skipped := a.flush()
+		if len(event) == 0 {
+			return nil, skipped
+		}
+		return [][]byte{event}, skipped
+	}
+	trimmed := bytes.TrimLeft(line, " \t")
+	if !bytes.HasPrefix(trimmed, []byte("data:")) {
+		return nil, false
+	}
+	if a.overflow {
+		return nil, false
+	}
+	data := trimmed[5:]
+	if len(data) > 0 && data[0] == ' ' {
+		data = data[1:]
+	}
+	var events [][]byte
+	if len(a.data) > 0 && a.pendingPayloadComplete() {
+		event, skipped := a.flush()
+		if skipped {
+			return nil, true
+		}
+		if len(event) > 0 {
+			events = append(events, event)
+		}
+	}
+	a.size += len(data) + 1
+	if a.size > a.maxBytes {
+		a.data = nil
+		a.size = 0
+		a.overflow = true
+		return events, true
+	}
+	copied := make([]byte, len(data))
+	copy(copied, data)
+	a.data = append(a.data, copied)
+	return events, false
+}
+
+func (a *sseEventAssembler) flush() ([]byte, bool) {
+	if a.overflow {
+		a.overflow = false
+		a.data = nil
+		a.size = 0
+		return nil, true
+	}
+	if len(a.data) == 0 {
+		return nil, false
+	}
+	joinedSize := len("data: ")
+	for _, part := range a.data {
+		joinedSize += len(part)
+	}
+	joinedSize += len(a.data) - 1
+	out := make([]byte, 0, joinedSize)
+	out = append(out, "data: "...)
+	for i, part := range a.data {
+		if i > 0 {
+			out = append(out, '\n')
+		}
+		out = append(out, part...)
+	}
+	a.data = nil
+	a.size = 0
+	return out, false
+}
+
+func (a *sseEventAssembler) pendingPayloadComplete() bool {
+	if len(a.data) == 0 {
+		return false
+	}
+	payload := a.pendingPayload()
+	trimmed := bytes.TrimSpace(payload)
+	if bytes.Equal(trimmed, []byte("[DONE]")) {
+		return true
+	}
+	return json.Valid(trimmed)
+}
+
+func (a *sseEventAssembler) pendingPayload() []byte {
+	if len(a.data) == 0 {
+		return nil
+	}
+	if len(a.data) == 1 {
+		return a.data[0]
+	}
+	size := len(a.data) - 1
+	for _, part := range a.data {
+		size += len(part)
+	}
+	out := make([]byte, 0, size)
+	for i, part := range a.data {
+		if i > 0 {
+			out = append(out, '\n')
+		}
+		out = append(out, part...)
+	}
+	return out
 }
 
 func (p *Proxy) tryExtractSSEUsage(line []byte, prof *profile.EndpointProfile) (*extractor.UsageInfo, error) {
@@ -587,9 +770,13 @@ func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, resp *ht
 			}
 		}
 	}
-	if usage == nil && captureOutcome == event.OutcomeCaptured && captureReason == "" {
-		captureReason = event.ReasonUsageNotPresent
-		captureOutcome = event.OutcomeSkipped
+	if usage == nil {
+		if captureOutcome == event.OutcomeCaptured && captureReason == "" {
+			captureReason = event.ReasonUsageNotPresent
+			captureOutcome = event.OutcomeSkipped
+		} else if captureReason == event.ReasonSampleLimitExceeded {
+			captureOutcome = event.OutcomeSkipped
+		}
 	}
 
 	var errInfo *extractor.ErrorInfo
@@ -604,9 +791,103 @@ func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, resp *ht
 	if copyErr != nil {
 		errStr = safeOperationalError(copyErr)
 	}
+
+	modelReturnedSource := ""
+	modelReturned := ""
+	terminalEvent := ""
+	if usage != nil && usage.Model != "" {
+		modelReturned = usage.Model
+		modelReturnedSource = event.SourceHTTPResponse
+	}
+
 	p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, false,
 		clientIPHash, apiKeyHash, modelRequested, usage, cr.bytesRead, written, errStr,
-		captureOutcome, captureReason, errInfo)
+		captureOutcome, captureReason, errInfo, modelReturned, modelReturnedSource, terminalEvent, "")
+}
+
+// streamResult holds the outcome of finalizing a stream's usage extraction.
+type streamResult struct {
+	usage               *extractor.UsageInfo
+	modelReturned       string
+	modelReturnedSource string
+	terminalEvent       string
+	terminalReason      string
+	captureOutcome      string
+	captureReason       string
+	errInfo             *extractor.ErrorInfo
+}
+
+func (p *Proxy) finalizeStreamUsage(lastUsage *extractor.UsageInfo, responsesState *extractor.ResponsesStreamState, prof *profile.EndpointProfile, sseParseErrs int64) streamResult {
+	if responsesState != nil {
+		res := responsesState.Result()
+		usage := res.Usage
+		modelReturnedSource := res.ModelReturnedSource
+		terminalEvent := res.TerminalEvent
+		terminalReason := res.TerminalReason
+		captureOutcome := res.CaptureOutcome
+		captureReason := res.CaptureReason
+
+		if usage != nil && lastUsage != nil {
+			usage = mergeUsageInfo(lastUsage, usage)
+		} else if usage == nil && lastUsage != nil {
+			usage = lastUsage
+			if res.ModelReturned == "" && usage.Model != "" {
+				if modelReturnedSource == "" {
+					modelReturnedSource = event.SourceUsage
+				}
+			}
+			if captureOutcome == "" || captureOutcome == event.OutcomeSkipped {
+				if usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.TotalTokens > 0 {
+					captureOutcome = event.OutcomeCaptured
+					captureReason = ""
+				}
+			}
+		}
+		if usage != nil {
+			if res.ModelReturned != "" {
+				usage.Model = res.ModelReturned
+			}
+		}
+		return streamResult{
+			usage:               usage,
+			modelReturned:       res.ModelReturned,
+			modelReturnedSource: modelReturnedSource,
+			terminalEvent:       terminalEvent,
+			terminalReason:      terminalReason,
+			captureOutcome:      captureOutcome,
+			captureReason:       captureReason,
+			errInfo:             res.ErrorInfo,
+		}
+	}
+
+	captureOutcome := event.OutcomeCaptured
+	captureReason := ""
+	if lastUsage == nil {
+		captureOutcome = event.OutcomeSkipped
+		captureReason = event.ReasonUsageNotPresent
+	}
+
+	var terminalEvent string
+	modelReturnedSource := ""
+	if prof != nil {
+		if lastUsage != nil && lastUsage.Model != "" {
+			modelReturnedSource = event.SourceUsage
+		}
+	}
+	if sseParseErrs > 0 && (lastUsage == nil || captureOutcome != event.OutcomeCaptured) {
+		captureOutcome = event.OutcomeFailed
+		captureReason = event.ReasonParseError
+		terminalEvent = event.TerminalStreamError
+	}
+
+	return streamResult{
+		usage:               lastUsage,
+		modelReturned:       modelFromUsage(lastUsage),
+		captureOutcome:      captureOutcome,
+		captureReason:       captureReason,
+		terminalEvent:       terminalEvent,
+		modelReturnedSource: modelReturnedSource,
+	}
 }
 
 // ---------- recording ----------
@@ -614,7 +895,8 @@ func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, resp *ht
 func (p *Proxy) recordUsage(start time.Time, ttfb time.Duration, prof *profile.EndpointProfile, endpoint, method, requestID string, status int, stream bool,
 	clientIPHash, apiKeyHash, modelRequested string, usage *extractor.UsageInfo,
 	requestBytes, responseBytes int64, errStr string,
-	captureOutcome, captureReason string, errInfo *extractor.ErrorInfo) {
+	captureOutcome, captureReason string, errInfo *extractor.ErrorInfo,
+	modelReturned, modelReturnedSource, terminalEvent, terminalReason string) {
 
 	if requestBytes < 0 {
 		requestBytes = 0
@@ -656,8 +938,12 @@ func (p *Proxy) recordUsage(start time.Time, ttfb time.Duration, prof *profile.E
 		ResponseBytes: responseBytes,
 		Error:         errStr,
 
-		CaptureOutcome: captureOutcome,
-		CaptureReason:  captureReason,
+		CaptureOutcome:      captureOutcome,
+		CaptureReason:       captureReason,
+		ModelReturned:       modelReturned,
+		ModelReturnedSource: modelReturnedSource,
+		TerminalEvent:       terminalEvent,
+		TerminalReason:      terminalReason,
 	}
 
 	if errInfo != nil {
@@ -668,17 +954,22 @@ func (p *Proxy) recordUsage(start time.Time, ttfb time.Duration, prof *profile.E
 	}
 
 	if usage != nil {
-		ev.ModelReturned = usage.Model
+		if usage.Model != "" {
+			ev.ModelReturned = usage.Model
+		}
 		ev.InputTokens = usage.InputTokens
 		ev.OutputTokens = usage.OutputTokens
 		ev.ReasoningTokens = usage.ReasoningTokens
 		ev.CachedTokens = usage.CachedTokens
 		ev.CacheCreationTokens = usage.CacheCreationTokens
 		ev.TotalTokens = usage.TotalTokens
-		ev.UsageRawJSON, ev.UsageRawTruncated = truncateUsageRawJSON(usage.UsageRawJSON)
 		if ev.CaptureOutcome == "" {
 			ev.CaptureOutcome = event.OutcomeCaptured
 		}
+		if ev.ModelReturnedSource == "" {
+			ev.ModelReturnedSource = event.SourceUsage
+		}
+		ev.UsageSource = event.UsageSourceHTTPResponse
 	}
 
 	if !p.writer.Enqueue(writer.StatsEvent{Event: ev}) {
@@ -717,7 +1008,7 @@ func (p *Proxy) writeError(w http.ResponseWriter, start time.Time, ttfb time.Dur
 
 	p.recordUsage(start, ttfb, prof, endpoint, method, "", status, false,
 		clientIPHash, apiKeyHash, modelRequested, nil, requestBytes, 0, safeOperationalError(err),
-		captureOutcome, event.ReasonUpstreamError, errInfo)
+		captureOutcome, event.ReasonUpstreamError, errInfo, "", "", "", "")
 }
 
 const maxErrorStringLen = 500
@@ -779,11 +1070,7 @@ func safeOperationalError(err error) string {
 // ---------- helpers ----------
 
 func extractModel(body []byte) string {
-	tok, ok := topLevelJSONToken(body, "model")
-	if !ok {
-		return ""
-	}
-	if model, ok := tok.(string); ok {
+	if model, ok := topLevelJSONString(body, "model"); ok {
 		return model
 	}
 	return ""
@@ -804,6 +1091,13 @@ func extractModelFromPath(path string) string {
 
 func streamFromPath(path string) bool {
 	return strings.HasSuffix(path, ":streamGenerateContent")
+}
+
+func modelFromUsage(usage *extractor.UsageInfo) string {
+	if usage == nil {
+		return ""
+	}
+	return usage.Model
 }
 
 func mergeUsageInfo(current, next *extractor.UsageInfo) *extractor.UsageInfo {
@@ -920,94 +1214,259 @@ func apiKeyToken(r *http.Request) string {
 	return strings.TrimSpace(r.URL.Query().Get("key"))
 }
 
-func requestIDFromHeaders(respHeader, reqHeader http.Header) string {
-	for _, name := range []string{"OpenAI-Request-ID", "X-Request-ID", "Request-ID"} {
-		if value := respHeader.Get(name); value != "" {
+func (p *Proxy) requestIDFromHeaders(respHeader, reqHeader http.Header) string {
+	clientHeaders := dedupeStrings([]string{p.correlationHeader, "X-Request-ID", "Request-ID"})
+	for _, name := range clientHeaders {
+		if value := reqHeader.Get(name); value != "" {
 			return value
 		}
 	}
-	for _, name := range []string{"X-Request-ID", "Request-ID"} {
-		if value := reqHeader.Get(name); value != "" {
+	for _, name := range []string{"OpenAI-Request-ID", "X-Request-ID", "Request-ID"} {
+		if value := respHeader.Get(name); value != "" {
 			return value
 		}
 	}
 	return ""
 }
 
+func dedupeStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
 func streamFromJSON(body []byte) bool {
-	tok, ok := topLevelJSONToken(body, "stream")
+	stream, ok := topLevelJSONBool(body, "stream")
+	return ok && stream
+}
+
+func topLevelJSONString(body []byte, key string) (string, bool) {
+	valueStart, ok := findTopLevelJSONValue(body, key)
 	if !ok {
+		return "", false
+	}
+	end, ok := scanJSONStringEnd(body, valueStart)
+	if !ok {
+		return "", false
+	}
+	raw := body[valueStart:end]
+	if !bytes.ContainsAny(raw, `\`) {
+		return string(raw[1 : len(raw)-1]), true
+	}
+	var out strings.Builder
+	for i := 1; i < len(raw)-1; i++ {
+		if raw[i] != '\\' {
+			out.WriteByte(raw[i])
+			continue
+		}
+		i++
+		if i >= len(raw)-1 {
+			return "", false
+		}
+		switch raw[i] {
+		case '"', '\\', '/':
+			out.WriteByte(raw[i])
+		case 'b':
+			out.WriteByte('\b')
+		case 'f':
+			out.WriteByte('\f')
+		case 'n':
+			out.WriteByte('\n')
+		case 'r':
+			out.WriteByte('\r')
+		case 't':
+			out.WriteByte('\t')
+		default:
+			return "", false
+		}
+	}
+	return out.String(), true
+}
+
+func topLevelJSONBool(body []byte, key string) (bool, bool) {
+	valueStart, ok := findTopLevelJSONValue(body, key)
+	if !ok {
+		return false, false
+	}
+	switch {
+	case hasJSONLiteralAt(body, valueStart, "true"):
+		return true, true
+	case hasJSONLiteralAt(body, valueStart, "false"):
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func findTopLevelJSONValue(body []byte, key string) (int, bool) {
+	i := skipJSONWhitespace(body, 0)
+	if i >= len(body) || body[i] != '{' {
+		return 0, false
+	}
+	i++
+	for {
+		i = skipJSONWhitespace(body, i)
+		if i >= len(body) {
+			return 0, false
+		}
+		if body[i] == '}' {
+			return 0, false
+		}
+		keyEnd, ok := scanJSONStringEnd(body, i)
+		if !ok {
+			return 0, false
+		}
+		field := body[i+1 : keyEnd-1]
+		i = skipJSONWhitespace(body, keyEnd)
+		if i >= len(body) || body[i] != ':' {
+			return 0, false
+		}
+		i = skipJSONWhitespace(body, i+1)
+		if string(field) == key {
+			return i, true
+		}
+		next, ok := skipJSONValueBytes(body, i)
+		if !ok {
+			return 0, false
+		}
+		i = skipJSONWhitespace(body, next)
+		if i >= len(body) {
+			return 0, false
+		}
+		if body[i] == ',' {
+			i++
+			continue
+		}
+		if body[i] == '}' {
+			return 0, false
+		}
+		return 0, false
+	}
+}
+
+func skipJSONWhitespace(body []byte, i int) int {
+	for i < len(body) {
+		switch body[i] {
+		case ' ', '\n', '\r', '\t':
+			i++
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+func scanJSONStringEnd(body []byte, i int) (int, bool) {
+	if i >= len(body) || body[i] != '"' {
+		return 0, false
+	}
+	escaped := false
+	for i++; i < len(body); i++ {
+		if escaped {
+			escaped = false
+			continue
+		}
+		switch body[i] {
+		case '\\':
+			escaped = true
+		case '"':
+			return i + 1, true
+		}
+	}
+	return 0, false
+}
+
+func skipJSONValueBytes(body []byte, i int) (int, bool) {
+	i = skipJSONWhitespace(body, i)
+	if i >= len(body) {
+		return 0, false
+	}
+	switch body[i] {
+	case '"':
+		return scanJSONStringEnd(body, i)
+	case '{':
+		return skipJSONComposite(body, i, '{', '}')
+	case '[':
+		return skipJSONComposite(body, i, '[', ']')
+	default:
+		for i < len(body) {
+			switch body[i] {
+			case ',', '}', ']', ' ', '\n', '\r', '\t':
+				return i, true
+			default:
+				i++
+			}
+		}
+		return i, true
+	}
+}
+
+func skipJSONComposite(body []byte, i int, open, close byte) (int, bool) {
+	depth := 0
+	for i < len(body) {
+		switch body[i] {
+		case '"':
+			end, ok := scanJSONStringEnd(body, i)
+			if !ok {
+				return 0, false
+			}
+			i = end
+			continue
+		case open:
+			depth++
+		case close:
+			depth--
+			if depth == 0 {
+				return i + 1, true
+			}
+		case '{':
+			if open != '{' {
+				end, ok := skipJSONComposite(body, i, '{', '}')
+				if !ok {
+					return 0, false
+				}
+				i = end
+				continue
+			}
+		case '[':
+			if open != '[' {
+				end, ok := skipJSONComposite(body, i, '[', ']')
+				if !ok {
+					return 0, false
+				}
+				i = end
+				continue
+			}
+		}
+		i++
+	}
+	return 0, false
+}
+
+func hasJSONLiteralAt(body []byte, i int, literal string) bool {
+	if i+len(literal) > len(body) || string(body[i:i+len(literal)]) != literal {
 		return false
 	}
-	stream, _ := tok.(bool)
-	return stream
-}
-
-func topLevelJSONToken(body []byte, key string) (json.Token, bool) {
-	if len(body) == 0 {
-		return nil, false
+	end := i + len(literal)
+	if end == len(body) {
+		return true
 	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	tok, err := dec.Token()
-	if err != nil {
-		return nil, false
-	}
-	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
-		return nil, false
-	}
-	for dec.More() {
-		keyTok, err := dec.Token()
-		if err != nil {
-			return nil, false
-		}
-		field, ok := keyTok.(string)
-		if !ok {
-			return nil, false
-		}
-		if field == key {
-			valueTok, err := dec.Token()
-			if err != nil {
-				return nil, false
-			}
-			return valueTok, true
-		}
-		if err := skipJSONValue(dec); err != nil {
-			return nil, false
-		}
-	}
-	return nil, false
-}
-
-func skipJSONValue(dec *json.Decoder) error {
-	tok, err := dec.Token()
-	if err != nil {
-		return err
-	}
-	delim, ok := tok.(json.Delim)
-	if !ok {
-		return nil
-	}
-	switch delim {
-	case '{':
-		for dec.More() {
-			if _, err := dec.Token(); err != nil {
-				return err
-			}
-			if err := skipJSONValue(dec); err != nil {
-				return err
-			}
-		}
-		_, err := dec.Token()
-		return err
-	case '[':
-		for dec.More() {
-			if err := skipJSONValue(dec); err != nil {
-				return err
-			}
-		}
-		_, err := dec.Token()
-		return err
+	switch body[end] {
+	case ',', '}', ']', ' ', '\n', '\r', '\t':
+		return true
 	default:
-		return nil
+		return false
 	}
 }

@@ -15,18 +15,21 @@ type SummaryReport struct {
 }
 
 type ModelReport struct {
-	Model               string  `json:"model"`
-	ModelSource         string  `json:"model_source"`
-	RequestCount        int64   `json:"request_count"`
-	FailedCount         int64   `json:"failed_count"`
-	InputTokens         int64   `json:"input_tokens"`
-	OutputTokens        int64   `json:"output_tokens"`
-	ReasoningTokens     int64   `json:"reasoning_tokens"`
-	CachedTokens        int64   `json:"cached_tokens"`
-	CacheCreationTokens int64   `json:"cache_creation_tokens"`
-	TotalTokens         int64   `json:"total_tokens"`
-	Cost                float64 `json:"cost"`
-	CostKnown           bool    `json:"cost_known"`
+	Model                     string           `json:"model"`
+	ModelSource               string           `json:"model_source"`
+	RequestCount              int64            `json:"request_count"`
+	FailedCount               int64            `json:"failed_count"`
+	InputTokens               int64            `json:"input_tokens"`
+	OutputTokens              int64            `json:"output_tokens"`
+	ReasoningTokens           int64            `json:"reasoning_tokens"`
+	CachedTokens              int64            `json:"cached_tokens"`
+	CacheCreationTokens       int64            `json:"cache_creation_tokens"`
+	TotalTokens               int64            `json:"total_tokens"`
+	Cost                      float64          `json:"cost"`
+	CostKnown                 bool             `json:"cost_known"`
+	ModelReturnedSourceCounts map[string]int64 `json:"model_returned_source_counts,omitempty"`
+	UsageSourceCounts         map[string]int64 `json:"usage_source_counts,omitempty"`
+	MissingUsageCount         int64            `json:"missing_usage_count"`
 }
 
 type KeyReport struct {
@@ -108,6 +111,11 @@ type RequestReport struct {
 	ErrorParam            string `json:"error_param"`
 	ErrorMessage          string `json:"error_message"`
 	ErrorMessageTruncated bool   `json:"error_message_truncated"`
+	ModelReturnedSource   string `json:"model_returned_source"`
+	UsageSource           string `json:"usage_source"`
+	TerminalEvent         string `json:"terminal_event"`
+	TerminalReason        string `json:"terminal_reason"`
+	SideUsageEventID      int64  `json:"side_usage_event_id"`
 }
 
 type ErrorTimelineReport struct {
@@ -174,6 +182,7 @@ type IssueReport struct {
 	Label       string `json:"label"`
 	Count       int64  `json:"count"`
 	Severity    string `json:"severity"`
+	SourceGroup string `json:"source_group"`
 	LatestAt    string `json:"latest_at"`
 	Status      int    `json:"status"`
 	Endpoint    string `json:"endpoint"`

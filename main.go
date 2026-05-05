@@ -13,13 +13,17 @@ import (
 	"syscall"
 	"time"
 
+	"ai-gateway-metering-proxy/internal/cliproxy"
 	"ai-gateway-metering-proxy/internal/config"
+	"ai-gateway-metering-proxy/internal/credential"
 	"ai-gateway-metering-proxy/internal/db"
 	"ai-gateway-metering-proxy/internal/hash"
 	"ai-gateway-metering-proxy/internal/metrics"
 	"ai-gateway-metering-proxy/internal/pricing"
 	"ai-gateway-metering-proxy/internal/proxy"
+	"ai-gateway-metering-proxy/internal/quota"
 	"ai-gateway-metering-proxy/internal/store"
+	"ai-gateway-metering-proxy/internal/usagequeue"
 	"ai-gateway-metering-proxy/internal/webui"
 	"ai-gateway-metering-proxy/internal/writer"
 )
@@ -140,8 +144,55 @@ func main() {
 	defer close(stopHealth)
 
 	// Create proxy handler.
-	proxyHandler := proxy.New(cfg.Upstream, hasher, batchWriter, cfg.MaxNonstreamSampleBytes)
+	proxyHandler := proxy.New(cfg.Upstream, hasher, batchWriter, cfg.MaxNonstreamSampleBytes, cfg.RequestMetadata)
+	proxyHandler.SetCorrelationHeader(cfg.Observability.Correlation.Header)
 	proxyHandler.SetMeteringEnabled(cfg.MeteringEnabled)
+
+	// CLIProxyAPI management client and pollers.
+	var credPoller *credential.Poller
+	var quotaPoller *quota.Poller
+	var usageQueuePoller *usagequeue.Poller
+	if cfg.CLIProxyManagement.Enabled {
+		cliTimeout := cfg.CLIProxyManagement.CredentialHealth.Timeout
+		if cfg.CLIProxyManagement.Quota.Timeout > cliTimeout {
+			cliTimeout = cfg.CLIProxyManagement.Quota.Timeout
+		}
+		cliClient, err := cliproxy.NewClient(cliproxy.CLIProxyConfig{
+			Enabled: cfg.CLIProxyManagement.Enabled,
+			BaseURL: cfg.CLIProxyManagement.BaseURL,
+			KeyFile: cfg.CLIProxyManagement.KeyFile,
+			Timeout: cliTimeout,
+		})
+		if err != nil {
+			log.Fatalf("Failed to create CLIProxyAPI management client: %v", err)
+		}
+		managementKey, err := cliproxy.ReadKeyFile(cfg.CLIProxyManagement.KeyFile)
+		if err != nil {
+			log.Fatalf("Failed to read CLIProxyAPI management key: %v", err)
+		}
+
+		if cfg.CLIProxyManagement.UsageQueue.Enabled {
+			allowRequestMerge := cfg.Observability.Correlation.RequirePropagationVerified &&
+				cfg.Observability.Correlation.SideChannelMerge == "request_id" &&
+				cfg.CLIProxyManagement.UsageQueue.MergeMode == "request_id"
+			usageQueuePoller = usagequeue.NewPoller(cfg.CLIProxyManagement.UsageQueue.RESPAddr, managementKey,
+				cfg.CLIProxyManagement.UsageQueue, database, hasher, allowRequestMerge)
+			usageQueuePoller.Start()
+			defer usageQueuePoller.Stop()
+		}
+
+		if cfg.CLIProxyManagement.CredentialHealth.Enabled {
+			credPoller = credential.NewPoller(cliClient, database, hasher, cfg.CLIProxyManagement.CredentialHealth)
+			credPoller.Start()
+			defer credPoller.Stop()
+		}
+
+		if cfg.CLIProxyManagement.Quota.Enabled {
+			quotaPoller = quota.NewPoller(cliClient, database, hasher, cfg.CLIProxyManagement.Quota)
+			quotaPoller.Start()
+			defer quotaPoller.Stop()
+		}
+	}
 
 	// Set up mux.
 	mux := http.NewServeMux()
@@ -157,6 +208,16 @@ func main() {
 			webuiServer = webui.New(reportStore, pricingData, batchWriter, proxyHandler.Registry(), cfg.WebUI.BasePath)
 		}
 		webuiServer.SetMeteringEnabledFunc(func() bool { return cfg.MeteringEnabled })
+		webuiServer.SetCorrelationMode(cfg.Observability.Correlation.SideChannelMerge)
+		if credPoller != nil {
+			webuiServer.SetCredPoller(credPoller)
+		}
+		if quotaPoller != nil {
+			webuiServer.SetQuotaPoller(quotaPoller)
+		}
+		if usageQueuePoller != nil {
+			webuiServer.SetUsageQueuePoller(usageQueuePoller)
+		}
 		mux.Handle(cfg.WebUI.BasePath, webuiServer)
 		mux.Handle(cfg.WebUI.BasePath+"/", webuiServer)
 	}

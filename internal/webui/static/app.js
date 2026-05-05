@@ -23,6 +23,8 @@ let latestOverview = null;
 let latestIssueItems = [];
 let latestHealth = null;
 let latestActivity = null;
+let latestQuota = null;
+let latestObservability = null;
 let selectedIssueSeverity = '';
 let currentIssueClassFilter = '';
 
@@ -139,8 +141,8 @@ function setRefreshing(active) {
 }
 
 /* --- API --------------------------------------------------- */
-async function fetchJSON(path) {
-  const res = await fetch(BASE+path, { cache: 'no-store', credentials:'same-origin', headers:{'Accept':'application/json'} });
+async function fetchJSON(path, opts) {
+  const res = await fetch(BASE+path, Object.assign({ cache: 'no-store', credentials:'same-origin', headers:{'Accept':'application/json'} }, opts||{}));
   if (!res.ok) {
     let detail='';
     try { detail=(await res.text()).trim(); } catch (_) {}
@@ -285,9 +287,11 @@ async function loadRequests() {
   tbody.innerHTML=rows.map(r=>{
     const sc=r.status<400?'ok':r.status<500?'warn':'err';
     const md2=modelName(r.model_returned||r.model_requested||'unidentified');
-    const cap=r.capture_outcome==='captured'?`<span class="badge ok">${esc(t('badge.captured'))}</span>`:r.capture_outcome==='failed'?`<span class="badge err">${esc(t('badge.failed'))}</span>`:r.capture_outcome==='skipped'?`<span class="badge warn">${esc(t('badge.skipped'))}</span>`:`<span class="badge neutral">${esc(r.capture_reason||t('badge.not_recorded'))}</span>`;
+    const sourceBits=[r.model_returned_source&&`model:${r.model_returned_source}`,r.usage_source&&`usage:${r.usage_source}`,r.terminal_event&&`terminal:${r.terminal_event}`,r.side_usage_event_id&&`side:${r.side_usage_event_id}`].filter(Boolean);
+    const capTitle=[r.capture_reason&&`reason:${r.capture_reason}`,r.terminal_reason&&`terminal_reason:${r.terminal_reason}`].concat(sourceBits).filter(Boolean).join(' / ');
+    const cap=r.capture_outcome==='captured'?`<span class="badge ok" title="${esc(capTitle)}">${esc(t('badge.captured'))}</span>`:r.capture_outcome==='failed'?`<span class="badge err" title="${esc(capTitle)}">${esc(t('badge.failed'))}</span>`:r.capture_outcome==='skipped'?`<span class="badge warn" title="${esc(capTitle)}">${esc(t('badge.skipped'))}</span>`:`<span class="badge neutral" title="${esc(capTitle)}">${esc(r.capture_reason||t('badge.not_recorded'))}</span>`;
     const ep2=r.stream?`${esc(r.endpoint)} <span class="badge info">SSE</span>`:esc(r.endpoint);
-    return `<tr><td class="mono">${esc(fmtTime(r.created_at))}</td><td><span class="badge ${sc}">${esc(r.status)}</span></td><td>${ep2}</td><td><div class="model-name" title="${esc(md2)}">${esc(md2)}</div></td><td class="numeric mono">${fmtNum(r.input_tokens)}</td><td class="numeric mono">${fmtNum(r.output_tokens)}</td><td class="numeric mono">${fmtNum(r.total_tokens)}</td><td class="numeric mono">${fmtLat(r.ttfb_ms)}</td><td class="numeric mono">${fmtLat(r.latency_ms)}</td><td>${cap}</td><td><code>${esc(shortHash(r.api_key_hash))}</code></td></tr>`;
+    return `<tr><td class="mono">${esc(fmtTime(r.created_at))}</td><td><span class="badge ${sc}">${esc(r.status)}</span></td><td>${ep2}</td><td><div class="model-name" title="${esc(sourceBits.join(' / ')||md2)}">${esc(md2)}</div>${sourceBits.length?`<div class="model-source">${esc(sourceBits.slice(0,2).join(' / '))}</div>`:''}</td><td class="numeric mono">${fmtNum(r.input_tokens)}</td><td class="numeric mono">${fmtNum(r.output_tokens)}</td><td class="numeric mono">${fmtNum(r.total_tokens)}</td><td class="numeric mono">${fmtLat(r.ttfb_ms)}</td><td class="numeric mono">${fmtLat(r.latency_ms)}</td><td>${cap}</td><td><code>${esc(shortHash(r.api_key_hash))}</code></td></tr>`;
   }).join('');
 }
 
@@ -406,6 +410,7 @@ function renderUsageTrend(rows,bucket) {
   const el=$('usage-trend-chart'); if(!el) return;
   renderUsageLegend(currentUsageMode);
   if(currentUsageMode==='tokens') renderTokenTrend(el,rows,bucket);
+  else if(currentUsageMode==='requests') renderRequestTrend(el,rows,bucket,usageMeta());
   else renderSingleTrend(el,rows,bucket,usageMeta());
 }
 
@@ -422,19 +427,15 @@ function renderSingleTrend(el,rows,bucket,meta) {
   const bars=rows.map((r,i)=>{
     const cx=dims.l+slot*(i+.5), x=cx-barW/2, v=values[i];
     const y=yFor(v), h=Math.max(0,dims.h-dims.b-y);
-    const failed=Number(r.failed_count||0), failedH=currentUsageMode==='requests'?pH*Math.min(failed,maxV)/maxV:0;
-    const failedY=dims.h-dims.b-failedH;
-    const mainKind=currentUsageMode==='cost'?'cost':'requests';
-    const tt=currentUsageMode==='requests'?reqTooltip(r):ttHtml(fmtShort(r.timestamp),'',[
+    const mainKind='cost';
+    const tt=ttHtml(fmtShort(r.timestamp),'',[
       [mainKind,meta.tooltip,meta.fmtFull(v)],
-      ['tokens',t('tooltip.tokens'),fmtFull(r.total_tokens||0)],
-      ['failed',t('tooltip.failed'),fmtFull(r.failed_count||0)]
+      ['tokens',t('tooltip.tokens'),fmtFull(r.total_tokens||0)]
     ]);
     return `<g class="chart-hover-group" tabindex="0" data-tooltip="${esc(tt)}">
       <rect class="chart-hover-band" x="${(dims.l+slot*i).toFixed(1)}" y="${dims.t}" width="${slot.toFixed(1)}" height="${pH}"/>
       <line class="chart-hover-ruler" x1="${cx.toFixed(1)}" y1="${dims.t}" x2="${cx.toFixed(1)}" y2="${dims.h-dims.b}"/>
       ${h>0?`<rect class="chart-bar ${mainKind} chart-bar-rect" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}"/>`:''}
-      ${failedH>0?`<rect class="chart-bar failed chart-bar-rect" x="${(x+barW*.62).toFixed(1)}" y="${failedY.toFixed(1)}" width="${Math.max(2,barW*.34).toFixed(1)}" height="${failedH.toFixed(1)}"/>`:''}
     </g>`;
   }).join('');
   el.innerHTML=`<svg viewBox="0 0 ${dims.w} ${dims.h}" role="img" aria-label="${esc(meta.label)}">
@@ -451,26 +452,80 @@ function renderSingleTrend(el,rows,bucket,meta) {
   setText('usage-chart-right',meta.fmtFull(total));
 }
 
+function renderRequestTrend(el,rows,bucket,meta) {
+  if(!rows.length){el.innerHTML=emptyChart(meta.empty);setText('usage-chart-summary','');setText('usage-chart-left','-');setText('usage-chart-right','-');return;}
+  const dims=chartDims(el);
+  const pW=dims.w-dims.l-dims.r, pH=dims.h-dims.t-dims.b;
+  const values=rows.map(meta.value), failed=rows.map(r=>Number(r.failed_count||0));
+  const maxV=Math.max(...values,...failed,1);
+  const total=values.reduce((s,v)=>s+v,0);
+  const xFor=i=>rows.length===1?dims.l+pW/2:dims.l+pW*i/(rows.length-1);
+  const yFor=v=>dims.h-dims.b-pH*Number(v||0)/maxV;
+  const linePath=pointsToSmoothPath(values.map((v,i)=>[xFor(i),yFor(v)]));
+  const failPath=pointsToSmoothPath(failed.map((v,i)=>[xFor(i),yFor(v)]));
+  const dots=rows.map((r,i)=>`<g class="chart-hover-group" tabindex="0" data-tooltip="${esc(reqTooltip(r))}">
+    <rect class="chart-hover-band" x="${(dims.l+pW*i/rows.length).toFixed(1)}" y="${dims.t}" width="${(pW/rows.length).toFixed(1)}" height="${pH}"/>
+    <line class="chart-hover-ruler" x1="${xFor(i).toFixed(1)}" y1="${dims.t}" x2="${xFor(i).toFixed(1)}" y2="${dims.h-dims.b}"/>
+    <circle class="chart-point" cx="${xFor(i).toFixed(1)}" cy="${yFor(values[i]).toFixed(1)}" r="3"/>
+  </g>`).join('');
+  el.innerHTML=`<svg viewBox="0 0 ${dims.w} ${dims.h}" role="img" aria-label="${esc(meta.label)}">
+    ${gridLines(maxV,dims,meta.fmt)}
+    <line stroke="var(--chart-grid)" stroke-width="1" x1="${dims.l}" y1="${dims.h-dims.b}" x2="${dims.w-dims.r}" y2="${dims.h-dims.b}"/>
+    <path class="chart-fill-area" d="${linePath} L ${xFor(rows.length-1).toFixed(1)} ${dims.h-dims.b} L ${xFor(0).toFixed(1)} ${dims.h-dims.b} Z"/>
+    <path class="chart-line requests" d="${linePath}"/>
+    <path class="chart-line failed" d="${failPath}"/>
+    ${dots}
+  </svg>`;
+  attachTT(el);
+  setText('usage-chart-summary',t('summary.requests_chart',{count:rows.length,bucket,peak:fmtFull(maxV)}));
+  setText('usage-chart-left',fmtShort(rows[0].timestamp));
+  setText('usage-chart-right',fmtFull(total));
+}
+
+function pointsToSmoothPath(points) {
+  if(!points.length) return '';
+  if(points.length===1) return `M ${points[0][0].toFixed(1)} ${points[0][1].toFixed(1)}`;
+  let d=`M ${points[0][0].toFixed(1)} ${points[0][1].toFixed(1)}`;
+  for(let i=1;i<points.length;i++){
+    const [x0,y0]=points[i-1], [x1,y1]=points[i];
+    const mx=(x0+x1)/2;
+    d+=` C ${mx.toFixed(1)} ${y0.toFixed(1)}, ${mx.toFixed(1)} ${y1.toFixed(1)}, ${x1.toFixed(1)} ${y1.toFixed(1)}`;
+  }
+  return d;
+}
+
 function renderTokenTrend(el,rows,bucket) {
   if(!rows.length){el.innerHTML=emptyChart(t('state.no_token_data'));setText('usage-chart-summary','');setText('usage-chart-left','-');setText('usage-chart-right','-');return;}
   const dims=chartDims(el);
   const pW=dims.w-dims.l-dims.r, pH=dims.h-dims.t-dims.b;
   const totals=rows.map(r=>{
     const reas=Number(r.reasoning_tokens||0),rawOut=Number(r.output_tokens||0);
-    return {cached:Number(r.cached_tokens||0),uncached:Math.max(0,Number(r.input_tokens||0)-Number(r.cached_tokens||0)),output:Math.max(0,rawOut-reas),reasoning:reas,total:Number(r.total_tokens||0)};
+    const cached=Number(r.cached_tokens||0),uncached=Math.max(0,Number(r.input_tokens||0)-Number(r.cached_tokens||0)),output=Math.max(0,rawOut-reas);
+    const stack=cached+uncached+output+reas;
+    return {cached,uncached,output,reasoning:reas,total:Math.max(Number(r.total_tokens||0),stack)};
   });
-  const stacks=totals.map(r=>r.cached+r.uncached+r.output+r.reasoning);
-  const maxStack=Math.max(...stacks,1);
+  const maxTotal=Math.max(...totals.map(r=>r.total),1);
   const totalTok=totals.reduce((s,r)=>s+r.total,0);
   const slot=pW/rows.length;
   const barW=Math.max(2,Math.min(24,slot*.6));
   const bars=rows.map((r,i)=>{
     const cx=dims.l+slot*(i+.5), x=cx-barW/2;
     let cursor=dims.h-dims.b;
-    const parts=[['cached',totals[i].cached],['uncached',totals[i].uncached],['output',totals[i].output],['reasoning',totals[i].reasoning]];
+    let parts=[['cached',totals[i].cached],['uncached',totals[i].uncached],['output',totals[i].output],['reasoning',totals[i].reasoning]].filter(([,v])=>v>0);
+    let hidden=0;
+    const visibleParts=[];
+    parts.forEach((p)=>{ if(pH*p[1]/maxTotal<.5) hidden+=p[1]; else visibleParts.push(p); });
+    parts=visibleParts;
+    if(hidden>0 && parts.length){
+      const largest=parts.reduce((best,p,idx)=>p[1]>parts[best][1]?idx:best,0);
+      parts[largest]=[parts[largest][0],parts[largest][1]+hidden];
+    } else if(hidden>0) {
+      const fallback=[['uncached',hidden]];
+      parts=fallback;
+    }
     const rects=parts.map(([kind,val])=>{
       if(val<=0)return'';
-      const h=pH*val/maxStack; if(h<.5)return'';
+      const h=pH*val/maxTotal; if(h<.5)return'';
       cursor-=h;
       return `<rect class="chart-bar ${kind} chart-bar-rect" x="${x.toFixed(1)}" y="${cursor.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}"/>`;
     }).join('');
@@ -481,7 +536,7 @@ function renderTokenTrend(el,rows,bucket) {
     </g>`;
   }).join('');
   el.innerHTML=`<svg viewBox="0 0 ${dims.w} ${dims.h}" role="img" aria-label="${esc(t('panel.tokens'))}">
-    ${gridLines(maxStack,dims)}
+    ${gridLines(maxTotal,dims)}
     <line stroke="var(--chart-grid)" stroke-width="1" x1="${dims.l}" y1="${dims.h-dims.b}" x2="${dims.w-dims.r}" y2="${dims.h-dims.b}"/>
     ${bars}
   </svg>`;
@@ -710,6 +765,60 @@ async function loadHealth() {
   }
 }
 
+async function loadQuota() {
+  const data=await fetchJSON('quota');
+  latestQuota=data;
+  const phase=data.phase||'-';
+  const items=Array.isArray(data.items)?data.items:[];
+  setText('quota-state',data.full_quota_available?t('obs.available'):data.module_status==='disabled'?t('obs.disabled'):t('obs.partial'));
+  setText('quota-detail',phase);
+  setText('observability-summary',t('obs.summary',{phase,quota:items.length}));
+  const table=$('quota-table');
+  if(!table) return;
+  if(!items.length){
+    table.innerHTML=`<tr><td colspan="6" class="empty-state">${esc(t('state.no_quota_data'))}</td></tr>`;
+    return;
+  }
+  table.innerHTML=items.map(row=>{
+    const remaining=row.remaining_amount!=null?fmtNum(row.remaining_amount):'-';
+    const limit=row.limit_amount!=null?fmtNum(row.limit_amount):'-';
+    const window=row.window_key||row.auth_index_hash||row.credential_hash||'-';
+    return `<tr>
+      <td>${esc(row.provider||'-')}</td>
+      <td><span class="badge ${row.status==='ok'||row.status==='ready'?'ok':row.status==='low'||row.status==='warning'?'warn':'err'}">${esc(row.status||'-')}</span></td>
+      <td class="mono">${esc(window)}</td>
+      <td class="numeric mono">${esc(remaining)}</td>
+      <td class="numeric mono">${esc(limit)}</td>
+      <td class="mono">${esc(fmtShort(row.checked_at))}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function loadObservability() {
+  const data=await fetchJSON('observability');
+  latestObservability=data;
+  const side=data.side_channel||{}, cred=data.credential_health||{}, quota=data.quota||{}, capture=data.request_capture||{};
+  setText('side-channel-state',side.enabled?(side.connected?t('obs.connected'):t('obs.disconnected')):t('obs.disabled'));
+  setText('side-channel-detail',side.enabled?`${side.merge_mode||'-'} / ${side.last_error||t('obs.no_error')}`:'-');
+  setText('credential-state',cred.enabled?t('obs.enabled'):t('obs.disabled'));
+  setText('credential-detail',cred.enabled?t('obs.credential_counts',{unavailable:fmtFull(cred.unavailable_count||0),errors:fmtFull(cred.error_count||0)}):'-');
+  setText('quota-state',quota.enabled?(quota.full_quota_available?t('obs.available'):t('obs.partial')):t('obs.disabled'));
+  setText('quota-detail',quota.enabled?`${quota.phase||'-'} / ${t('obs.stale_errors',{stale:fmtFull(quota.stale_count||0),errors:fmtFull(quota.error_count||0)})}`:'-');
+  setText('capture-state',fmtFull(Number(capture.captured_1h||0)));
+  setText('capture-state-detail',t('obs.capture_counts',{skipped:fmtFull(capture.skipped_1h||0),failed:fmtFull(capture.failed_1h||0)}));
+}
+
+async function refreshQuotaNow() {
+  const btn=$('quota-refresh');
+  if(btn) btn.disabled=true;
+  try {
+    await fetchJSON('quota/refresh',{method:'POST'});
+    await Promise.allSettled([loadQuota(),loadObservability()]);
+  } finally {
+    if(btn) btn.disabled=false;
+  }
+}
+
 async function loadErrors() {
   const data=await fetchJSON('errors?range='+encodeURIComponent(getRange())+'&nonzero=true');
   const rows=Array.isArray(data.timeline)?data.timeline:[];
@@ -730,7 +839,7 @@ async function refresh() {
   setRefreshing(true);
   try {
     const tasks=[]; if(!metadata) tasks.push(['metadata',loadMetadata]);
-    tasks.push(['overview',loadOverview],['issues',loadIssues],['activity',loadActivity],['models',loadModels],['keys',loadKeys],['timeseries',loadTimeseries],['errors',loadErrors],['health',loadHealth]);
+    tasks.push(['overview',loadOverview],['issues',loadIssues],['activity',loadActivity],['models',loadModels],['keys',loadKeys],['timeseries',loadTimeseries],['errors',loadErrors],['health',loadHealth],['quota',loadQuota],['observability',loadObservability]);
     if(requestsExpanded) tasks.push(['requests',loadRequests]);
     const settled=await Promise.allSettled(tasks.map(([,fn])=>fn()));
     const failures=settled.map((res,i)=>({res,name:tasks[i][0]})).filter(x=>x.res.status==='rejected').map(x=>({name:x.name,error:x.res.reason}));
@@ -748,6 +857,8 @@ function markFailed(failures) {
   if(fm.has('requests'))$('requests-table').innerHTML=errorRow(11,fm.get('requests').message);
   if(fm.has('issues')){$('issues-state').classList.remove('hidden');$('issues-state').innerHTML=`<div class="issues-empty error-text">${esc(fm.get('issues').message)}</div>`;const io=$('issues-overview');if(io)io.innerHTML='';$('issues-list').innerHTML=`<div class="issue-class-placeholder">${esc(t('issues.select_severity_hint'))}</div>`;}
   if(fm.has('timeseries')){const el=$('usage-trend-chart');if(el)el.innerHTML=`<div class="empty-state error-text">${esc(fm.get('timeseries').message)}</div>`;}
+  if(fm.has('quota')){const qt=$('quota-table');if(qt)qt.innerHTML=errorRow(6,fm.get('quota').message);}
+  if(fm.has('observability'))setText('observability-summary',fm.get('observability').message);
 }
 
 /* --- Toggle requests / nav --------------------------------- */
@@ -814,6 +925,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   setLastRefresh(null);
   $('language-select').addEventListener('change',e=>setLang(e.target.value));
   $('refresh-btn').addEventListener('click',refresh);
+  const qr=$('quota-refresh'); if(qr)qr.addEventListener('click',refreshQuotaNow);
   $('range-select').addEventListener('change',()=>{resetIssueSelection();refresh();});
   $('filter-status').addEventListener('change',()=>{currentIssueClassFilter='';reloadReqFilter();});
   $('filter-model').addEventListener('change',()=>{currentIssueClassFilter='';reloadReqFilter();});

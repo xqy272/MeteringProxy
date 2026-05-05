@@ -198,6 +198,38 @@
     </div>
   </section>
 
+  <!-- Observability -->
+  <section id="observability" class="card section-gap">
+    <div class="card-head">
+      <div class="card-head-left">
+        <div class="card-title" data-i18n="panel.observability">Observability</div>
+        <div class="card-desc" id="observability-summary">-</div>
+      </div>
+      <button class="ctrl-btn" id="quota-refresh" type="button" data-i18n="action.refresh_quota">Refresh quota</button>
+    </div>
+    <div class="card-body">
+      <div class="diag-grid">
+        <div class="diag-tile"><div class="dt-name" data-i18n="obs.side_channel">Side Channel</div><div class="dt-val mono" id="side-channel-state">-</div><div class="dt-unit" id="side-channel-detail">-</div></div>
+        <div class="diag-tile"><div class="dt-name" data-i18n="obs.credentials">Credentials</div><div class="dt-val mono" id="credential-state">-</div><div class="dt-unit" id="credential-detail">-</div></div>
+        <div class="diag-tile"><div class="dt-name" data-i18n="obs.quota">Quota</div><div class="dt-val mono" id="quota-state">-</div><div class="dt-unit" id="quota-detail">-</div></div>
+        <div class="diag-tile"><div class="dt-name" data-i18n="obs.capture">Capture</div><div class="dt-val mono" id="capture-state">-</div><div class="dt-unit" id="capture-state-detail">-</div></div>
+      </div>
+      <div class="table-wrap quota-table-wrap">
+        <table>
+          <thead><tr>
+            <th data-i18n="table.provider">Provider</th>
+            <th data-i18n="table.status">Status</th>
+            <th data-i18n="table.window">Window</th>
+            <th class="numeric" data-i18n="table.remaining">Remaining</th>
+            <th class="numeric" data-i18n="table.limit">Limit</th>
+            <th data-i18n="table.checked_at">Checked</th>
+          </tr></thead>
+          <tbody id="quota-table"><tr><td colspan="6" class="empty-state">-</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
   <!-- Diagnostics -->
   <section id="diagnostics" class="card">
     <div class="card-head">

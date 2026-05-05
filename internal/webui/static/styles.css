@@ -545,6 +545,25 @@ img { display: block; }
   stroke-width: 2; vector-effect: non-scaling-stroke;
   pointer-events: none;
 }
+.chart-fill-area {
+  fill: var(--chart-fill);
+  pointer-events: none;
+}
+.chart-line {
+  fill: none;
+  stroke: var(--chart-line);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+.chart-line.failed { stroke: var(--red); opacity: .85; }
+.chart-point {
+  fill: var(--surface);
+  stroke: var(--chart-line);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
 .chart-bar { pointer-events: none; transition: opacity .12s; }
 .chart-bar-rect { rx: 3; }
 .chart-bar.cached    { fill: var(--cyan); }

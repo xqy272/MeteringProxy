@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"ai-gateway-metering-proxy/internal/config"
 	"ai-gateway-metering-proxy/internal/event"
 	"ai-gateway-metering-proxy/internal/extractor"
 	"ai-gateway-metering-proxy/internal/hash"
@@ -253,7 +254,7 @@ func TestProxyNonStreaming_SmallResponse(t *testing.T) {
 
 	rw := &testRW{}
 	hasher := hash.NewWithSalt("test-salt")
-	p := New(upstream.URL, hasher, rw, 2*1024*1024)
+	p := New(upstream.URL, hasher, rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
 	req.Header.Set("Authorization", "bearer sk-test-key")
@@ -284,8 +285,8 @@ func TestProxyNonStreaming_SmallResponse(t *testing.T) {
 	if ev.APIKeyHash != hasher.Hash("sk-test-key") {
 		t.Error("api_key_hash should hash the bearer token case-insensitively")
 	}
-	if ev.ID != "req_upstream" {
-		t.Errorf("request_id = %q, want upstream request id", ev.ID)
+	if ev.ID != "req_client" {
+		t.Errorf("request_id = %q, want client request id", ev.ID)
 	}
 	if ev.EndpointProfile != "chat_completions" {
 		t.Errorf("endpoint_profile = %q, want chat_completions", ev.EndpointProfile)
@@ -315,7 +316,7 @@ func TestProxyPreservesGzipResponseAndDoesNotInjectAcceptEncoding(t *testing.T) 
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
 	rec := httptest.NewRecorder()
@@ -341,7 +342,7 @@ func TestProxyRecordsTTFBSeparatelyFromTotalLatency(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
 	rec := httptest.NewRecorder()
@@ -372,7 +373,7 @@ func TestProxyNonStreaming_LargeResponseNotTruncated(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader("{}"))
 	rec := httptest.NewRecorder()
@@ -398,7 +399,7 @@ func TestProxyNonStreaming_TruncatedJSONNoParseError(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 512)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 512, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader("{}"))
 	rec := httptest.NewRecorder()
@@ -421,7 +422,7 @@ func TestProxyStreaming_ByteTransparent(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"stream":true}`))
 	req.Header.Set("Accept", "text/event-stream")
@@ -445,7 +446,7 @@ func TestProxyStreaming_ErrorResponseClassifiedAfterForwarding(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o","stream":true}`))
 	req.Header.Set("Accept", "text/event-stream")
@@ -493,7 +494,7 @@ func TestProxyStreaming_SSEAcrossChunks(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
 	req.Header.Set("Accept", "text/event-stream")
@@ -518,7 +519,7 @@ func TestProxyStreaming_BareCRLineBreaks(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"stream":true}`))
 	req.Header.Set("Accept", "text/event-stream")
@@ -547,7 +548,7 @@ func TestProxyStreaming_ContextCancellationRecords(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -577,7 +578,7 @@ func TestProxyStreaming_LongLineDoesNotBlockForwarding(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 	beforeSkips := metrics.SSELineSkips()
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"stream":true}`))
@@ -614,7 +615,7 @@ func TestProxyStreaming_LongLineAcrossChunksCountsOneSkip(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 	beforeSkips := metrics.SSELineSkips()
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"stream":true}`))
@@ -635,7 +636,7 @@ func TestProxyStreaming_LongLineAcrossChunksCountsOneSkip(t *testing.T) {
 
 func TestProxyRequest_UpstreamError(t *testing.T) {
 	rw := &testRW{}
-	p := New("http://127.0.0.1:1", hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New("http://127.0.0.1:1", hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
 	rec := httptest.NewRecorder()
@@ -663,7 +664,7 @@ func TestProxyResponsesAPI_NonStreaming(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"model":"gpt-5.4-mini"}`))
 	rec := httptest.NewRecorder()
@@ -695,7 +696,7 @@ func TestProxyAnthropicMessages_NonStreaming(t *testing.T) {
 
 	rw := &testRW{}
 	hasher := hash.NewWithSalt("test-salt")
-	p := New(upstream.URL, hasher, rw, 2*1024*1024)
+	p := New(upstream.URL, hasher, rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}`))
 	req.Header.Set("X-API-Key", "anthropic-key")
@@ -745,7 +746,7 @@ func TestProxyAnthropicMessages_StreamingMergesUsage(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"claude-sonnet-4-6","stream":true}`))
 	req.Header.Set("Accept", "text/event-stream")
@@ -782,7 +783,7 @@ func TestProxyGeminiGenerateContent_NonStreaming(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1beta/models/gemini-2.5-pro:generateContent", strings.NewReader(`{"contents":[{"parts":[{"text":"hi"}]}]}`))
 	rec := httptest.NewRecorder()
@@ -819,7 +820,7 @@ func TestProxyGeminiGenerateContent_Streaming(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1beta/models/gemini-2.5-flash:streamGenerateContent", strings.NewReader(`{"contents":[{"parts":[{"text":"hi"}]}]}`))
 	req.Header.Set("Accept", "text/event-stream")
@@ -860,7 +861,7 @@ func TestProxyGeminiStreamPathWithSSEContentType(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1beta/models/gemini-2.5-flash:streamGenerateContent", strings.NewReader(`{"contents":[{"parts":[{"text":"hi"}]}]}`))
 	rec := httptest.NewRecorder()
@@ -907,7 +908,7 @@ func TestStreamDetection_ResponseContentType(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
 	rec := httptest.NewRecorder()
@@ -929,7 +930,7 @@ func TestProxyNonStreaming_ParseErrorIncremented(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 10*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 10*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader("{}"))
 	rec := httptest.NewRecorder()
@@ -948,7 +949,7 @@ func TestProxyNonStreaming_NoParseErrorOnValidJSONNoUsage(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 10*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 10*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader("{}"))
 	rec := httptest.NewRecorder()
@@ -967,7 +968,7 @@ func TestStreamDetection_UsesJSON(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o","stream":true}`))
 	rec := httptest.NewRecorder()
@@ -990,7 +991,7 @@ func TestStreamDetection_ResponseJSONOverridesStreamTrue(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"stream":true}`))
 	rec := httptest.NewRecorder()
@@ -1015,7 +1016,7 @@ func TestStreamDetection_ResponseSSEPriority(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
 	rec := httptest.NewRecorder()
@@ -1048,7 +1049,7 @@ func TestProxyStreaming_ResponsesAPIAcrossChunks(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"model":"gpt-5.4-mini","stream":true}`))
 	req.Header.Set("Accept", "text/event-stream")
@@ -1087,7 +1088,7 @@ func TestStreamDetection_EmptyContentTypeFallsBack(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"stream":true}`))
 	rec := httptest.NewRecorder()
@@ -1110,7 +1111,7 @@ func TestKillSwitch_DisablesMetering(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 	p.SetMeteringEnabled(false)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
@@ -1137,7 +1138,7 @@ func TestKillSwitch_StillForwards(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 	p.SetMeteringEnabled(false)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
@@ -1164,7 +1165,7 @@ func TestKillSwitch_StreamPathFlushes(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 	p.SetMeteringEnabled(false)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"stream":true}`))
@@ -1191,7 +1192,7 @@ func TestPassthroughProfile_NoMetering(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	// GET /v1/models is passthrough
 	req := httptest.NewRequest("GET", "/v1/models", nil)
@@ -1215,7 +1216,7 @@ func TestCaptureOutcome_Failed_OnParseError(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 10*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 10*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader("{}"))
 	rec := httptest.NewRecorder()
@@ -1242,7 +1243,7 @@ func TestCaptureOutcome_Skipped_WhenNoUsageInResponse(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 10*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 10*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader("{}"))
 	rec := httptest.NewRecorder()
@@ -1270,7 +1271,7 @@ func TestCaptureOutcome_Skipped_StreamWithoutUsage(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"stream":true}`))
 	req.Header.Set("Accept", "text/event-stream")
@@ -1289,7 +1290,7 @@ func TestCaptureOutcome_Skipped_StreamWithoutUsage(t *testing.T) {
 	}
 }
 
-func TestUsageRawJSON_TruncatedInEvent(t *testing.T) {
+func TestUsageRawJSON_NotStoredInEvent(t *testing.T) {
 	largeUsage := `{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"debug":"` + strings.Repeat("x", 6000) + `"}`
 	upstreamResp := `{"model":"gpt-4o","usage":` + largeUsage + `}`
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1299,7 +1300,7 @@ func TestUsageRawJSON_TruncatedInEvent(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 16*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 16*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
 	rec := httptest.NewRecorder()
@@ -1309,14 +1310,14 @@ func TestUsageRawJSON_TruncatedInEvent(t *testing.T) {
 		t.Fatal("no event recorded")
 	}
 	ev := lastEvent(rw)
-	if !ev.UsageRawTruncated {
-		t.Fatal("UsageRawTruncated = false, want true")
+	if ev.InputTokens != 10 || ev.OutputTokens != 5 || ev.TotalTokens != 15 {
+		t.Fatalf("tokens = %d/%d/%d, want 10/5/15", ev.InputTokens, ev.OutputTokens, ev.TotalTokens)
 	}
-	if len(ev.UsageRawJSON) != 4*1024 {
-		t.Fatalf("UsageRawJSON length = %d, want 4096", len(ev.UsageRawJSON))
+	if ev.UsageRawTruncated {
+		t.Fatal("UsageRawTruncated = true, want false")
 	}
-	if !strings.Contains(ev.UsageRawJSON, `"prompt_tokens":10`) {
-		t.Errorf("UsageRawJSON does not contain usage subset prefix: %.80q", ev.UsageRawJSON)
+	if ev.UsageRawJSON != "" {
+		t.Fatalf("UsageRawJSON = %.80q, want empty", ev.UsageRawJSON)
 	}
 }
 
@@ -1330,7 +1331,7 @@ func TestProxyNonStreaming_ErrorClassified(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
 	rec := httptest.NewRecorder()
@@ -1365,7 +1366,7 @@ func TestProxyStreaming_MalformedSSELineIncrementsParseErrors(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024)
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"stream":true}`))
 	req.Header.Set("Accept", "text/event-stream")
