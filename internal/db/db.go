@@ -180,6 +180,7 @@ type RequestRow struct {
 	TerminalEvent         string `json:"terminal_event"`
 	TerminalReason        string `json:"terminal_reason"`
 	SideUsageEventID      int64  `json:"side_usage_event_id"`
+	SideUsageMatchStatus  string `json:"side_usage_match_status"`
 }
 
 type HealthRow struct {
@@ -249,6 +250,8 @@ type SideUsageEvent struct {
 	OutputTokens          int64  `json:"output_tokens"`
 	ReasoningTokens       int64  `json:"reasoning_tokens"`
 	CachedTokens          int64  `json:"cached_tokens"`
+	CacheReadTokens       int64  `json:"cache_read_tokens"`
+	CacheCreationTokens   int64  `json:"cache_creation_tokens"`
 	TotalTokens           int64  `json:"total_tokens"`
 	LatencyMs             int64  `json:"latency_ms"`
 	Failed                int64  `json:"failed"`
@@ -324,9 +327,9 @@ const modelSourceAggExpr = `CASE WHEN SUM(CASE WHEN NULLIF(TRIM(model_returned),
 
 const modelReturnedSourceCompatExpr = `CASE WHEN NULLIF(TRIM(model_returned_source), '') IS NOT NULL THEN model_returned_source WHEN NULLIF(TRIM(model_returned), '') IS NOT NULL THEN 'legacy' ELSE 'none' END`
 
-const usageSourceCompatExpr = `CASE WHEN NULLIF(TRIM(usage_source), '') IS NOT NULL THEN usage_source WHEN COALESCE(input_tokens, 0) > 0 OR COALESCE(output_tokens, 0) > 0 OR COALESCE(reasoning_tokens, 0) > 0 OR COALESCE(cached_tokens, 0) > 0 OR COALESCE(total_tokens, 0) > 0 THEN 'http_response' ELSE 'none' END`
+const usageSourceCompatExpr = `CASE WHEN NULLIF(TRIM(usage_source), '') IS NOT NULL THEN usage_source WHEN COALESCE(input_tokens, 0) > 0 OR COALESCE(output_tokens, 0) > 0 OR COALESCE(reasoning_tokens, 0) > 0 OR COALESCE(cached_tokens, 0) > 0 OR COALESCE(cache_creation_tokens, 0) > 0 OR COALESCE(total_tokens, 0) > 0 THEN 'http_response' ELSE 'none' END`
 
-const schemaVersion = 6
+const schemaVersion = 7
 const activitySampleLimit = 1000
 
 func Open(path string) (*DB, error) {
@@ -461,6 +464,9 @@ func migrate(sqlDB *sql.DB) error {
 	if err := createTablesV6(sqlDB); err != nil {
 		return err
 	}
+	if err := ensureColumns(sqlDB, "side_usage_events", sideUsageEventColumns()); err != nil {
+		return err
+	}
 	if err := createIndexes(sqlDB); err != nil {
 		return err
 	}
@@ -470,7 +476,7 @@ func migrate(sqlDB *sql.DB) error {
 	if _, err := sqlDB.Exec(`
 			INSERT OR IGNORE INTO schema_migrations (version, name, applied_at)
 			VALUES (?, ?, ?)
-		`, schemaVersion, "v6_observability_fields", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		`, schemaVersion, "v7_cliproxyapi_compatibility_fields", time.Now().UTC().Format(time.RFC3339)); err != nil {
 		return err
 	}
 	_, err := sqlDB.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion))
@@ -498,6 +504,8 @@ func createTablesV6(sqlDB *sql.DB) error {
 			output_tokens INTEGER NOT NULL DEFAULT 0,
 			reasoning_tokens INTEGER NOT NULL DEFAULT 0,
 			cached_tokens INTEGER NOT NULL DEFAULT 0,
+			cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+			cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
 			total_tokens INTEGER NOT NULL DEFAULT 0,
 			latency_ms INTEGER NOT NULL DEFAULT 0,
 			failed INTEGER NOT NULL DEFAULT 0,
@@ -657,6 +665,13 @@ func healthMetricColumns() []columnSpec {
 		{"parse_error_total", "parse_error_total INTEGER DEFAULT 0"},
 		{"db_write_error_total", "db_write_error_total INTEGER DEFAULT 0"},
 		{"sse_line_skips_total", "sse_line_skips_total INTEGER DEFAULT 0"},
+	}
+}
+
+func sideUsageEventColumns() []columnSpec {
+	return []columnSpec{
+		{"cache_read_tokens", "cache_read_tokens INTEGER NOT NULL DEFAULT 0"},
+		{"cache_creation_tokens", "cache_creation_tokens INTEGER NOT NULL DEFAULT 0"},
 	}
 }
 
@@ -1251,7 +1266,7 @@ func (db *DB) percentileInt(since time.Time, column string, percentile float64, 
 }
 
 func (db *DB) Requests(limit int, statusMin, statusMax int, model, endpoint, errorClass string, since time.Time) ([]RequestRow, error) {
-	query := "SELECT id, COALESCE(created_at, ''), COALESCE(request_id, ''), COALESCE(endpoint, ''), COALESCE(method, ''), COALESCE(status, 0), COALESCE(latency_ms, 0), COALESCE(ttfb_ms, 0), COALESCE(stream, 0), COALESCE(client_ip_hash, ''), COALESCE(api_key_hash, ''), COALESCE(model_requested, ''), COALESCE(model_returned, ''), COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), COALESCE(reasoning_tokens, 0), COALESCE(cached_tokens, 0), COALESCE(cache_creation_tokens, 0), COALESCE(total_tokens, 0), COALESCE(request_bytes, 0), COALESCE(response_bytes, 0), COALESCE(error, ''), COALESCE(endpoint_profile, ''), COALESCE(capture_mode, ''), COALESCE(metering_kind, ''), COALESCE(capture_outcome, ''), COALESCE(capture_reason, ''), COALESCE(error_class, ''), COALESCE(error_type, ''), COALESCE(error_code, ''), COALESCE(error_param, ''), COALESCE(error_message, ''), COALESCE(error_message_truncated, 0), COALESCE(model_returned_source, ''), COALESCE(usage_source, ''), COALESCE(terminal_event, ''), COALESCE(terminal_reason, ''), COALESCE(side_usage_event_id, 0) FROM request_usage WHERE 1=1"
+	query := "SELECT id, COALESCE(created_at, ''), COALESCE(request_id, ''), COALESCE(endpoint, ''), COALESCE(method, ''), COALESCE(status, 0), COALESCE(latency_ms, 0), COALESCE(ttfb_ms, 0), COALESCE(stream, 0), COALESCE(client_ip_hash, ''), COALESCE(api_key_hash, ''), COALESCE(model_requested, ''), COALESCE(model_returned, ''), COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), COALESCE(reasoning_tokens, 0), COALESCE(cached_tokens, 0), COALESCE(cache_creation_tokens, 0), COALESCE(total_tokens, 0), COALESCE(request_bytes, 0), COALESCE(response_bytes, 0), COALESCE(error, ''), COALESCE(endpoint_profile, ''), COALESCE(capture_mode, ''), COALESCE(metering_kind, ''), COALESCE(capture_outcome, ''), COALESCE(capture_reason, ''), COALESCE(error_class, ''), COALESCE(error_type, ''), COALESCE(error_code, ''), COALESCE(error_param, ''), COALESCE(error_message, ''), COALESCE(error_message_truncated, 0), COALESCE(model_returned_source, ''), COALESCE(usage_source, ''), COALESCE(terminal_event, ''), COALESCE(terminal_reason, ''), COALESCE(side_usage_event_id, 0), COALESCE((SELECT match_status FROM side_usage_events WHERE matched_request_usage_id = request_usage.id ORDER BY CASE WHEN match_status = 'conflict' THEN 0 ELSE 1 END, id DESC LIMIT 1), '') FROM request_usage WHERE 1=1"
 	var args []any
 
 	if !since.IsZero() {
@@ -1296,13 +1311,13 @@ func (db *DB) Requests(limit int, statusMin, statusMax int, model, endpoint, err
 	var result []RequestRow
 	for rows.Next() {
 		var r RequestRow
-		if err := rows.Scan(&r.ID, &r.CreatedAt, &r.RequestID, &r.Endpoint, &r.Method, &r.Status, &r.LatencyMs, &r.TTFBMs, &r.Stream, &r.ClientIPHash, &r.APIKeyHash, &r.ModelRequested, &r.ModelReturned, &r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens, &r.CacheCreationTokens, &r.TotalTokens, &r.RequestBytes, &r.ResponseBytes, &r.Error, &r.EndpointProfile, &r.CaptureMode, &r.MeteringKind, &r.CaptureOutcome, &r.CaptureReason, &r.ErrorClass, &r.ErrorType, &r.ErrorCode, &r.ErrorParam, &r.ErrorMessage, &r.ErrorMessageTruncated, &r.ModelReturnedSource, &r.UsageSource, &r.TerminalEvent, &r.TerminalReason, &r.SideUsageEventID); err != nil {
+		if err := rows.Scan(&r.ID, &r.CreatedAt, &r.RequestID, &r.Endpoint, &r.Method, &r.Status, &r.LatencyMs, &r.TTFBMs, &r.Stream, &r.ClientIPHash, &r.APIKeyHash, &r.ModelRequested, &r.ModelReturned, &r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens, &r.CacheCreationTokens, &r.TotalTokens, &r.RequestBytes, &r.ResponseBytes, &r.Error, &r.EndpointProfile, &r.CaptureMode, &r.MeteringKind, &r.CaptureOutcome, &r.CaptureReason, &r.ErrorClass, &r.ErrorType, &r.ErrorCode, &r.ErrorParam, &r.ErrorMessage, &r.ErrorMessageTruncated, &r.ModelReturnedSource, &r.UsageSource, &r.TerminalEvent, &r.TerminalReason, &r.SideUsageEventID, &r.SideUsageMatchStatus); err != nil {
 			return nil, err
 		}
 		if r.ModelReturnedSource == "" && strings.TrimSpace(r.ModelReturned) != "" {
 			r.ModelReturnedSource = "legacy"
 		}
-		if r.UsageSource == "" && hasUsageTokens(r.InputTokens, r.OutputTokens, r.ReasoningTokens, r.CachedTokens, r.TotalTokens) {
+		if r.UsageSource == "" && hasUsageTokens(r.InputTokens, r.OutputTokens, r.ReasoningTokens, r.CachedTokens, r.CacheCreationTokens, r.TotalTokens) {
 			r.UsageSource = "http_response"
 		}
 		result = append(result, r)
@@ -1435,9 +1450,9 @@ func (db *DB) InsertSideUsageEvents(events []SideUsageEvent) error {
 	stmt, err := tx.Prepare(`
 		INSERT INTO side_usage_events (received_at, received_at_unix, request_id, matched_request_usage_id, match_status,
 			provider, model, alias, endpoint, auth_type, auth_index_hash, source_hash, api_key_hash,
-			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
+			input_tokens, output_tokens, reasoning_tokens, cached_tokens, cache_read_tokens, cache_creation_tokens, total_tokens,
 			latency_ms, failed, error_class)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return err
@@ -1454,7 +1469,7 @@ func (db *DB) InsertSideUsageEvents(events []SideUsageEvent) error {
 		}
 		if _, err := stmt.Exec(receivedAt, receivedAtUnix, e.RequestID, e.MatchedRequestUsageID, e.MatchStatus,
 			e.Provider, e.Model, e.Alias, e.Endpoint, e.AuthType, e.AuthIndexHash, e.SourceHash, e.APIKeyHash,
-			e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.CachedTokens, e.TotalTokens,
+			e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.CachedTokens, e.CacheReadTokens, e.CacheCreationTokens, e.TotalTokens,
 			e.LatencyMs, e.Failed, e.ErrorClass); err != nil {
 			return err
 		}
@@ -1474,12 +1489,12 @@ func (db *DB) InsertSideUsageEvent(e SideUsageEvent) (int64, error) {
 	res, err := db.sql.Exec(`
 		INSERT INTO side_usage_events (received_at, received_at_unix, request_id, matched_request_usage_id, match_status,
 			provider, model, alias, endpoint, auth_type, auth_index_hash, source_hash, api_key_hash,
-			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
+			input_tokens, output_tokens, reasoning_tokens, cached_tokens, cache_read_tokens, cache_creation_tokens, total_tokens,
 			latency_ms, failed, error_class)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, receivedAt, receivedAtUnix, e.RequestID, e.MatchedRequestUsageID, e.MatchStatus,
 		e.Provider, e.Model, e.Alias, e.Endpoint, e.AuthType, e.AuthIndexHash, e.SourceHash, e.APIKeyHash,
-		e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.CachedTokens, e.TotalTokens,
+		e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.CachedTokens, e.CacheReadTokens, e.CacheCreationTokens, e.TotalTokens,
 		e.LatencyMs, e.Failed, e.ErrorClass)
 	if err != nil {
 		return 0, err
@@ -1601,14 +1616,14 @@ func (db *DB) FindSideUsageEventByRequestID(requestID string) (*SideUsageEvent, 
 	row := db.read.QueryRow(`
 		SELECT id, received_at, received_at_unix, request_id, matched_request_usage_id, match_status,
 			provider, model, alias, endpoint, auth_type, auth_index_hash, source_hash, api_key_hash,
-			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
+			input_tokens, output_tokens, reasoning_tokens, cached_tokens, cache_read_tokens, cache_creation_tokens, total_tokens,
 			latency_ms, failed, error_class
 		FROM side_usage_events WHERE request_id = ? ORDER BY id ASC LIMIT 1
 	`, requestID)
 	var e SideUsageEvent
 	err := row.Scan(&e.ID, &e.ReceivedAt, &e.ReceivedAtUnix, &e.RequestID, &e.MatchedRequestUsageID, &e.MatchStatus,
 		&e.Provider, &e.Model, &e.Alias, &e.Endpoint, &e.AuthType, &e.AuthIndexHash, &e.SourceHash, &e.APIKeyHash,
-		&e.InputTokens, &e.OutputTokens, &e.ReasoningTokens, &e.CachedTokens, &e.TotalTokens,
+		&e.InputTokens, &e.OutputTokens, &e.ReasoningTokens, &e.CachedTokens, &e.CacheReadTokens, &e.CacheCreationTokens, &e.TotalTokens,
 		&e.LatencyMs, &e.Failed, &e.ErrorClass)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -1617,6 +1632,29 @@ func (db *DB) FindSideUsageEventByRequestID(requestID string) (*SideUsageEvent, 
 		return nil, err
 	}
 	return &e, nil
+}
+
+func (db *DB) SideUsageStatusCounts(since time.Time) (map[string]int64, error) {
+	rows, err := db.read.Query(`
+		SELECT COALESCE(NULLIF(TRIM(match_status), ''), 'unknown'), COUNT(*)
+		FROM side_usage_events
+		WHERE received_at_unix >= ?
+		GROUP BY 1
+	`, since.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := map[string]int64{}
+	for rows.Next() {
+		var status string
+		var count int64
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, err
+		}
+		result[status] = count
+	}
+	return result, rows.Err()
 }
 
 func (db *DB) UpdateSideUsageEventMatchStatus(id int64, matchStatus string, matchedRequestUsageID int64) error {
@@ -1643,12 +1681,12 @@ func (db *DB) ApplySideUsageEvent(id int64, matchTimeout time.Duration) (string,
 	err = tx.QueryRow(`
 		SELECT id, received_at, received_at_unix, request_id, matched_request_usage_id, match_status,
 			provider, model, alias, endpoint, auth_type, auth_index_hash, source_hash, api_key_hash,
-			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
+			input_tokens, output_tokens, reasoning_tokens, cached_tokens, cache_read_tokens, cache_creation_tokens, total_tokens,
 			latency_ms, failed, error_class
 		FROM side_usage_events WHERE id = ?
 	`, id).Scan(&e.ID, &e.ReceivedAt, &e.ReceivedAtUnix, &e.RequestID, &e.MatchedRequestUsageID, &e.MatchStatus,
 		&e.Provider, &e.Model, &e.Alias, &e.Endpoint, &e.AuthType, &e.AuthIndexHash, &e.SourceHash, &e.APIKeyHash,
-		&e.InputTokens, &e.OutputTokens, &e.ReasoningTokens, &e.CachedTokens, &e.TotalTokens,
+		&e.InputTokens, &e.OutputTokens, &e.ReasoningTokens, &e.CachedTokens, &e.CacheReadTokens, &e.CacheCreationTokens, &e.TotalTokens,
 		&e.LatencyMs, &e.Failed, &e.ErrorClass)
 	if err == sql.ErrNoRows {
 		return "unmatched", nil
@@ -1691,6 +1729,7 @@ func (db *DB) ApplySideUsageEvent(id int64, matchTimeout time.Duration) (string,
 		OutputTokens        int64
 		ReasoningTokens     int64
 		CachedTokens        int64
+		CacheCreationTokens int64
 		TotalTokens         int64
 		ModelReturned       string
 		ModelReturnedSource string
@@ -1699,13 +1738,13 @@ func (db *DB) ApplySideUsageEvent(id int64, matchTimeout time.Duration) (string,
 	}
 	err = tx.QueryRow(`
 		SELECT id, COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), COALESCE(reasoning_tokens, 0),
-			COALESCE(cached_tokens, 0), COALESCE(total_tokens, 0), COALESCE(model_returned, ''),
+			COALESCE(cached_tokens, 0), COALESCE(cache_creation_tokens, 0), COALESCE(total_tokens, 0), COALESCE(model_returned, ''),
 			COALESCE(model_returned_source, ''), COALESCE(usage_source, ''), COALESCE(side_usage_event_id, 0)
 		FROM request_usage
 		WHERE request_id = ? AND created_at_unix BETWEEN ? AND ?
 		ORDER BY id ASC LIMIT 1
 	`, e.RequestID, low, high).Scan(&req.ID, &req.InputTokens, &req.OutputTokens, &req.ReasoningTokens,
-		&req.CachedTokens, &req.TotalTokens, &req.ModelReturned, &req.ModelReturnedSource, &req.UsageSource, &req.SideUsageEventID)
+		&req.CachedTokens, &req.CacheCreationTokens, &req.TotalTokens, &req.ModelReturned, &req.ModelReturnedSource, &req.UsageSource, &req.SideUsageEventID)
 	if err == sql.ErrNoRows {
 		var anyRequest int64
 		if countErr := tx.QueryRow(`SELECT COALESCE(id, 0) FROM request_usage WHERE request_id = ? ORDER BY id ASC LIMIT 1`, e.RequestID).Scan(&anyRequest); countErr != nil && countErr != sql.ErrNoRows {
@@ -1723,22 +1762,22 @@ func (db *DB) ApplySideUsageEvent(id int64, matchTimeout time.Duration) (string,
 		return updateStatus("duplicate", req.ID)
 	}
 
-	requestHasTokens := hasUsageTokens(req.InputTokens, req.OutputTokens, req.ReasoningTokens, req.CachedTokens, req.TotalTokens)
-	sideHasTokens := hasUsageTokens(e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.CachedTokens, e.TotalTokens)
-	if requestHasTokens && sideHasTokens && !sameUsageTokens(req.InputTokens, req.OutputTokens, req.ReasoningTokens, req.CachedTokens, req.TotalTokens, e) {
+	requestHasTokens := hasUsageTokens(req.InputTokens, req.OutputTokens, req.ReasoningTokens, req.CachedTokens, req.CacheCreationTokens, req.TotalTokens)
+	sideHasTokens := hasUsageTokens(e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.CachedTokens, e.CacheCreationTokens, e.TotalTokens)
+	if requestHasTokens && sideHasTokens && !sameUsageTokens(req.InputTokens, req.OutputTokens, req.ReasoningTokens, req.CachedTokens, req.CacheCreationTokens, req.TotalTokens, e) {
 		return updateStatus("conflict", req.ID)
 	}
 
 	if !requestHasTokens && sideHasTokens {
 		if _, err := tx.Exec(`
 			UPDATE request_usage SET
-				input_tokens = ?, output_tokens = ?, reasoning_tokens = ?, cached_tokens = ?, total_tokens = ?,
+				input_tokens = ?, output_tokens = ?, reasoning_tokens = ?, cached_tokens = ?, cache_creation_tokens = ?, total_tokens = ?,
 				model_returned = CASE WHEN NULLIF(TRIM(model_returned), '') IS NULL AND ? <> '' THEN ? ELSE model_returned END,
 				model_returned_source = CASE WHEN NULLIF(TRIM(model_returned), '') IS NULL AND ? <> '' THEN 'side_channel' ELSE model_returned_source END,
 				usage_source = 'cliproxy_side_channel',
 				side_usage_event_id = ?
 			WHERE id = ?
-		`, e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.CachedTokens, e.TotalTokens,
+		`, e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.CachedTokens, e.CacheCreationTokens, e.TotalTokens,
 			e.Model, e.Model, e.Model, id, req.ID); err != nil {
 			return "", err
 		}
@@ -1748,14 +1787,15 @@ func (db *DB) ApplySideUsageEvent(id int64, matchTimeout time.Duration) (string,
 	return updateStatus("matched", req.ID)
 }
 
-func hasUsageTokens(input, output, reasoning, cached, total int64) bool {
-	return input > 0 || output > 0 || reasoning > 0 || cached > 0 || total > 0
+func hasUsageTokens(input, output, reasoning, cached, cacheCreation, total int64) bool {
+	return input > 0 || output > 0 || reasoning > 0 || cached > 0 || cacheCreation > 0 || total > 0
 }
 
-func sameUsageTokens(input, output, reasoning, cached, total int64, e SideUsageEvent) bool {
+func sameUsageTokens(input, output, reasoning, cached, cacheCreation, total int64, e SideUsageEvent) bool {
 	return input == e.InputTokens &&
 		output == e.OutputTokens &&
 		reasoning == e.ReasoningTokens &&
 		cached == e.CachedTokens &&
+		cacheCreation == e.CacheCreationTokens &&
 		total == e.TotalTokens
 }

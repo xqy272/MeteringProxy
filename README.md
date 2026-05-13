@@ -19,7 +19,7 @@ MeteringProxy 是一个面向 AI 网关流量的透明计量代理，部署在 C
 
 建议的 Caddy 路由策略：
 
-- 将计量目标 API 路径路由至 MeteringProxy：`POST /v1/chat/completions`、`POST /v1/responses`、`POST /v1/messages`，以及 Gemini 原生 `POST /v1beta/models/{model}:generateContent` / `POST /v1beta/models/{model}:streamGenerateContent`（`/v1/models/...` 同样支持）。
+- 将计量目标 API 路径路由至 MeteringProxy：OpenAI chat/completions、Responses/Codex direct、Anthropic messages、Gemini generateContent，以及 CPA provider aliases。完整支持矩阵见 [docs/cpa-compatibility.md](docs/cpa-compatibility.md)。
 - 将非计量的管理与模型接口直接路由至 CLIProxyAPI。
 - 使用 Basic Auth 或等效访问控制保护 `/metering` 路径。
 - 如有需要，在 Caddy 侧配置请求体大小限制。Go 代理层有意不截断请求体，保持透明代理行为不变。
@@ -180,9 +180,14 @@ api.example.com {
 
     @metered {
         method POST
-        path /v1/chat/completions /v1/responses /v1/messages
+        path /v1/chat/completions /v1/completions /v1/responses /v1/responses/compact /v1/messages
+        path /backend-api/codex/responses /backend-api/codex/responses/compact
         path /v1/models/*:generateContent /v1/models/*:streamGenerateContent
         path /v1beta/models/*:generateContent /v1beta/models/*:streamGenerateContent
+        path /api/provider/*/chat/completions /api/provider/*/completions /api/provider/*/responses
+        path /api/provider/*/v1/chat/completions /api/provider/*/v1/completions /api/provider/*/v1/responses /api/provider/*/v1/messages
+        path /api/provider/*/v1/models/*:generateContent /api/provider/*/v1/models/*:streamGenerateContent
+        path /api/provider/*/v1beta/models/*:generateContent /api/provider/*/v1beta/models/*:streamGenerateContent
     }
     handle @metered {
         reverse_proxy 127.0.0.1:8320 {

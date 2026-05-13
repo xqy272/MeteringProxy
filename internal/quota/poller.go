@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"sync"
 	"time"
 
@@ -13,11 +12,24 @@ import (
 	"ai-gateway-metering-proxy/internal/config"
 	"ai-gateway-metering-proxy/internal/db"
 	"ai-gateway-metering-proxy/internal/hash"
+	"ai-gateway-metering-proxy/internal/store"
 )
+
+type ProviderAdapter interface {
+	BuildRequest(provider string) map[string]interface{}
+	ParseResponse(p *Poller, provider string, body []byte, nowStr string, nowUnix int64) (quotaParseResult, error)
+}
+
+type quotaParseResult struct {
+	Count            int
+	CredentialHashes []string
+}
+
+type genericAdapter struct{}
 
 type Poller struct {
 	client       *cliproxy.Client
-	database     *db.DB
+	database     store.QuotaStore
 	hasher       *hash.Hasher
 	cfg          config.QuotaConfig
 	mu           sync.RWMutex
@@ -25,16 +37,18 @@ type Poller struct {
 	lastAt       time.Time
 	apiCallAvail bool
 	stopCh       chan struct{}
+	doneCh       chan struct{}
 	refreshCh    chan struct{}
 }
 
-func NewPoller(client *cliproxy.Client, database *db.DB, hasher *hash.Hasher, cfg config.QuotaConfig) *Poller {
+func NewPoller(client *cliproxy.Client, database store.QuotaStore, hasher *hash.Hasher, cfg config.QuotaConfig) *Poller {
 	return &Poller{
 		client:    client,
 		database:  database,
 		hasher:    hasher,
 		cfg:       cfg,
 		stopCh:    make(chan struct{}),
+		doneCh:    make(chan struct{}),
 		refreshCh: make(chan struct{}, 1),
 	}
 }
@@ -45,9 +59,11 @@ func (p *Poller) Start() {
 
 func (p *Poller) Stop() {
 	close(p.stopCh)
+	<-p.doneCh
 }
 
 func (p *Poller) probeAndLoop() {
+	defer close(p.doneCh)
 	p.probeAPICall()
 	p.poll()
 	cleanupTicker := time.NewTicker(p.cfg.DiagnosticRetention)
@@ -81,6 +97,12 @@ func (p *Poller) cleanup() {
 }
 
 func (p *Poller) probeAPICall() {
+	if p.client == nil {
+		p.mu.Lock()
+		p.apiCallAvail = false
+		p.mu.Unlock()
+		return
+	}
 	body := bytes.NewReader([]byte(`{"provider":"__metering_probe__","dry_run":true}`))
 	_, statusCode, err := p.client.DoAPICall("POST", "/api-call", body)
 	if err != nil {
@@ -90,7 +112,7 @@ func (p *Poller) probeAPICall() {
 		return
 	}
 	p.mu.Lock()
-	p.apiCallAvail = (statusCode >= 200 && statusCode < 300) || statusCode == http.StatusBadRequest
+	p.apiCallAvail = statusCode >= 200 && statusCode < 300
 	p.mu.Unlock()
 }
 
@@ -110,22 +132,46 @@ func (p *Poller) poll() {
 	if !p.APICallAvailable() {
 		for _, provider := range p.cfg.Providers {
 			p.recordRefreshEvent(provider, "", "probe", "error", "api_call_unavailable", 0, nowStr, nowUnix)
-			p.markProviderStale(provider, nowStr, nowUnix)
+			p.markProviderStale(provider, "api_call_unavailable", nowStr, nowUnix)
 		}
 		p.refreshDBState()
 		return
 	}
 
-	for _, provider := range p.cfg.Providers {
-		p.pollProvider(provider, nowStr, nowUnix)
+	concurrency := p.cfg.Concurrency
+	if concurrency <= 0 {
+		concurrency = 1
 	}
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	for _, provider := range p.cfg.Providers {
+		provider := provider
+		select {
+		case <-p.stopCh:
+			return
+		default:
+		}
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			p.pollProvider(provider, nowStr, nowUnix)
+		}()
+	}
+	wg.Wait()
 
 	p.refreshDBState()
 }
 
 func (p *Poller) pollProvider(provider, nowStr string, nowUnix int64) {
+	adapter, ok := adapterForProvider(provider)
+	if !ok {
+		p.recordUnsupportedProvider(provider, nowStr, nowUnix)
+		return
+	}
 	path := "/api-call"
-	body := buildQuotaRequestBody(provider)
+	body := adapter.BuildRequest(provider)
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
 		log.Printf("quota poll: marshal error for %s: %v", provider, err)
@@ -137,19 +183,33 @@ func (p *Poller) pollProvider(provider, nowStr string, nowUnix int64) {
 	if err != nil {
 		log.Printf("quota poll: error for %s: %v", provider, err)
 		p.recordRefreshEvent(provider, "", "api_call", "error", "api_call_unavailable", durationMs, nowStr, nowUnix)
-		p.markProviderStale(provider, nowStr, nowUnix)
+		p.markProviderStale(provider, "api_call_unavailable", nowStr, nowUnix)
 		return
 	}
 	if statusCode != 200 {
 		p.recordRefreshEvent(provider, "", "api_call", "error", "provider_error", durationMs, nowStr, nowUnix)
-		p.markProviderStale(provider, nowStr, nowUnix)
+		p.markProviderStale(provider, "provider_error", nowStr, nowUnix)
 		return
 	}
-	p.parseQuotaResponse(provider, respBody, nowStr, nowUnix)
+	result, err := adapter.ParseResponse(p, provider, respBody, nowStr, nowUnix)
+	if err != nil {
+		log.Printf("quota poll: parse error for %s: %v", provider, err)
+		p.recordRefreshEvent(provider, "", "parse", "error", "parse_error", durationMs, nowStr, nowUnix)
+		p.markProviderStale(provider, "parse_error", nowStr, nowUnix)
+		return
+	}
+	if result.Count == 0 {
+		p.recordRefreshEvent(provider, "", "parse", "error", "parse_error", durationMs, nowStr, nowUnix)
+		p.markProviderStale(provider, "parse_error", nowStr, nowUnix)
+		return
+	}
+	for _, credHash := range result.CredentialHashes {
+		p.recordRefreshEvent(provider, credHash, "api_call", "success", "available", durationMs, nowStr, nowUnix)
+	}
 	p.recordRefreshEvent(provider, "", "api_call", "success", "available", durationMs, nowStr, nowUnix)
 }
 
-func (p *Poller) markProviderStale(provider, nowStr string, nowUnix int64) {
+func (p *Poller) markProviderStale(provider, adapterStatus, nowStr string, nowUnix int64) {
 	rows, err := p.database.AllQuotaCurrent()
 	if err != nil {
 		return
@@ -157,7 +217,7 @@ func (p *Poller) markProviderStale(provider, nowStr string, nowUnix int64) {
 	for _, row := range rows {
 		if row.Provider == provider && row.Status != "stale" && row.Status != "error" {
 			row.Status = "stale"
-			row.AdapterStatus = "unreachable"
+			row.AdapterStatus = adapterStatus
 			row.CheckedAt = nowStr
 			row.CheckedAtUnix = nowUnix
 			if err := p.database.UpsertQuotaCurrent(&row); err != nil {
@@ -167,12 +227,16 @@ func (p *Poller) markProviderStale(provider, nowStr string, nowUnix int64) {
 	}
 }
 
-func (p *Poller) parseQuotaResponse(provider string, body []byte, nowStr string, nowUnix int64) {
+func (genericAdapter) BuildRequest(provider string) map[string]interface{} {
+	return map[string]interface{}{
+		"provider": provider,
+	}
+}
+
+func (genericAdapter) ParseResponse(p *Poller, provider string, body []byte, nowStr string, nowUnix int64) (quotaParseResult, error) {
 	var raw map[string]interface{}
 	if err := json.Unmarshal(body, &raw); err != nil {
-		log.Printf("quota poll: parse error for %s: %v", provider, err)
-		p.recordRefreshEvent(provider, "", "parse", "error", "parse_error", 0, nowStr, nowUnix)
-		return
+		return quotaParseResult{}, err
 	}
 	data, ok := raw["data"].([]interface{})
 	if !ok {
@@ -180,28 +244,37 @@ func (p *Poller) parseQuotaResponse(provider string, body []byte, nowStr string,
 		if ok {
 			data = []interface{}{single}
 		} else {
-			return
+			return quotaParseResult{}, fmt.Errorf("missing quota data")
 		}
 	}
+	result := quotaParseResult{}
 	for _, item := range data {
 		entry, ok := item.(map[string]interface{})
 		if !ok {
 			continue
 		}
-		p.processQuotaEntry(provider, entry, nowStr, nowUnix)
+		credHash, err := p.processQuotaEntry(provider, entry, nowStr, nowUnix)
+		if err != nil {
+			return result, err
+		}
+		result.Count++
+		if credHash != "" {
+			result.CredentialHashes = append(result.CredentialHashes, credHash)
+		}
 	}
+	return result, nil
 }
 
-func (p *Poller) processQuotaEntry(provider string, entry map[string]interface{}, nowStr string, nowUnix int64) {
+func (p *Poller) processQuotaEntry(provider string, entry map[string]interface{}, nowStr string, nowUnix int64) (string, error) {
 	credHash := ""
 	if key, ok := entry["key"].(string); ok && key != "" {
-		credHash = p.hasher.Hash(provider + ":" + key)
+		credHash = p.hashQuotaCredential(provider, "key:"+key)
 	} else if h, ok := entry["credential_hash"].(string); ok && h != "" {
-		credHash = h
+		credHash = p.hashQuotaCredential(provider, "credential_hash:"+h)
 	} else if idx, ok := entry["auth_index"]; ok {
-		credHash = p.hasher.Hash(provider + ":auth_index:" + fmt.Sprint(idx))
+		credHash = p.hashQuotaCredential(provider, "auth_index:"+fmt.Sprint(idx))
 	} else if source, ok := entry["source"].(string); ok && source != "" {
-		credHash = p.hasher.Hash(provider + ":source:" + source)
+		credHash = p.hashQuotaCredential(provider, "source:"+source)
 	}
 	windowKey := ""
 	if wk, ok := entry["window_key"].(string); ok {
@@ -211,9 +284,7 @@ func (p *Poller) processQuotaEntry(provider string, entry map[string]interface{}
 		windowKey = "default"
 	}
 	if credHash == "" {
-		log.Printf("quota poll: skipping %s quota entry without credential identity", provider)
-		p.recordRefreshEvent(provider, "", "parse", "error", "missing_credential_identity", 0, nowStr, nowUnix)
-		return
+		return "", fmt.Errorf("missing credential identity")
 	}
 	row := db.QuotaCurrentRow{
 		Provider:        provider,
@@ -244,7 +315,45 @@ func (p *Poller) processQuotaEntry(provider string, entry map[string]interface{}
 	}
 	if err := p.database.UpsertQuotaCurrent(&row); err != nil {
 		log.Printf("quota upsert error for %s/%s: %v", provider, credHash, err)
+		return "", err
 	}
+	return credHash, nil
+}
+
+func (p *Poller) recordUnsupportedProvider(provider, nowStr string, nowUnix int64) {
+	credHash := p.hashQuotaCredential(provider, "unsupported")
+	row := &db.QuotaCurrentRow{
+		Provider:       provider,
+		CredentialHash: credHash,
+		WindowKey:      "default",
+		CheckedAt:      nowStr,
+		CheckedAtUnix:  nowUnix,
+		Status:         "unknown",
+		QuotaSupported: 0,
+		AdapterStatus:  "unsupported",
+		ErrorClass:     "quota_unsupported",
+		Partial:        1,
+	}
+	if err := p.database.UpsertQuotaCurrent(row); err != nil {
+		log.Printf("quota unsupported upsert error for %s: %v", provider, err)
+	}
+	p.recordRefreshEvent(provider, credHash, "adapter", "error", "unsupported", 0, nowStr, nowUnix)
+}
+
+func adapterForProvider(provider string) (ProviderAdapter, bool) {
+	switch provider {
+	case "claude", "codex", "kimi":
+		return genericAdapter{}, true
+	default:
+		return nil, false
+	}
+}
+
+func (p *Poller) hashQuotaCredential(provider, material string) string {
+	if p.hasher == nil {
+		return ""
+	}
+	return p.hasher.Hash("quota_credential:" + provider + ":" + material)
 }
 
 func jsonQuotaStatus(remaining, limit, lowThreshold, warningThreshold float64) string {
@@ -303,12 +412,6 @@ func (p *Poller) Refresh() {
 	select {
 	case p.refreshCh <- struct{}{}:
 	default:
-	}
-}
-
-func buildQuotaRequestBody(provider string) map[string]interface{} {
-	return map[string]interface{}{
-		"provider": provider,
 	}
 }
 

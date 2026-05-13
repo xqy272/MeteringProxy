@@ -92,3 +92,79 @@ max_nonstream_sample_bytes: 999999999
 		t.Fatalf("MaxNonstreamSampleBytes = %d, want %d", cfg.MaxNonstreamSampleBytes, maxNonstreamSampleBytes)
 	}
 }
+
+func TestLoadAllowsInjectIfMissingCorrelationMode(t *testing.T) {
+	path := writeConfig(t, `
+upstream: "http://127.0.0.1:8317"
+observability:
+  correlation:
+    mode: "inject_if_missing"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Observability.Correlation.Mode != "inject_if_missing" {
+		t.Fatalf("mode = %q", cfg.Observability.Correlation.Mode)
+	}
+}
+
+func TestLoadRequestMetadataClampKeepsMaxAtLeastInitial(t *testing.T) {
+	path := writeConfig(t, `
+upstream: "http://127.0.0.1:8317"
+request_metadata:
+  initial_bytes: 70000
+  max_bytes: 65536
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RequestMetadata.InitialBytes != 65536 || cfg.RequestMetadata.MaxBytes != 65536 {
+		t.Fatalf("request metadata = initial %d max %d, want 65536/65536", cfg.RequestMetadata.InitialBytes, cfg.RequestMetadata.MaxBytes)
+	}
+}
+
+func TestLoadUsageQueueTransportDefaultsToAuto(t *testing.T) {
+	path := writeConfig(t, `
+upstream: "http://127.0.0.1:8317"
+cliproxy_management:
+  usage_queue:
+    enabled: true
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.CLIProxyManagement.UsageQueue.Transport != "auto" {
+		t.Fatalf("transport = %q, want auto", cfg.CLIProxyManagement.UsageQueue.Transport)
+	}
+	if cfg.CLIProxyManagement.UsageQueue.Timeout != 10*time.Second {
+		t.Fatalf("timeout = %v, want 10s", cfg.CLIProxyManagement.UsageQueue.Timeout)
+	}
+}
+
+func TestLoadQuotaDefaultsToDisabledUntilProviderAdaptersAreConfigured(t *testing.T) {
+	path := writeConfig(t, `
+upstream: "http://127.0.0.1:8317"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.CLIProxyManagement.Quota.Enabled {
+		t.Fatal("quota.enabled default = true, want false")
+	}
+}
+
+func TestLoadRejectsInvalidUsageQueueTransport(t *testing.T) {
+	path := writeConfig(t, `
+upstream: "http://127.0.0.1:8317"
+cliproxy_management:
+  usage_queue:
+    transport: "smtp"
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected invalid usage_queue.transport error")
+	}
+}

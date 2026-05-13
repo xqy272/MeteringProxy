@@ -10,64 +10,101 @@ import (
 
 func TestRegistry_ChatCompletionsMatch(t *testing.T) {
 	r := NewRegistry()
-	p, err := r.Match(http.MethodPost, "/v1/chat/completions")
-	if err != nil {
-		t.Fatalf("Match: %v", err)
+	for _, path := range []string{
+		"/v1/chat/completions",
+		"/api/provider/openai/chat/completions",
+		"/api/provider/openai/v1/chat/completions",
+	} {
+		p, err := r.Match(http.MethodPost, path)
+		if err != nil {
+			t.Fatalf("Match(%q): %v", path, err)
+		}
+		if p.Name != "chat_completions" {
+			t.Errorf("profile name for %q = %q, want chat_completions", path, p.Name)
+		}
+		if p.CaptureMode != event.CaptureUsageMetered {
+			t.Errorf("capture_mode = %q, want %q", p.CaptureMode, event.CaptureUsageMetered)
+		}
+		if p.MeteringKind != event.MeteringLLMTokens {
+			t.Errorf("metering_kind = %q, want %q", p.MeteringKind, event.MeteringLLMTokens)
+		}
+		if !p.StreamProtocol.UsesSSE {
+			t.Error("chat completions should use SSE")
+		}
+		if p.StreamProtocol.CompletionMarker != "[DONE]" {
+			t.Error("chat completions should use [DONE] completion marker")
+		}
+		if !p.IsMetered() {
+			t.Error("chat completions should be metered")
+		}
 	}
-	if p.Name != "chat_completions" {
-		t.Errorf("profile name = %q, want chat_completions", p.Name)
-	}
-	if p.CaptureMode != event.CaptureUsageMetered {
-		t.Errorf("capture_mode = %q, want %q", p.CaptureMode, event.CaptureUsageMetered)
-	}
-	if p.MeteringKind != event.MeteringLLMTokens {
-		t.Errorf("metering_kind = %q, want %q", p.MeteringKind, event.MeteringLLMTokens)
-	}
-	if !p.StreamProtocol.UsesSSE {
-		t.Error("chat completions should use SSE")
-	}
-	if p.StreamProtocol.CompletionMarker != "[DONE]" {
-		t.Error("chat completions should use [DONE] completion marker")
-	}
-	if !p.IsMetered() {
-		t.Error("chat completions should be metered")
+}
+
+func TestRegistry_OpenAICompletionsMatch(t *testing.T) {
+	r := NewRegistry()
+	for _, path := range []string{
+		"/v1/completions",
+		"/api/provider/openai/completions",
+		"/api/provider/openai/v1/completions",
+	} {
+		p, err := r.Match(http.MethodPost, path)
+		if err != nil {
+			t.Fatalf("Match(%q): %v", path, err)
+		}
+		if p.Name != "openai_completions" {
+			t.Errorf("profile name for %q = %q, want openai_completions", path, p.Name)
+		}
+		if p.CaptureMode != event.CaptureUsageMetered {
+			t.Errorf("capture_mode = %q, want %q", p.CaptureMode, event.CaptureUsageMetered)
+		}
 	}
 }
 
 func TestRegistry_ResponsesMatch(t *testing.T) {
 	r := NewRegistry()
-	p, err := r.Match(http.MethodPost, "/v1/responses")
-	if err != nil {
-		t.Fatalf("Match: %v", err)
-	}
-	if p.Name != "responses" {
-		t.Errorf("profile name = %q, want responses", p.Name)
-	}
-	if p.CaptureMode != event.CaptureUsageMetered {
-		t.Errorf("capture_mode = %q, want %q", p.CaptureMode, event.CaptureUsageMetered)
-	}
-	if p.MeteringKind != event.MeteringLLMTokens {
-		t.Errorf("metering_kind = %q, want %q", p.MeteringKind, event.MeteringLLMTokens)
+	for _, path := range []string{
+		"/v1/responses",
+		"/v1/responses/compact",
+		"/backend-api/codex/responses",
+		"/backend-api/codex/responses/compact",
+		"/api/provider/openai/responses",
+		"/api/provider/openai/v1/responses",
+	} {
+		p, err := r.Match(http.MethodPost, path)
+		if err != nil {
+			t.Fatalf("Match(%q): %v", path, err)
+		}
+		if p.Name != "responses" {
+			t.Errorf("profile name for %q = %q, want responses", path, p.Name)
+		}
+		if p.CaptureMode != event.CaptureUsageMetered {
+			t.Errorf("capture_mode = %q, want %q", p.CaptureMode, event.CaptureUsageMetered)
+		}
+		if p.MeteringKind != event.MeteringLLMTokens {
+			t.Errorf("metering_kind = %q, want %q", p.MeteringKind, event.MeteringLLMTokens)
+		}
 	}
 }
 
 func TestRegistry_AnthropicMessagesMatch(t *testing.T) {
 	r := NewRegistry()
-	p, err := r.Match(http.MethodPost, "/v1/messages")
-	if err != nil {
-		t.Fatalf("Match: %v", err)
-	}
-	if p.Name != "anthropic_messages" {
-		t.Errorf("profile name = %q, want anthropic_messages", p.Name)
-	}
-	if p.CaptureMode != event.CaptureUsageMetered {
-		t.Errorf("capture_mode = %q, want %q", p.CaptureMode, event.CaptureUsageMetered)
-	}
-	if p.MeteringKind != event.MeteringLLMTokens {
-		t.Errorf("metering_kind = %q, want %q", p.MeteringKind, event.MeteringLLMTokens)
-	}
-	if !p.IsMetered() {
-		t.Error("Anthropic Messages should be metered")
+	for _, path := range []string{"/v1/messages", "/api/provider/anthropic/v1/messages"} {
+		p, err := r.Match(http.MethodPost, path)
+		if err != nil {
+			t.Fatalf("Match(%q): %v", path, err)
+		}
+		if p.Name != "anthropic_messages" {
+			t.Errorf("profile name for %q = %q, want anthropic_messages", path, p.Name)
+		}
+		if p.CaptureMode != event.CaptureUsageMetered {
+			t.Errorf("capture_mode = %q, want %q", p.CaptureMode, event.CaptureUsageMetered)
+		}
+		if p.MeteringKind != event.MeteringLLMTokens {
+			t.Errorf("metering_kind = %q, want %q", p.MeteringKind, event.MeteringLLMTokens)
+		}
+		if !p.IsMetered() {
+			t.Error("Anthropic Messages should be metered")
+		}
 	}
 }
 
@@ -77,6 +114,8 @@ func TestRegistry_GeminiGenerateContentMatch(t *testing.T) {
 		"/v1beta/models/gemini-2.5-pro:generateContent",
 		"/v1beta/models/gemini-2.5-pro:streamGenerateContent",
 		"/v1/models/gemini-2.5-flash:generateContent",
+		"/api/provider/google/v1beta/models/gemini-2.5-pro:generateContent",
+		"/api/provider/google/v1/models/gemini-2.5-flash:streamGenerateContent",
 	} {
 		p, err := r.Match(http.MethodPost, path)
 		if err != nil {
@@ -291,12 +330,12 @@ func TestRegistry_ExtractorBinding_GeminiGenerateContent(t *testing.T) {
 func TestRegistry_Profiles(t *testing.T) {
 	r := NewRegistry()
 	all := r.Profiles()
-	if len(all) != 5 {
-		t.Errorf("expected 5 profiles, got %d", len(all))
+	if len(all) != 6 {
+		t.Errorf("expected 6 profiles, got %d", len(all))
 	}
 	metered := r.MeteredProfiles()
-	if len(metered) != 4 {
-		t.Errorf("expected 4 metered profiles, got %d", len(metered))
+	if len(metered) != 5 {
+		t.Errorf("expected 5 metered profiles, got %d", len(metered))
 	}
 }
 
@@ -306,6 +345,7 @@ func TestEndpointProfile_DisplayName(t *testing.T) {
 		want string
 	}{
 		{"chat_completions", "Chat Completions"},
+		{"openai_completions", "Completions"},
 		{"responses", "Responses API"},
 		{"anthropic_messages", "Anthropic Messages"},
 		{"gemini_generate_content", "Gemini Generate Content"},

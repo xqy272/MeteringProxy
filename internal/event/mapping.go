@@ -189,7 +189,7 @@ func RequestsFromDB(rows []db.RequestRow) []RequestReport {
 			CaptureReason:         r.CaptureReason,
 			Error:                 r.Error,
 			ErrorClass:            r.ErrorClass,
-			ErrorType:            r.ErrorType,
+			ErrorType:             r.ErrorType,
 			ErrorCode:             r.ErrorCode,
 			ErrorParam:            r.ErrorParam,
 			ErrorMessage:          r.ErrorMessage,
@@ -199,9 +199,30 @@ func RequestsFromDB(rows []db.RequestRow) []RequestReport {
 			TerminalEvent:         r.TerminalEvent,
 			TerminalReason:        r.TerminalReason,
 			SideUsageEventID:      r.SideUsageEventID,
+			SideUsageMatchStatus:  r.SideUsageMatchStatus,
+			UsageConfidence:       usageConfidence(r),
 		}
 	}
 	return result
+}
+
+func usageConfidence(r db.RequestRow) string {
+	if r.SideUsageMatchStatus == "conflict" {
+		return "conflict"
+	}
+	if r.UsageSource == UsageSourceCliproxySide {
+		return "enriched"
+	}
+	if r.UsageSource == UsageSourceHTTPResponse && r.CaptureOutcome == OutcomeCaptured {
+		return "observed"
+	}
+	if r.InputTokens == 0 && r.OutputTokens == 0 && r.ReasoningTokens == 0 && r.CachedTokens == 0 && r.TotalTokens == 0 {
+		return "missing"
+	}
+	if r.CaptureOutcome == OutcomeCaptured {
+		return "observed"
+	}
+	return "unknown"
 }
 
 // ErrorTimelineFromDB converts db.ErrorTimelineRow slice to domain ErrorTimelineReport slice.

@@ -60,10 +60,12 @@ type CLIProxyManagementConfig struct {
 
 type UsageQueueConfig struct {
 	Enabled           bool          `yaml:"enabled"`
+	Transport         string        `yaml:"transport"`
 	RESPAddr          string        `yaml:"resp_addr"`
 	QueueName         string        `yaml:"queue_name"`
 	Pop               string        `yaml:"pop"`
 	BatchSize         int           `yaml:"batch_size"`
+	Timeout           time.Duration `yaml:"timeout"`
 	PollInterval      time.Duration `yaml:"poll_interval"`
 	ReconnectInterval time.Duration `yaml:"reconnect_interval"`
 	MatchTimeout      time.Duration `yaml:"match_timeout"`
@@ -139,10 +141,12 @@ func Load(path string) (*Config, error) {
 			BaseURL: "http://127.0.0.1:8317/v0/management",
 			UsageQueue: UsageQueueConfig{
 				Enabled:           false,
+				Transport:         "auto",
 				RESPAddr:          "127.0.0.1:8317",
 				QueueName:         "queue",
 				Pop:               "LPOP",
 				BatchSize:         50,
+				Timeout:           10 * time.Second,
 				PollInterval:      1 * time.Second,
 				ReconnectInterval: 5 * time.Second,
 				MatchTimeout:      10 * time.Minute,
@@ -156,7 +160,7 @@ func Load(path string) (*Config, error) {
 				DiagnosticRetention: 72 * time.Hour,
 			},
 			Quota: QuotaConfig{
-				Enabled:             true,
+				Enabled:             false,
 				Providers:           []string{"claude", "codex", "kimi"},
 				CacheTTL:            5 * time.Minute,
 				Timeout:             10 * time.Second,
@@ -214,6 +218,9 @@ func Load(path string) (*Config, error) {
 	if cfg.RequestMetadata.InitialBytes <= 0 {
 		cfg.RequestMetadata.InitialBytes = 4096
 	}
+	if cfg.RequestMetadata.InitialBytes > 65536 {
+		cfg.RequestMetadata.InitialBytes = 65536
+	}
 	if cfg.RequestMetadata.MaxBytes < cfg.RequestMetadata.InitialBytes {
 		cfg.RequestMetadata.MaxBytes = cfg.RequestMetadata.InitialBytes
 	}
@@ -229,8 +236,8 @@ func Load(path string) (*Config, error) {
 	if cfg.Observability.Correlation.SideChannelMerge == "" {
 		cfg.Observability.Correlation.SideChannelMerge = "stored_only"
 	}
-	if cfg.Observability.Correlation.Mode != "passive" {
-		return nil, fmt.Errorf("observability.correlation.mode must be passive")
+	if cfg.Observability.Correlation.Mode != "passive" && cfg.Observability.Correlation.Mode != "inject_if_missing" {
+		return nil, fmt.Errorf("observability.correlation.mode must be passive or inject_if_missing")
 	}
 	if cfg.Observability.Correlation.SideChannelMerge != "stored_only" && cfg.Observability.Correlation.SideChannelMerge != "request_id" {
 		return nil, fmt.Errorf("observability.correlation.side_channel_merge must be stored_only or request_id")
@@ -244,8 +251,14 @@ func Load(path string) (*Config, error) {
 	if cfg.CLIProxyManagement.UsageQueue.BatchSize <= 0 {
 		cfg.CLIProxyManagement.UsageQueue.BatchSize = 50
 	}
+	if cfg.CLIProxyManagement.UsageQueue.Timeout <= 0 {
+		cfg.CLIProxyManagement.UsageQueue.Timeout = 10 * time.Second
+	}
 	if cfg.CLIProxyManagement.UsageQueue.Pop == "" {
 		cfg.CLIProxyManagement.UsageQueue.Pop = "LPOP"
+	}
+	if cfg.CLIProxyManagement.UsageQueue.Transport == "" {
+		cfg.CLIProxyManagement.UsageQueue.Transport = "auto"
 	}
 	if cfg.CLIProxyManagement.UsageQueue.QueueName == "" {
 		cfg.CLIProxyManagement.UsageQueue.QueueName = "queue"
@@ -256,6 +269,10 @@ func Load(path string) (*Config, error) {
 	cfg.CLIProxyManagement.UsageQueue.Pop = strings.ToUpper(strings.TrimSpace(cfg.CLIProxyManagement.UsageQueue.Pop))
 	if cfg.CLIProxyManagement.UsageQueue.Pop != "LPOP" && cfg.CLIProxyManagement.UsageQueue.Pop != "RPOP" {
 		return nil, fmt.Errorf("cliproxy_management.usage_queue.pop must be LPOP or RPOP")
+	}
+	cfg.CLIProxyManagement.UsageQueue.Transport = strings.ToLower(strings.TrimSpace(cfg.CLIProxyManagement.UsageQueue.Transport))
+	if cfg.CLIProxyManagement.UsageQueue.Transport != "auto" && cfg.CLIProxyManagement.UsageQueue.Transport != "http" && cfg.CLIProxyManagement.UsageQueue.Transport != "resp" {
+		return nil, fmt.Errorf("cliproxy_management.usage_queue.transport must be auto, http, or resp")
 	}
 	if cfg.CLIProxyManagement.UsageQueue.MergeMode != "stored_only" && cfg.CLIProxyManagement.UsageQueue.MergeMode != "request_id" {
 		return nil, fmt.Errorf("cliproxy_management.usage_queue.merge_mode must be stored_only or request_id")

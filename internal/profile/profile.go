@@ -28,10 +28,10 @@ func (p *EndpointProfile) Match(method, path string) bool {
 	if p.Method != "" && p.Method != method {
 		return false
 	}
+	path = strings.TrimRight(path, "/")
 	if p.PathMatcher != nil {
 		return p.PathMatcher(path)
 	}
-	path = strings.TrimRight(path, "/")
 	return path == p.PathPrefix
 }
 
@@ -40,6 +40,8 @@ func (p *EndpointProfile) DisplayName() string {
 	switch p.Name {
 	case "chat_completions":
 		return "Chat Completions"
+	case "openai_completions":
+		return "Completions"
 	case "responses":
 		return "Responses API"
 	case "anthropic_messages":

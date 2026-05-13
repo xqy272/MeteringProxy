@@ -697,7 +697,9 @@ async function loadIssues() {
     const groups=new Map();
     items.filter(item=>(item.severity||'info')===selectedIssueSeverity).forEach(item=>{
       const cls=item.class||'unknown';
-      const g=groups.get(cls)||{class:cls,label:issueClassLabel(cls,item.label),count:0,latestAt:'',messages:[],models:new Set(),endpoints:new Set(),statuses:new Set(),systemOnly:true};
+      const source=item.source_group||item.scope||'system';
+      const key=source+'::'+cls;
+      const g=groups.get(key)||{class:cls,source,label:issueClassLabel(cls,item.label),count:0,latestAt:'',messages:[],models:new Set(),endpoints:new Set(),statuses:new Set(),systemOnly:true};
       g.count+=Number(item.count||0);
       if((Date.parse(item.latest_at||'')||0)>(Date.parse(g.latestAt||'')||0)) g.latestAt=item.latest_at||g.latestAt;
       if(item.message||item.error_code||item.error_type) g.messages.push(item.message||item.error_code||item.error_type);
@@ -705,14 +707,14 @@ async function loadIssues() {
       if(item.endpoint) g.endpoints.add(item.endpoint);
       if(item.status) g.statuses.add(String(item.status));
       if(!item.system) g.systemOnly=false;
-      groups.set(cls,g);
+      groups.set(key,g);
     });
     const rows=[...groups.values()].sort((a,b)=>b.count-a.count);
     list.classList.remove('hidden');
     list.innerHTML=`<div class="issue-class-head">${esc(issueSevLabel(selectedIssueSeverity))}${esc(t('issues.class_breakdown_suffix'))}</div>
       <div class="issue-filter-grid">${rows.map(g=>{
         const bits=[...g.statuses].slice(0,2).concat([...g.models].slice(0,1),[...g.endpoints].slice(0,1)).filter(Boolean);
-        const detail=bits.join(' / ') || (g.systemOnly?t('issues.scope_process'):t('issues.no_message'));
+        const detail=[g.source,bits.join(' / ') || (g.systemOnly?t('issues.scope_process'):t('issues.no_message'))].filter(Boolean).join(' / ');
         const msg=g.messages[0]||'';
         const active=currentIssueClassFilter===g.class;
         const cardClass=g.systemOnly?'issue-filter-card':`issue-filter-card clickable ${active?'active':''}`;
@@ -776,19 +778,26 @@ async function loadQuota() {
   const table=$('quota-table');
   if(!table) return;
   if(!items.length){
-    table.innerHTML=`<tr><td colspan="6" class="empty-state">${esc(t('state.no_quota_data'))}</td></tr>`;
+    table.innerHTML=`<tr><td colspan="11" class="empty-state">${esc(t('state.no_quota_data'))}</td></tr>`;
     return;
   }
   table.innerHTML=items.map(row=>{
     const remaining=row.remaining_amount!=null?fmtNum(row.remaining_amount):'-';
     const limit=row.limit_amount!=null?fmtNum(row.limit_amount):'-';
-    const window=row.window_key||row.auth_index_hash||row.credential_hash||'-';
+    const credential=shortHash(row.credential_hash||row.auth_index_hash||row.label_hash||'');
+    const window=row.window_key||'-';
+    const reset=row.reset_at||row.expires_at||'';
     return `<tr>
       <td>${esc(row.provider||'-')}</td>
       <td><span class="badge ${row.status==='ok'||row.status==='ready'?'ok':row.status==='low'||row.status==='warning'?'warn':'err'}">${esc(row.status||'-')}</span></td>
+      <td><code>${esc(credential)}</code></td>
       <td class="mono">${esc(window)}</td>
+      <td>${esc(row.plan||'-')}</td>
       <td class="numeric mono">${esc(remaining)}</td>
       <td class="numeric mono">${esc(limit)}</td>
+      <td class="numeric mono">${fmtFull(row.success_count||0)}</td>
+      <td class="numeric mono">${fmtFull(row.failed_count||0)}</td>
+      <td class="mono">${esc(fmtShort(reset))}</td>
       <td class="mono">${esc(fmtShort(row.checked_at))}</td>
     </tr>`;
   }).join('');
@@ -857,7 +866,7 @@ function markFailed(failures) {
   if(fm.has('requests'))$('requests-table').innerHTML=errorRow(11,fm.get('requests').message);
   if(fm.has('issues')){$('issues-state').classList.remove('hidden');$('issues-state').innerHTML=`<div class="issues-empty error-text">${esc(fm.get('issues').message)}</div>`;const io=$('issues-overview');if(io)io.innerHTML='';$('issues-list').innerHTML=`<div class="issue-class-placeholder">${esc(t('issues.select_severity_hint'))}</div>`;}
   if(fm.has('timeseries')){const el=$('usage-trend-chart');if(el)el.innerHTML=`<div class="empty-state error-text">${esc(fm.get('timeseries').message)}</div>`;}
-  if(fm.has('quota')){const qt=$('quota-table');if(qt)qt.innerHTML=errorRow(6,fm.get('quota').message);}
+  if(fm.has('quota')){const qt=$('quota-table');if(qt)qt.innerHTML=errorRow(11,fm.get('quota').message);}
   if(fm.has('observability'))setText('observability-summary',fm.get('observability').message);
 }
 

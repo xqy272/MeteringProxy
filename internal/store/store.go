@@ -54,9 +54,29 @@ type ReportStore interface {
 	CaptureOutcomeCounts(since time.Time) (captured, skipped, failed int64, err error)
 	AllCredentialHealth() ([]db.CredentialHealthRow, error)
 	AllQuotaCurrent() ([]db.QuotaCurrentRow, error)
+	SideUsageStatusCounts(since time.Time) (map[string]int64, error)
 }
 
 // HealthWriter is the write-side interface for health metrics.
 type HealthWriter interface {
 	InsertHealthMetric(ts string, queueDepth int, dropped, parseErrors, dbErrors, sseLineSkips int64) error
+}
+
+type SideUsageStore interface {
+	InsertSideUsageEvent(db.SideUsageEvent) (int64, error)
+	ApplySideUsageEvent(int64, time.Duration) (string, error)
+	DeleteStaleSideUsageEvents(time.Time) error
+}
+
+type CredentialHealthStore interface {
+	UpsertCredentialHealth(*db.CredentialHealthRow) error
+	AllCredentialHealth() ([]db.CredentialHealthRow, error)
+	DeleteStaleCredentialHealth(time.Time) error
+}
+
+type QuotaStore interface {
+	UpsertQuotaCurrent(*db.QuotaCurrentRow) error
+	AllQuotaCurrent() ([]db.QuotaCurrentRow, error)
+	InsertQuotaRefreshEvent(*db.QuotaRefreshEventRow) error
+	DeleteStaleQuotaRefreshEvents(time.Time) error
 }

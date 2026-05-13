@@ -143,6 +143,15 @@ func (s *Server) handleIssues(w http.ResponseWriter, r *http.Request) {
 			Count: dbErrors, Scope: scope, Severity: "error",
 		})
 	}
+	if s.usageQueuePoller != nil {
+		connected, _, _ := s.usageQueuePoller.Snapshot()
+		if !connected {
+			systemItems = append(systemItems, event.IssueSystemItem{
+				Class: "side_channel_disconnected", Label: "Side-channel disconnected",
+				Count: 1, Scope: "side_channel", Severity: "warning",
+			})
+		}
+	}
 
 	resp := event.IssuesResponse{
 		Range: rangeKey,

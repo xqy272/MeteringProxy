@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"ai-gateway-metering-proxy/internal/db"
 )
 
 func TestEventToRecord_BasicMapping(t *testing.T) {
@@ -111,5 +113,21 @@ func TestMetadataReport_JSON(t *testing.T) {
 	}
 	if len(unmarshalled.Endpoints) != 1 {
 		t.Errorf("endpoints = %d, want 1", len(unmarshalled.Endpoints))
+	}
+}
+
+func TestRequestsFromDBComputesUsageConfidence(t *testing.T) {
+	rows := []db.RequestRow{
+		{UsageSource: UsageSourceHTTPResponse, CaptureOutcome: OutcomeCaptured, InputTokens: 1},
+		{UsageSource: UsageSourceCliproxySide, CaptureOutcome: OutcomeCaptured, InputTokens: 1},
+		{SideUsageMatchStatus: "conflict", InputTokens: 1},
+		{},
+	}
+	reports := RequestsFromDB(rows)
+	want := []string{"observed", "enriched", "conflict", "missing"}
+	for i := range want {
+		if reports[i].UsageConfidence != want[i] {
+			t.Fatalf("row %d UsageConfidence = %q, want %q", i, reports[i].UsageConfidence, want[i])
+		}
 	}
 }

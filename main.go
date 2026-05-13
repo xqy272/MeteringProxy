@@ -145,7 +145,7 @@ func main() {
 
 	// Create proxy handler.
 	proxyHandler := proxy.New(cfg.Upstream, hasher, batchWriter, cfg.MaxNonstreamSampleBytes, cfg.RequestMetadata)
-	proxyHandler.SetCorrelationHeader(cfg.Observability.Correlation.Header)
+	proxyHandler.SetCorrelation(cfg.Observability.Correlation.Mode, cfg.Observability.Correlation.Header)
 	proxyHandler.SetMeteringEnabled(cfg.MeteringEnabled)
 
 	// CLIProxyAPI management client and pollers.
@@ -153,19 +153,6 @@ func main() {
 	var quotaPoller *quota.Poller
 	var usageQueuePoller *usagequeue.Poller
 	if cfg.CLIProxyManagement.Enabled {
-		cliTimeout := cfg.CLIProxyManagement.CredentialHealth.Timeout
-		if cfg.CLIProxyManagement.Quota.Timeout > cliTimeout {
-			cliTimeout = cfg.CLIProxyManagement.Quota.Timeout
-		}
-		cliClient, err := cliproxy.NewClient(cliproxy.CLIProxyConfig{
-			Enabled: cfg.CLIProxyManagement.Enabled,
-			BaseURL: cfg.CLIProxyManagement.BaseURL,
-			KeyFile: cfg.CLIProxyManagement.KeyFile,
-			Timeout: cliTimeout,
-		})
-		if err != nil {
-			log.Fatalf("Failed to create CLIProxyAPI management client: %v", err)
-		}
 		managementKey, err := cliproxy.ReadKeyFile(cfg.CLIProxyManagement.KeyFile)
 		if err != nil {
 			log.Fatalf("Failed to read CLIProxyAPI management key: %v", err)
@@ -175,20 +162,47 @@ func main() {
 			allowRequestMerge := cfg.Observability.Correlation.RequirePropagationVerified &&
 				cfg.Observability.Correlation.SideChannelMerge == "request_id" &&
 				cfg.CLIProxyManagement.UsageQueue.MergeMode == "request_id"
-			usageQueuePoller = usagequeue.NewPoller(cfg.CLIProxyManagement.UsageQueue.RESPAddr, managementKey,
-				cfg.CLIProxyManagement.UsageQueue, database, hasher, allowRequestMerge)
+			usageClient, err := cliproxy.NewClient(cliproxy.CLIProxyConfig{
+				Enabled: cfg.CLIProxyManagement.Enabled,
+				BaseURL: cfg.CLIProxyManagement.BaseURL,
+				Key:     managementKey,
+				Timeout: cfg.CLIProxyManagement.UsageQueue.Timeout,
+			})
+			if err != nil {
+				log.Fatalf("Failed to create CLIProxyAPI usage queue client: %v", err)
+			}
+			usageQueuePoller = usagequeue.NewHybridPoller(cfg.CLIProxyManagement.UsageQueue.RESPAddr, managementKey,
+				usageClient, cfg.CLIProxyManagement.UsageQueue, database, hasher, allowRequestMerge)
 			usageQueuePoller.Start()
 			defer usageQueuePoller.Stop()
 		}
 
 		if cfg.CLIProxyManagement.CredentialHealth.Enabled {
-			credPoller = credential.NewPoller(cliClient, database, hasher, cfg.CLIProxyManagement.CredentialHealth)
+			credClient, err := cliproxy.NewClient(cliproxy.CLIProxyConfig{
+				Enabled: cfg.CLIProxyManagement.Enabled,
+				BaseURL: cfg.CLIProxyManagement.BaseURL,
+				Key:     managementKey,
+				Timeout: cfg.CLIProxyManagement.CredentialHealth.Timeout,
+			})
+			if err != nil {
+				log.Fatalf("Failed to create CLIProxyAPI credential client: %v", err)
+			}
+			credPoller = credential.NewPoller(credClient, database, hasher, cfg.CLIProxyManagement.CredentialHealth)
 			credPoller.Start()
 			defer credPoller.Stop()
 		}
 
 		if cfg.CLIProxyManagement.Quota.Enabled {
-			quotaPoller = quota.NewPoller(cliClient, database, hasher, cfg.CLIProxyManagement.Quota)
+			quotaClient, err := cliproxy.NewClient(cliproxy.CLIProxyConfig{
+				Enabled: cfg.CLIProxyManagement.Enabled,
+				BaseURL: cfg.CLIProxyManagement.BaseURL,
+				Key:     managementKey,
+				Timeout: cfg.CLIProxyManagement.Quota.Timeout,
+			})
+			if err != nil {
+				log.Fatalf("Failed to create CLIProxyAPI quota client: %v", err)
+			}
+			quotaPoller = quota.NewPoller(quotaClient, database, hasher, cfg.CLIProxyManagement.Quota)
 			quotaPoller.Start()
 			defer quotaPoller.Stop()
 		}

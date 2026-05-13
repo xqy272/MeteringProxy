@@ -239,7 +239,7 @@ func (db *DB) appendSideChannelIssues(result []IssueRow, since time.Time) []Issu
 		WITH base AS (
 			SELECT
 				CASE match_status
-					WHEN 'conflict' THEN 'side_channel_conflict'
+					WHEN 'conflict' THEN 'usage_conflict'
 					WHEN 'duplicate' THEN 'side_channel_duplicate'
 					WHEN 'expired' THEN 'side_channel_expired'
 					WHEN 'invalid_payload' THEN 'side_channel_invalid_payload'
@@ -412,8 +412,8 @@ func classLabel(class string) string {
 		return "Credential health error"
 	case "credential_stale":
 		return "Credential health stale"
-	case "side_channel_conflict":
-		return "Side-channel usage conflict"
+	case "usage_conflict":
+		return "Usage conflict"
 	case "side_channel_duplicate":
 		return "Duplicate side-channel usage"
 	case "side_channel_expired":
@@ -429,7 +429,7 @@ func classLabel(class string) string {
 
 func classSeverity(class string) string {
 	switch class {
-	case "auth_failed", "quota_exhausted", "proxy_upstream_error", "db_write_error", "response_error_event", "credential_error", "side_channel_conflict":
+	case "auth_failed", "quota_exhausted", "proxy_upstream_error", "db_write_error", "response_error_event", "credential_error", "usage_conflict":
 		return "error"
 	case "rate_limited", "upstream_5xx", "context_length", "capture_parse_error", "dropped_event",
 		"response_completed_without_usage", "stream_ended_without_completed", "response_incomplete",

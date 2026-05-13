@@ -693,12 +693,18 @@ func (s *Server) handleObservability(w http.ResponseWriter, r *http.Request) {
 
 	if s.usageQueuePoller != nil {
 		connected, lastAt, lastErr := s.usageQueuePoller.Snapshot()
+		counts, _ := s.db.SideUsageStatusCounts(time.Now().Add(-1 * time.Hour))
 		resp["side_channel"] = map[string]any{
-			"enabled":       true,
-			"connected":     connected,
-			"merge_mode":    s.correlationMode,
-			"last_event_at": lastAt.Format(time.RFC3339),
-			"last_error":    lastErr,
+			"enabled":          true,
+			"connected":        connected,
+			"merge_mode":       s.correlationMode,
+			"last_event_at":    lastAt.Format(time.RFC3339),
+			"last_received_at": lastAt.Format(time.RFC3339),
+			"last_error":       lastErr,
+			"matched_1h":       counts["matched"],
+			"unmatched_1h":     counts["unmatched"],
+			"stored_only_1h":   counts["stored_only"],
+			"conflicts_1h":     counts["conflict"],
 		}
 	}
 
@@ -712,11 +718,13 @@ func (s *Server) handleObservability(w http.ResponseWriter, r *http.Request) {
 
 	captured1h, skipped1h, failed1h, _ := s.db.CaptureOutcomeCounts(time.Now().Add(-1 * time.Hour))
 	resp["request_capture"] = map[string]any{
-		"parse_errors":   getMapVal(resp["request_capture"], "parse_errors"),
-		"dropped_events": getMapVal(resp["request_capture"], "dropped_events"),
-		"captured_1h":    captured1h,
-		"skipped_1h":     skipped1h,
-		"failed_1h":      failed1h,
+		"parse_errors":       getMapVal(resp["request_capture"], "parse_errors"),
+		"dropped_events":     getMapVal(resp["request_capture"], "dropped_events"),
+		"captured_1h":        captured1h,
+		"skipped_1h":         skipped1h,
+		"failed_1h":          failed1h,
+		"capture_skipped_1h": skipped1h,
+		"capture_failed_1h":  failed1h,
 	}
 
 	if s.credPoller != nil {

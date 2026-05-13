@@ -2,6 +2,7 @@ package credential
 
 import (
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -9,27 +10,30 @@ import (
 	"ai-gateway-metering-proxy/internal/config"
 	"ai-gateway-metering-proxy/internal/db"
 	"ai-gateway-metering-proxy/internal/hash"
+	"ai-gateway-metering-proxy/internal/store"
 )
 
 type Poller struct {
 	client    *cliproxy.Client
-	db        *db.DB
+	db        store.CredentialHealthStore
 	hasher    *hash.Hasher
 	cfg       config.CredentialHealthConfig
 	mu        sync.RWMutex
 	cache     []db.CredentialHealthRow
 	lastAt    time.Time
 	stopCh    chan struct{}
+	doneCh    chan struct{}
 	refreshCh chan struct{}
 }
 
-func NewPoller(client *cliproxy.Client, database *db.DB, hasher *hash.Hasher, cfg config.CredentialHealthConfig) *Poller {
+func NewPoller(client *cliproxy.Client, database store.CredentialHealthStore, hasher *hash.Hasher, cfg config.CredentialHealthConfig) *Poller {
 	return &Poller{
 		client:    client,
 		db:        database,
 		hasher:    hasher,
 		cfg:       cfg,
 		stopCh:    make(chan struct{}),
+		doneCh:    make(chan struct{}),
 		refreshCh: make(chan struct{}, 1),
 	}
 }
@@ -40,9 +44,11 @@ func (p *Poller) Start() {
 
 func (p *Poller) Stop() {
 	close(p.stopCh)
+	<-p.doneCh
 }
 
 func (p *Poller) loop() {
+	defer close(p.doneCh)
 	p.poll()
 	cleanupTicker := time.NewTicker(p.cfg.DiagnosticRetention)
 	ticker := time.NewTicker(p.cfg.CacheTTL)
@@ -82,28 +88,30 @@ func (p *Poller) poll() {
 
 	var rows []db.CredentialHealthRow
 	for _, af := range resp.AuthFiles {
-		if af.Provider == "" && af.AuthType == "" && af.Key == "" {
+		if af.Provider == "" && af.AuthType == "" && af.Key == "" && af.AuthIndex == "" && af.ID == "" {
 			continue
 		}
 		credHash := ""
 		if af.Key != "" {
-			credHash = p.hasher.Hash(af.Provider + ":" + af.Key)
+			credHash = p.hashCredential(af.Provider, "key:"+af.Key)
+		} else if af.AuthIndex != "" {
+			credHash = p.hashCredential(af.Provider, "auth_index:"+fmtIndex(af.Provider, af.AuthType, af.AuthIndex))
+		} else if af.ID != "" {
+			credHash = p.hashCredential(af.Provider, "id:"+af.ID)
+		} else if af.Source != "" {
+			credHash = p.hashCredential(af.Provider, "source:"+af.Source)
 		} else {
-			credHash = p.hasher.Hash(fmtIndex(af.Provider, af.AuthType, af.AuthIndex))
+			credHash = p.hashCredential(af.Provider, "label:"+af.Label)
 		}
-		authIndexHash := p.hasher.Hash(fmtIndex(af.Provider, af.AuthType, af.AuthIndex))
+		authIndexHash := ""
+		if af.AuthIndex != "" {
+			authIndexHash = p.hash("credential_auth_index:" + fmtIndex(af.Provider, af.AuthType, af.AuthIndex))
+		}
 		labelHash := ""
 		if af.Label != "" {
-			labelHash = p.hasher.Hash(af.Label)
+			labelHash = p.hash("credential_label:" + af.Label)
 		}
-		status := af.Status
-		if status == "" {
-			if af.Available {
-				status = "ready"
-			} else {
-				status = "unavailable"
-			}
-		}
+		status := normalizeCredentialStatus(af)
 
 		row := db.CredentialHealthRow{
 			Provider:       af.Provider,
@@ -115,6 +123,7 @@ func (p *Poller) poll() {
 			FailedCount:    af.FailedCount,
 			CheckedAt:      nowStr,
 			CheckedAtUnix:  nowUnix,
+			ErrorClass:     firstNonEmpty(af.ErrorClass, credentialErrorClass(status)),
 		}
 		if err := p.db.UpsertCredentialHealth(&row); err != nil {
 			log.Printf("credential health upsert error: %v", err)
@@ -126,6 +135,65 @@ func (p *Poller) poll() {
 	p.cache = rows
 	p.lastAt = now
 	p.mu.Unlock()
+}
+
+func normalizeCredentialStatus(af cliproxy.AuthFileEntry) string {
+	switch {
+	case af.Disabled:
+		return "disabled"
+	case af.Unavailable:
+		return "unavailable"
+	}
+	status := strings.ToLower(strings.TrimSpace(af.Status))
+	switch status {
+	case "":
+		if af.Available {
+			return "ready"
+		}
+		return "unavailable"
+	case "active", "available", "ready":
+		return "ready"
+	default:
+		return status
+	}
+}
+
+func (p *Poller) hash(value string) string {
+	if p.hasher == nil {
+		return ""
+	}
+	return p.hasher.Hash(value)
+}
+
+func (p *Poller) hashCredential(provider, material string) string {
+	if p.hasher == nil {
+		return ""
+	}
+	return p.hasher.Hash("credential:" + provider + ":" + material)
+}
+
+func credentialErrorClass(status string) string {
+	switch status {
+	case "", "active", "available", "ready", "unknown":
+		return ""
+	case "disabled":
+		return "credential_disabled"
+	case "stale":
+		return "credential_stale"
+	case "error":
+		return "credential_error"
+	default:
+		return "credential_unavailable"
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (p *Poller) Snapshot() ([]db.CredentialHealthRow, time.Time) {
@@ -169,25 +237,6 @@ func (p *Poller) markExistingStale() {
 	p.mu.Unlock()
 }
 
-func fmtIndex(provider, authType string, authIndex int) string {
-	return provider + ":" + authType + ":" + intToStr(authIndex)
-}
-
-func intToStr(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	s := ""
-	neg := i < 0
-	if neg {
-		i = -i
-	}
-	for i > 0 {
-		s = string(rune('0'+i%10)) + s
-		i /= 10
-	}
-	if neg {
-		s = "-" + s
-	}
-	return s
+func fmtIndex(provider, authType, authIndex string) string {
+	return provider + ":" + authType + ":" + authIndex
 }

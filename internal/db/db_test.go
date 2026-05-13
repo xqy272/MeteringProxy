@@ -250,6 +250,54 @@ func TestTokenAggregatesIncludeCacheCreation(t *testing.T) {
 	}
 }
 
+func TestApplySideUsageEventCopiesCacheCreationTokens(t *testing.T) {
+	d := newTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := d.InsertBatch([]UsageRecord{{
+		CreatedAt: now.Format(time.RFC3339),
+		RequestID: "req-side-cache",
+		Endpoint:  "/v1/messages",
+		Method:    "POST",
+		Status:    200,
+		LatencyMs: 100,
+	}}); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+	id, err := d.InsertSideUsageEvent(SideUsageEvent{
+		ReceivedAt:          now.Format(time.RFC3339),
+		ReceivedAtUnix:      now.Unix(),
+		RequestID:           "req-side-cache",
+		MatchStatus:         "stored_only",
+		Model:               "claude-sonnet-4-6",
+		InputTokens:         100,
+		OutputTokens:        20,
+		CachedTokens:        30,
+		CacheReadTokens:     30,
+		CacheCreationTokens: 7,
+		TotalTokens:         120,
+	})
+	if err != nil {
+		t.Fatalf("InsertSideUsageEvent: %v", err)
+	}
+	status, err := d.ApplySideUsageEvent(id, time.Minute)
+	if err != nil {
+		t.Fatalf("ApplySideUsageEvent: %v", err)
+	}
+	if status != "matched" {
+		t.Fatalf("match status = %q, want matched", status)
+	}
+	rows, err := d.Requests(10, 0, 0, "", "", "", time.Time{})
+	if err != nil {
+		t.Fatalf("Requests: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if rows[0].CacheCreationTokens != 7 || rows[0].CachedTokens != 30 || rows[0].UsageSource != "cliproxy_side_channel" {
+		t.Fatalf("row after side-channel apply = %#v", rows[0])
+	}
+}
+
 func TestModelsAndKeysTreatEmptyAsUnknown(t *testing.T) {
 	d := newTestDB(t)
 	insertRecord(t, d, ts(-1*time.Minute), "/v1/chat/completions", 200, "", 1, 2, 3)

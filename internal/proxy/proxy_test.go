@@ -1321,6 +1321,34 @@ func TestUsageRawJSON_NotStoredInEvent(t *testing.T) {
 	}
 }
 
+func TestProxyInjectsRequestIDWhenConfigured(t *testing.T) {
+	var upstreamRequestID string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamRequestID = r.Header.Get("X-Request-ID")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"model":"gpt-4o","usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`))
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536})
+	p.SetCorrelation("inject_if_missing", "X-Request-ID")
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if upstreamRequestID == "" {
+		t.Fatal("upstream X-Request-ID was not injected")
+	}
+	if len(rw.events) == 0 {
+		t.Fatal("no event recorded")
+	}
+	if got := lastEvent(rw).ID; got != upstreamRequestID {
+		t.Fatalf("event ID = %q, want injected request ID %q", got, upstreamRequestID)
+	}
+}
+
 func TestProxyNonStreaming_ErrorClassified(t *testing.T) {
 	upstreamResp := `{"error":{"message":"Rate limit reached for gpt-4o","type":"rate_limit_error","code":"rate_limit_exceeded"}}`
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

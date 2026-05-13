@@ -116,6 +116,8 @@ type RequestReport struct {
 	TerminalEvent         string `json:"terminal_event"`
 	TerminalReason        string `json:"terminal_reason"`
 	SideUsageEventID      int64  `json:"side_usage_event_id"`
+	SideUsageMatchStatus  string `json:"side_usage_match_status"`
+	UsageConfidence       string `json:"usage_confidence"`
 }
 
 type ErrorTimelineReport struct {

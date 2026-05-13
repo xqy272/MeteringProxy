@@ -5,6 +5,8 @@ import (
 	"sync"
 )
 
+const maxResponsesSSEJSONBytes = 1024 * 1024
+
 type ResponsesStreamState struct {
 	mu sync.Mutex
 
@@ -31,6 +33,7 @@ type ResponsesStreamState struct {
 
 	terminalEvent  string
 	terminalReason string
+	lastEventType  string
 
 	jsonParseErrors int64
 }
@@ -64,12 +67,17 @@ func (s *ResponsesStreamState) ProcessSSEEvent(data []byte) {
 	if text == "" {
 		return
 	}
+	if len(text) > maxResponsesSSEJSONBytes {
+		s.jsonParseErrors++
+		return
+	}
 
 	var evt ResponsesSSEEvent
 	if err := json.Unmarshal([]byte(text), &evt); err != nil {
 		s.jsonParseErrors++
 		return
 	}
+	s.lastEventType = evt.Type
 
 	switch evt.Type {
 	case "response.created":
@@ -155,13 +163,12 @@ func (s *ResponsesStreamState) Result() StreamFinalResult {
 
 	if s.jsonParseErrors > 0 {
 		return StreamFinalResult{
-			ModelReturned:       bestModelStr(s.completedModel, s.incompleteModel, s.failedModel, s.createdModel, ""),
-			ModelReturnedSource: "parse_error",
-			TerminalEvent:       "parse_error",
-			TerminalReason:      "stream_error",
-			CaptureOutcome:      "failed",
-			CaptureReason:       "parse_error",
-			ErrorInfo:           &ErrorInfo{Class: "stream_parse_error"},
+			ModelReturned:  bestModelStr(s.completedModel, s.incompleteModel, s.failedModel, s.createdModel, ""),
+			TerminalEvent:  "stream_error",
+			TerminalReason: "stream_error",
+			CaptureOutcome: "failed",
+			CaptureReason:  "parse_error",
+			ErrorInfo:      &ErrorInfo{Class: "stream_parse_error"},
 		}
 	}
 

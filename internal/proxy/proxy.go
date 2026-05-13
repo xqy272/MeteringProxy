@@ -3,6 +3,8 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -39,6 +41,7 @@ type Proxy struct {
 	registry          *profile.Registry
 	transport         *http.Transport
 	reqMeta           config.RequestMetadataConfig
+	correlationMode   string
 	correlationHeader string
 }
 
@@ -54,10 +57,10 @@ func New(upstream string, hasher *hash.Hasher, rw RecordWriter, maxSample int64,
 			MaxIdleConnsPerHost:   20,
 			IdleConnTimeout:       90 * time.Second,
 			DisableCompression:    true,
-			ResponseHeaderTimeout: 60 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
 		},
 		reqMeta:           reqMeta,
+		correlationMode:   "passive",
 		correlationHeader: "X-Request-ID",
 	}
 	p.meteringEnabled.Store(true)
@@ -74,10 +77,22 @@ func (p *Proxy) Registry() *profile.Registry {
 }
 
 func (p *Proxy) SetCorrelationHeader(header string) {
+	p.SetCorrelation("passive", header)
+}
+
+func (p *Proxy) SetCorrelation(mode, header string) {
+	mode = strings.TrimSpace(mode)
+	if mode == "" {
+		mode = "passive"
+	}
+	if mode != "inject_if_missing" {
+		mode = "passive"
+	}
 	header = strings.TrimSpace(header)
 	if header == "" {
 		header = "X-Request-ID"
 	}
+	p.correlationMode = mode
 	p.correlationHeader = header
 }
 
@@ -162,6 +177,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			upstreamReq.Header.Add(k, v)
 		}
 	}
+	if p.correlationMode == "inject_if_missing" && p.requestIDFromRequestHeaders(upstreamReq.Header) == "" {
+		upstreamReq.Header.Set(p.correlationHeader, newCorrelationID())
+	}
 
 	resp, err := p.transport.RoundTrip(upstreamReq)
 	ttfb := time.Since(start)
@@ -177,7 +195,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	isStream := responseIndicatesStream(resp.Header.Get("Content-Type"), requestSuggestsStream)
-	requestID := p.requestIDFromHeaders(resp.Header, r.Header)
+	requestID := p.requestIDFromHeaders(resp.Header, upstreamReq.Header)
 
 	for k, vs := range resp.Header {
 		for _, v := range vs {
@@ -1215,14 +1233,20 @@ func apiKeyToken(r *http.Request) string {
 }
 
 func (p *Proxy) requestIDFromHeaders(respHeader, reqHeader http.Header) string {
-	clientHeaders := dedupeStrings([]string{p.correlationHeader, "X-Request-ID", "Request-ID"})
-	for _, name := range clientHeaders {
-		if value := reqHeader.Get(name); value != "" {
-			return value
-		}
+	if value := p.requestIDFromRequestHeaders(reqHeader); value != "" {
+		return value
 	}
 	for _, name := range []string{"OpenAI-Request-ID", "X-Request-ID", "Request-ID"} {
 		if value := respHeader.Get(name); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func (p *Proxy) requestIDFromRequestHeaders(reqHeader http.Header) string {
+	for _, name := range dedupeStrings([]string{p.correlationHeader, "X-Request-ID", "Request-ID"}) {
+		if value := reqHeader.Get(name); value != "" {
 			return value
 		}
 	}
@@ -1245,6 +1269,14 @@ func dedupeStrings(values []string) []string {
 		out = append(out, value)
 	}
 	return out
+}
+
+func newCorrelationID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "mp-" + time.Now().UTC().Format("20060102150405.000000000")
+	}
+	return "mp-" + hex.EncodeToString(b[:])
 }
 
 func streamFromJSON(body []byte) bool {

@@ -14,23 +14,23 @@ import (
 
 	"ai-gateway-metering-proxy/internal/config"
 	"ai-gateway-metering-proxy/internal/db"
+	"ai-gateway-metering-proxy/internal/store"
 )
-
-type Store interface {
-	InsertSideUsageEvent(db.SideUsageEvent) (int64, error)
-	ApplySideUsageEvent(int64, time.Duration) (string, error)
-	DeleteStaleSideUsageEvents(time.Time) error
-}
 
 type Hasher interface {
 	Hash(string) string
 }
 
+type QueueClient interface {
+	FetchUsageQueue(count int) ([][]byte, error)
+}
+
 type Poller struct {
 	addr              string
 	key               string
+	client            QueueClient
 	cfg               config.UsageQueueConfig
-	store             Store
+	store             store.SideUsageStore
 	hasher            Hasher
 	allowRequestMerge bool
 
@@ -43,7 +43,7 @@ type Poller struct {
 	lastErr   string
 }
 
-func NewPoller(addr, key string, cfg config.UsageQueueConfig, store Store, hasher Hasher, allowRequestMerge bool) *Poller {
+func NewPoller(addr, key string, cfg config.UsageQueueConfig, store store.SideUsageStore, hasher Hasher, allowRequestMerge bool) *Poller {
 	return &Poller{
 		addr:              addr,
 		key:               strings.TrimSpace(key),
@@ -54,6 +54,12 @@ func NewPoller(addr, key string, cfg config.UsageQueueConfig, store Store, hashe
 		stopCh:            make(chan struct{}),
 		doneCh:            make(chan struct{}),
 	}
+}
+
+func NewHybridPoller(addr, key string, client QueueClient, cfg config.UsageQueueConfig, store store.SideUsageStore, hasher Hasher, allowRequestMerge bool) *Poller {
+	p := NewPoller(addr, key, cfg, store, hasher, allowRequestMerge)
+	p.client = client
+	return p
 }
 
 func (p *Poller) Start() {
@@ -87,7 +93,8 @@ func (p *Poller) run() {
 			return
 		default:
 		}
-		if err := p.consumeLoop(pollInterval); err != nil {
+		err := p.consumeAutoLoop(pollInterval)
+		if err != nil {
 			p.setState(false, err)
 			timer := time.NewTimer(reconnectInterval)
 			select {
@@ -100,7 +107,57 @@ func (p *Poller) run() {
 	}
 }
 
-func (p *Poller) consumeLoop(pollInterval time.Duration) error {
+func (p *Poller) consumeAutoLoop(pollInterval time.Duration) error {
+	transport := strings.ToLower(strings.TrimSpace(p.cfg.Transport))
+	if transport == "" {
+		transport = "auto"
+	}
+	switch transport {
+	case "http":
+		return p.consumeHTTPLoop(pollInterval)
+	case "resp":
+		return p.consumeRESPLoop(pollInterval)
+	default:
+		if p.client != nil {
+			if err := p.consumeHTTPLoop(pollInterval); err == nil {
+				return nil
+			} else {
+				p.setState(false, err)
+			}
+		}
+		return p.consumeRESPLoop(pollInterval)
+	}
+}
+
+func (p *Poller) consumeHTTPLoop(pollInterval time.Duration) error {
+	if p.client == nil {
+		return fmt.Errorf("usage queue HTTP client unavailable")
+	}
+	for {
+		select {
+		case <-p.stopCh:
+			return nil
+		default:
+		}
+		processed, err := p.pollHTTPBatch()
+		if err != nil {
+			return err
+		}
+		p.setState(true, nil)
+		p.cleanup()
+		if processed == 0 {
+			timer := time.NewTimer(pollInterval)
+			select {
+			case <-p.stopCh:
+				timer.Stop()
+				return nil
+			case <-timer.C:
+			}
+		}
+	}
+}
+
+func (p *Poller) consumeRESPLoop(pollInterval time.Duration) error {
 	conn, err := net.DialTimeout("tcp", p.addr, 5*time.Second)
 	if err != nil {
 		return err
@@ -137,6 +194,24 @@ func (p *Poller) consumeLoop(pollInterval time.Duration) error {
 			}
 		}
 	}
+}
+
+func (p *Poller) pollHTTPBatch() (int, error) {
+	batchSize := p.cfg.BatchSize
+	if batchSize <= 0 {
+		batchSize = 50
+	}
+	payloads, err := p.client.FetchUsageQueue(batchSize)
+	if err != nil {
+		return 0, err
+	}
+	for _, payload := range payloads {
+		if err := p.processPayload(payload); err != nil {
+			log.Printf("usage queue payload error: %v", err)
+		}
+		p.setLastAt(time.Now())
+	}
+	return len(payloads), nil
 }
 
 func (p *Poller) pollBatch(conn net.Conn, reader *bufio.Reader) (int, error) {
@@ -206,28 +281,67 @@ func (p *Poller) parsePayload(payload []byte) db.SideUsageEvent {
 	event.AuthType = stringField(raw, "auth_type")
 	event.RequestID = stringField(raw, "request_id", "requestId")
 	event.ErrorClass = stringField(raw, "error_class")
-	event.AuthIndexHash = p.hashSensitive(raw, "auth_index_hash", "auth_index")
-	event.SourceHash = p.hashSensitive(raw, "source_hash", "source")
-	event.APIKeyHash = p.hashSensitive(raw, "api_key_hash", "api_key")
-	event.InputTokens = int64Field(raw, "input_tokens", "prompt_tokens")
-	event.OutputTokens = int64Field(raw, "output_tokens", "completion_tokens")
-	event.ReasoningTokens = int64Field(raw, "reasoning_tokens")
-	event.CachedTokens = int64Field(raw, "cached_tokens")
-	event.TotalTokens = int64Field(raw, "total_tokens")
-	if event.TotalTokens == 0 && (event.InputTokens > 0 || event.OutputTokens > 0) {
-		event.TotalTokens = event.InputTokens + event.OutputTokens
-	}
+	event.AuthIndexHash = p.hashSensitive("auth_index", raw, "auth_index_hash", "auth_index")
+	event.SourceHash = p.hashSensitive("source", raw, "source_hash", "source")
+	event.APIKeyHash = p.hashSensitive("api_key", raw, "api_key_hash", "api_key")
+	p.applyTokenFields(&event, raw)
 	event.LatencyMs = int64Field(raw, "latency_ms", "duration_ms")
 	event.Failed = boolIntField(raw, "failed", "error")
 	return event
 }
 
-func (p *Poller) hashSensitive(raw map[string]any, hashedKey, rawKey string) string {
-	if v := stringField(raw, hashedKey); v != "" {
-		return v
+func (p *Poller) applyTokenFields(event *db.SideUsageEvent, raw map[string]any) {
+	event.InputTokens = int64Field(raw, "input_tokens", "prompt_tokens")
+	event.OutputTokens = int64Field(raw, "output_tokens", "completion_tokens")
+	event.ReasoningTokens = int64Field(raw, "reasoning_tokens")
+	event.CachedTokens = int64Field(raw, "cached_tokens")
+	event.CacheReadTokens = int64Field(raw, "cache_read_tokens")
+	event.CacheCreationTokens = int64Field(raw, "cache_creation_tokens", "cache_creation_input_tokens")
+	event.TotalTokens = int64Field(raw, "total_tokens")
+
+	if tokens := objectField(raw, "tokens", "usage"); tokens != nil {
+		if event.InputTokens == 0 {
+			event.InputTokens = int64Field(tokens, "input_tokens", "prompt_tokens")
+		}
+		if event.OutputTokens == 0 {
+			event.OutputTokens = int64Field(tokens, "output_tokens", "completion_tokens")
+		}
+		if event.ReasoningTokens == 0 {
+			event.ReasoningTokens = int64Field(tokens, "reasoning_tokens")
+		}
+		if event.CachedTokens == 0 {
+			event.CachedTokens = int64Field(tokens, "cached_tokens")
+		}
+		if event.CacheReadTokens == 0 {
+			event.CacheReadTokens = int64Field(tokens, "cache_read_tokens")
+		}
+		if event.CacheCreationTokens == 0 {
+			event.CacheCreationTokens = int64Field(tokens, "cache_creation_tokens", "cache_creation_input_tokens")
+		}
+		if event.TotalTokens == 0 {
+			event.TotalTokens = int64Field(tokens, "total_tokens")
+		}
 	}
-	if v := stringField(raw, rawKey); v != "" && p.hasher != nil {
-		return p.hasher.Hash(v)
+	if event.CachedTokens == 0 && event.CacheReadTokens > 0 {
+		event.CachedTokens = event.CacheReadTokens
+	}
+	if event.TotalTokens == 0 {
+		event.TotalTokens = event.InputTokens + event.OutputTokens + event.ReasoningTokens
+	}
+	if event.TotalTokens == 0 {
+		event.TotalTokens = event.InputTokens + event.OutputTokens + event.ReasoningTokens + event.CachedTokens + event.CacheCreationTokens
+	}
+}
+
+func (p *Poller) hashSensitive(namespace string, raw map[string]any, hashedKey, rawKey string) string {
+	if p.hasher == nil {
+		return ""
+	}
+	if v := stringField(raw, hashedKey); v != "" {
+		return p.hasher.Hash("side_usage:" + namespace + ":hash:" + v)
+	}
+	if v := stringField(raw, rawKey); v != "" {
+		return p.hasher.Hash("side_usage:" + namespace + ":raw:" + v)
 	}
 	return ""
 }
@@ -358,6 +472,19 @@ func int64Field(raw map[string]any, keys ...string) int64 {
 		}
 	}
 	return 0
+}
+
+func objectField(raw map[string]any, keys ...string) map[string]any {
+	for _, key := range keys {
+		v, ok := raw[key]
+		if !ok || v == nil {
+			continue
+		}
+		if typed, ok := v.(map[string]any); ok {
+			return typed
+		}
+	}
+	return nil
 }
 
 func boolIntField(raw map[string]any, keys ...string) int64 {
