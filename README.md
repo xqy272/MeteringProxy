@@ -70,9 +70,11 @@ chmod 600 /opt/ai-gateway/metering/salt
 
 **config.yaml**
 
+> `upstream` 和 `base_url` 中的主机名必须与 CLIProxyAPI 的容器名一致。例如容器名为 `cli-proxy-api`，则填 `http://cli-proxy-api:8317`。`docker ps --format '{{.Names}}'` 可查看所有运行中的容器名。
+
 ```yaml
 listen: "0.0.0.0:8320"
-upstream: "http://cliproxy:8317"
+upstream: "http://<cpa-container-name>:8317"
 database: "/data/usage.sqlite"
 salt_file: "/data/salt"
 queue_capacity: 1000
@@ -96,7 +98,7 @@ observability:
     require_propagation_verified: true
 cliproxy_management:
   enabled: true
-  base_url: "http://cliproxy:8317/v0/management"
+  base_url: "http://<cpa-container-name>:8317/v0/management"
   key_file: "/data/cliproxy-management-key"
   usage_queue:
     enabled: true
@@ -280,6 +282,18 @@ curl -s http://127.0.0.1:8320/metering/api/observability
 <summary><b>展开升级步骤</b></summary>
 
 ```bash
+# 0. 升级前确认（关键）
+# ---- 确认 ai-gateway 网络存在 ----
+docker network inspect ai-gateway >/dev/null 2>&1 || docker network create ai-gateway
+
+# ---- 确认 CLIProxyAPI 容器已加入 ai-gateway ----
+CPA_CONTAINER=$(docker ps --format '{{.Names}}' | grep -i cli)
+docker network inspect ai-gateway | grep -q "$CPA_CONTAINER" || docker network connect ai-gateway "$CPA_CONTAINER"
+
+# ---- 确认 config.yaml 中 upstream 主机名与 CPA 容器名一致 ----
+# 例如 CPA 容器名为 cli-proxy-api 时，upstream 应为 http://cli-proxy-api:8317
+# grep 'upstream:' /opt/ai-gateway/metering/config.yaml
+
 # 1. 停止 + 备份
 docker stop metering-proxy
 cp /opt/ai-gateway/metering/usage.sqlite /opt/ai-gateway/metering/backups/usage.sqlite.$(date +%Y%m%d-%H%M%S).bak
@@ -300,6 +314,9 @@ docker run -d \
 # 3. 验证
 docker ps --filter name=metering-proxy
 docker exec metering-proxy sqlite3 /data/usage.sqlite "PRAGMA user_version;"
+# ---- 确认能连通上游 ----
+docker exec metering-proxy wget -qO- http://<cpa-container-name>:8317/v1/models
+# 返回 401 {"error":"Missing API key"} 表示连通正常
 ```
 
 数据库文件在宿主机上，升级不会丢失历史数据。迁移在容器启动时自动执行（仅增量 ALTER TABLE ADD COLUMN，不删列不改类型）。
