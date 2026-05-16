@@ -83,6 +83,48 @@ func TestFetchAuthFilesDecodesCLIProxyAPIv704FilesResponse(t *testing.T) {
 	}
 }
 
+func TestFetchAuthFilesIgnoresCLIProxyAPIv709ProjectID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"files": [{
+				"id": "codex-1",
+				"project_id": "proj_abc",
+				"auth_index": "12",
+				"name": "codex@example.com",
+				"type": "codex",
+				"provider": "codex",
+				"status": "active",
+				"disabled": false,
+				"unavailable": false,
+				"success": 7,
+				"failed": 2
+			}]
+		}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(CLIProxyConfig{
+		BaseURL: server.URL + "/v0/management",
+		Key:     "secret",
+		Timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	resp, err := client.FetchAuthFiles()
+	if err != nil {
+		t.Fatalf("FetchAuthFiles: %v", err)
+	}
+	if len(resp.AuthFiles) != 1 {
+		t.Fatalf("len(AuthFiles) = %d, want 1", len(resp.AuthFiles))
+	}
+	entry := resp.AuthFiles[0]
+	if entry.ID != "codex-1" || entry.Provider != "codex" || entry.AuthIndex != "12" || !entry.Available {
+		t.Fatalf("entry = %#v", entry)
+	}
+}
+
 func TestFetchAuthFilesStillDecodesLegacyAuthFilesResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

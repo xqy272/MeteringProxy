@@ -1,15 +1,17 @@
 # CLIProxyAPI Compatibility Matrix
 
-This matrix documents the MeteringProxy compatibility target for CLIProxyAPI
-v7.0.4 and the rules for future CPA upgrades. The invariant is conservative:
-unsupported or unverified CPA surfaces must be forwarded transparently or shown
-as unavailable; they must not be reported as fully metered quota data.
+This matrix documents the MeteringProxy compatibility target for verified
+CLIProxyAPI releases and the rules for future CPA upgrades. The invariant is
+conservative: unsupported or unverified CPA surfaces must be forwarded
+transparently or shown as unavailable; they must not be reported as fully
+metered quota data.
 
-## Verified Version
+## Verified Versions
 
 | CPA version | Release date | Verification |
 |---|---:|---|
 | v7.0.4 | 2026-05-12 | Covered by `internal/compat` fake-CPA contract tests |
+| v7.0.9 | 2026-05-16 | Compared with v7.0.4 release tag; metered routes, usage queue, and `api-call` contract are unchanged. `auth-files` adds `project_id`, which MeteringProxy ignores safely. |
 
 ## Metered API Routes
 
@@ -40,9 +42,9 @@ as unavailable; they must not be reported as fully metered quota data.
 
 ## Transparent Pass-Through Routes
 
-These routes are intentionally not token-metered by MeteringProxy v7.0.4
-compatibility support. They should either route directly to CPA in Caddy or pass
-through MeteringProxy as `unknown_passthrough`.
+These routes are intentionally not token-metered by MeteringProxy's verified
+CPA compatibility support. They should either route directly to CPA in Caddy or
+pass through MeteringProxy as `unknown_passthrough`.
 
 | CPA route | Status | Reason |
 |---|---|---|
@@ -57,18 +59,18 @@ through MeteringProxy as `unknown_passthrough`.
 
 | CPA management surface | Status | Notes |
 |---|---|---|
-| `GET /v0/management/auth-files` | supported | Supports CPA v7.0.4 `{files:[...]}` and legacy `{auth_files:[...]}` |
+| `GET /v0/management/auth-files` | supported | Supports CPA `{files:[...]}` and legacy `{auth_files:[...]}`; v7.0.9 `project_id` is ignored safely |
 | `GET /v0/management/usage-queue?count=N` | supported | Requires CPA `usage-statistics-enabled: true` |
 | RESP `AUTH` + `LPOP`/`RPOP` | supported | Disabled by CPA when `home.enabled` is true; HTTP queue is preferred in auto mode |
-| `POST /v0/management/api-call` | endpoint detected only | CPA v7.0.4 requires `method` and absolute `url`; it is not treated as a full quota API |
+| `POST /v0/management/api-call` | endpoint detected only | CPA v7.0.4-v7.0.9 requires `method` and absolute `url`; it is not treated as a full quota API |
 
 ## Quota Support
 
-Full quota snapshots are disabled by default. CPA v7.0.4 exposes a generic
-management `/api-call` helper, but not a normalized quota contract. Until a
-provider-specific adapter is implemented and covered by compatibility tests,
-WebUI quota should report credential-health fallback rather than claiming full
-quota availability.
+Full quota snapshots are disabled by default. Verified CPA v7.0.4-v7.0.9
+releases expose a generic management `/api-call` helper, but not a normalized
+quota contract. Until a provider-specific adapter is implemented and covered by
+compatibility tests, WebUI quota should report credential-health fallback rather
+than claiming full quota availability.
 
 Supported today:
 
@@ -79,7 +81,7 @@ Supported today:
 
 Not supported today:
 
-- Automatic Codex/Claude/Kimi quota snapshots from CPA v7.0.4 without
+- Automatic Codex/Claude/Kimi quota snapshots from verified CPA releases without
   provider-specific templates.
 - Browser-driven generic `/api-call` proxying.
 

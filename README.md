@@ -84,7 +84,31 @@ webui:
   enabled: true
   base_path: "/metering"
 pricing_file: "/data/pricing.yaml"
+request_metadata:
+  initial_bytes: 4096
+  max_bytes: 65536
+  extended_model_scan: false
+observability:
+  correlation:
+    mode: "passive"
+    header: "X-Request-ID"
+    side_channel_merge: "stored_only"
+    require_propagation_verified: true
+cliproxy_management:
+  enabled: true
+  base_url: "http://cliproxy:8317/v0/management"
+  key_file: "/data/cliproxy-management-key"
+  usage_queue:
+    enabled: true
+    transport: "auto"
+    merge_mode: "stored_only"
+  credential_health:
+    enabled: true
+  quota:
+    enabled: false
 ```
+
+启用 `cliproxy_management` 时，需把 CLIProxyAPI management key 写入 `key_file` 指向的文件，并在 CPA 配置中开启 `usage-statistics-enabled: true`。当前版本默认只展示凭证健康与 side-channel 用量事件；完整 quota 快照在没有 provider-specific adapter 时保持关闭。
 
 **pricing.yaml**（请与实际服务商合同定价对齐）
 
@@ -136,7 +160,7 @@ pricing:
 ### 6. 拉取并启动容器
 
 ```bash
-docker pull ghcr.io/xqy272/ai-gateway-metering-proxy:v0.1.0
+docker pull ghcr.io/xqy272/ai-gateway-metering-proxy:v0.3.1
 
 docker run -d \
   --name metering-proxy \
@@ -144,7 +168,7 @@ docker run -d \
   --network ai-gateway \
   -v /opt/ai-gateway/metering:/data \
   -p 127.0.0.1:8320:8320 \
-  ghcr.io/xqy272/ai-gateway-metering-proxy:v0.1.0 \
+  ghcr.io/xqy272/ai-gateway-metering-proxy:v0.3.1 \
   -config /data/config.yaml
 ```
 
@@ -236,13 +260,15 @@ docker ps -a --filter name=metering-proxy
 docker logs metering-proxy
 curl -s http://127.0.0.1:8320/metering/api/health
 curl -s http://127.0.0.1:8320/metering/api/summary?range=24h
+curl -s http://127.0.0.1:8320/metering/api/quota
+curl -s http://127.0.0.1:8320/metering/api/observability
 ```
 
 ### 镜像标签说明
 
 | 标签 | 说明 |
 |---|---|
-| `v0.1.0` | 固定版本，生产推荐 |
+| `v0.3.1` | 固定版本，生产推荐 |
 | `edge` | 追踪 main 分支最新提交 |
 | `latest` | 指向最新发布版本 |
 
@@ -260,7 +286,7 @@ cp /opt/ai-gateway/metering/usage.sqlite /opt/ai-gateway/metering/backups/usage.
 cp /opt/ai-gateway/metering/salt       /opt/ai-gateway/metering/backups/salt.$(date +%Y%m%d-%H%M%S).bak
 
 # 2. 更新镜像
-docker pull ghcr.io/xqy272/ai-gateway-metering-proxy:v0.2.0
+docker pull ghcr.io/xqy272/ai-gateway-metering-proxy:v0.3.1
 docker rm metering-proxy
 docker run -d \
   --name metering-proxy \
@@ -268,7 +294,7 @@ docker run -d \
   --network ai-gateway \
   -v /opt/ai-gateway/metering:/data \
   -p 127.0.0.1:8320:8320 \
-  ghcr.io/xqy272/ai-gateway-metering-proxy:v0.2.0 \
+  ghcr.io/xqy272/ai-gateway-metering-proxy:v0.3.1 \
   -config /data/config.yaml
 
 # 3. 验证
@@ -342,6 +368,19 @@ chmod 600 /opt/ai-gateway/metering/usage.sqlite
 | `webui.enabled` | `true` | 启用仪表盘 |
 | `webui.base_path` | `/metering` | 仪表盘路径前缀，勿设为 `/` |
 | `pricing_file` | — | 成本估算 YAML 文件路径 |
+| `request_metadata.initial_bytes` | `4096` | 请求体前缀初始扫描字节数 |
+| `request_metadata.max_bytes` | `65536` | 扩展模型扫描最大字节数，上限 64 KiB |
+| `request_metadata.extended_model_scan` | `false` | 是否启用扩展请求模型扫描 |
+| `observability.correlation.mode` | `passive` | 请求相关性模式：`passive` 或 `inject_if_missing` |
+| `observability.correlation.side_channel_merge` | `stored_only` | side-channel 用量合并模式；CPA 未传播 request id 时保持 `stored_only` |
+| `cliproxy_management.enabled` | `false` | 启用 CLIProxyAPI Management API 只读联动 |
+| `cliproxy_management.base_url` | `http://127.0.0.1:8317/v0/management` | CLIProxyAPI Management API 地址 |
+| `cliproxy_management.key_file` | — | management key 文件；启用 management 时必填 |
+| `cliproxy_management.usage_queue.enabled` | `false` | 消费 CPA usage queue，需 CPA 开启 `usage-statistics-enabled` |
+| `cliproxy_management.usage_queue.transport` | `auto` | usage queue 消费方式：`auto`、`http` 或 `resp` |
+| `cliproxy_management.usage_queue.merge_mode` | `stored_only` | 默认仅存 side event；request-id 传播验证后才可设为 `request_id` |
+| `cliproxy_management.credential_health.enabled` | `true` | 从 `auth-files` 同步凭证健康 |
+| `cliproxy_management.quota.enabled` | `false` | 完整 quota 快照；无 provider-specific adapter 时保持关闭 |
 
 ## WebUI
 
@@ -359,6 +398,9 @@ chmod 600 /opt/ai-gateway/metering/usage.sqlite
 | `GET /metering/api/keys?range=...` | 按 API Key 维度聚合 |
 | `GET /metering/api/requests?range=...&limit=100&status=...&model=&endpoint=` | 最近请求明细 |
 | `GET /metering/api/errors?range=...&nonzero=true` | 非零错误 bucket |
+| `GET /metering/api/quota` | 凭证健康与 quota 状态 |
+| `POST /metering/api/quota/refresh` | 触发后台 quota/凭证状态刷新 |
+| `GET /metering/api/observability` | side-channel、相关性与配额观测状态 |
 | `GET /metering/api/health` | 队列深度、丢弃事件、解析/写入错误、计量开关 |
 | `GET /metering/api/metadata` | profile 列表、time range、bucket 等前端元数据 |
 | `GET /metrics` | Prometheus 文本格式 |
@@ -449,7 +491,7 @@ docker run -d \
   -v /opt/ai-gateway/metering:/data \
   --add-host host.docker.internal:host-gateway \
   -p 127.0.0.1:8320:8320 \
-  ghcr.io/xqy272/ai-gateway-metering-proxy:v0.1.0 \
+  ghcr.io/xqy272/ai-gateway-metering-proxy:v0.3.1 \
   -config /data/config.yaml
 ```
 
