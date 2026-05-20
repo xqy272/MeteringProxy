@@ -112,6 +112,8 @@ cliproxy_management:
 
 启用 `cliproxy_management` 时，需把 CLIProxyAPI management key 写入 `key_file` 指向的文件，并在 CPA 配置中开启 `usage-statistics-enabled: true`。当前版本默认只展示凭证健康与 side-channel 用量事件；完整 quota 快照在没有 provider-specific adapter 时保持关闭。
 
+CPA v7.1.17 起已禁用旧 RESP usage queue 协议。生产环境请保持 `usage_queue.transport: "auto"`，或显式设为 `"http"`；不要在新 CPA 上强制使用 `"resp"`。
+
 **pricing.yaml**（请与实际服务商合同定价对齐）
 
 ```yaml
@@ -394,7 +396,7 @@ chmod 600 /opt/ai-gateway/metering/usage.sqlite
 | `cliproxy_management.base_url` | `http://127.0.0.1:8317/v0/management` | CLIProxyAPI Management API 地址 |
 | `cliproxy_management.key_file` | — | management key 文件；启用 management 时必填 |
 | `cliproxy_management.usage_queue.enabled` | `false` | 消费 CPA usage queue，需 CPA 开启 `usage-statistics-enabled` |
-| `cliproxy_management.usage_queue.transport` | `auto` | usage queue 消费方式：`auto`、`http` 或 `resp` |
+| `cliproxy_management.usage_queue.transport` | `auto` | usage queue 消费方式：`auto` 优先 HTTP；`resp` 仅旧 CPA 兼容，v7.1.17 起不可用 |
 | `cliproxy_management.usage_queue.merge_mode` | `stored_only` | 默认仅存 side event；request-id 传播验证后才可设为 `request_id` |
 | `cliproxy_management.credential_health.enabled` | `true` | 从 `auth-files` 同步凭证健康 |
 | `cliproxy_management.quota.enabled` | `false` | 完整 quota 快照；无 provider-specific adapter 时保持关闭 |

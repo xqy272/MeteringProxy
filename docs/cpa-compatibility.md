@@ -12,6 +12,7 @@ metered quota data.
 |---|---:|---|
 | v7.0.4 | 2026-05-12 | Covered by `internal/compat` fake-CPA contract tests |
 | v7.0.9 | 2026-05-16 | Compared with v7.0.4 release tag; metered routes, usage queue, and `api-call` contract are unchanged. `auth-files` adds `project_id`, which MeteringProxy ignores safely. |
+| v7.1.17 | 2026-05-19 | Compared with v7.0.9 release tag; metered LLM routes, HTTP usage queue, and `api-call` contract are unchanged. New xAI OAuth and `/v1/videos*` routes stay transparent. RESP usage queue is disabled; use HTTP usage queue. |
 
 ## Metered API Routes
 
@@ -53,6 +54,8 @@ pass through MeteringProxy as `unknown_passthrough`.
 | `POST /v1/messages/count_tokens` | pass-through | Token counting helper, not a billable generation record |
 | `POST /v1/images/generations` | pass-through | Non-LLM-token billing not implemented |
 | `POST /v1/images/edits` | pass-through | Non-LLM-token billing not implemented |
+| `POST /v1/videos` and xAI video aliases | pass-through | Non-LLM-token billing not implemented |
+| `GET /v1/videos/{request_id}` | pass-through | Video status retrieval, not a token usage record |
 | `/v0/management/*` | pass-through or direct to CPA | Management API is not proxied for user traffic |
 
 ## Management Integrations
@@ -60,13 +63,13 @@ pass through MeteringProxy as `unknown_passthrough`.
 | CPA management surface | Status | Notes |
 |---|---|---|
 | `GET /v0/management/auth-files` | supported | Supports CPA `{files:[...]}` and legacy `{auth_files:[...]}`; v7.0.9 `project_id` is ignored safely |
-| `GET /v0/management/usage-queue?count=N` | supported | Requires CPA `usage-statistics-enabled: true` |
-| RESP `AUTH` + `LPOP`/`RPOP` | supported | Disabled by CPA when `home.enabled` is true; HTTP queue is preferred in auto mode |
-| `POST /v0/management/api-call` | endpoint detected only | CPA v7.0.4-v7.0.9 requires `method` and absolute `url`; it is not treated as a full quota API |
+| `GET /v0/management/usage-queue?count=N` | supported | Requires CPA `usage-statistics-enabled: true`; v7.1.17 may include `response_headers`, which MeteringProxy ignores safely |
+| RESP `AUTH` + `LPOP`/`RPOP` | legacy only | Available in v7.0.4-v7.0.9; v7.1.17 returns `ERR RESP AUTH disabled; use mTLS`. Configure `usage_queue.transport` as `auto` or `http` for new CPA releases |
+| `POST /v0/management/api-call` | endpoint detected only | CPA v7.0.4-v7.1.17 requires `method` and absolute `url`; it is not treated as a full quota API |
 
 ## Quota Support
 
-Full quota snapshots are disabled by default. Verified CPA v7.0.4-v7.0.9
+Full quota snapshots are disabled by default. Verified CPA v7.0.4-v7.1.17
 releases expose a generic management `/api-call` helper, but not a normalized
 quota contract. Until a provider-specific adapter is implemented and covered by
 compatibility tests, WebUI quota should report credential-health fallback rather

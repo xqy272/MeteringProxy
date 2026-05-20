@@ -92,6 +92,9 @@ func TestCLIProxyAPIv704RouteMatrix(t *testing.T) {
 		{http.MethodGet, "/v1/responses", "unknown_passthrough"},
 		{http.MethodPost, "/v1/messages/count_tokens", "unknown_passthrough"},
 		{http.MethodPost, "/v1/images/generations", "unknown_passthrough"},
+		{http.MethodPost, "/v1/videos", "unknown_passthrough"},
+		{http.MethodPost, "/v1/videos/generations", "unknown_passthrough"},
+		{http.MethodGet, "/v1/videos/vid_123", "unknown_passthrough"},
 	}
 	for _, tc := range tests {
 		prof, err := registry.Match(tc.method, tc.path)
