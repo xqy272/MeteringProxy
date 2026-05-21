@@ -2144,6 +2144,32 @@ func (db *DB) InsertQuotaRefreshEvent(row *QuotaRefreshEventRow) error {
 	return err
 }
 
+func (db *DB) RecentQuotaRefreshEvents(since time.Time, limit int) ([]QuotaRefreshEventRow, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	rows, err := db.read.Query(`
+		SELECT id, checked_at, checked_at_unix, provider, credential_hash, phase, status, adapter_status, duration_ms, error_class, error_message, partial
+		FROM quota_refresh_events
+		WHERE checked_at_unix >= ?
+		ORDER BY checked_at_unix DESC, id DESC
+		LIMIT ?
+	`, since.Unix(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []QuotaRefreshEventRow{}
+	for rows.Next() {
+		var r QuotaRefreshEventRow
+		if err := rows.Scan(&r.ID, &r.CheckedAt, &r.CheckedAtUnix, &r.Provider, &r.CredentialHash, &r.Phase, &r.Status, &r.AdapterStatus, &r.DurationMs, &r.ErrorClass, &r.ErrorMessage, &r.Partial); err != nil {
+			return nil, err
+		}
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}
+
 func (db *DB) DeleteStaleSideUsageEvents(cutoff time.Time) error {
 	_, err := db.sql.Exec(`DELETE FROM side_usage_events WHERE received_at_unix < ?`, cutoff.Unix())
 	return err

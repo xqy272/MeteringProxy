@@ -89,30 +89,35 @@ type CLIProxyConfig struct {
 }
 
 type AuthFileEntry struct {
-	ID                 string                    `json:"id"`
-	Provider           string                    `json:"provider"`
-	AuthType           string                    `json:"auth_type"`
-	AuthIndex          string                    `json:"auth_index"`
-	Label              string                    `json:"label"`
-	Status             string                    `json:"status"`
-	StatusMessage      string                    `json:"status_message"`
-	SuccessCount       int64                     `json:"success_count"`
-	FailedCount        int64                     `json:"failed_count"`
-	RecentSuccessCount int64                     `json:"recent_success_count"`
-	RecentFailedCount  int64                     `json:"recent_failed_count"`
-	RecentRequests     []AuthRecentRequestBucket `json:"recent_requests"`
-	Available          bool                      `json:"available"`
-	Disabled           bool                      `json:"disabled"`
-	Unavailable        bool                      `json:"unavailable"`
-	Key                string                    `json:"key"`
-	Source             string                    `json:"source"`
-	Plan               string                    `json:"plan"`
-	NextRetryAfter     string                    `json:"next_retry_after"`
-	NextRetryAfterUnix int64                     `json:"next_retry_after_unix"`
-	ErrorClass         string                    `json:"error_class"`
-	ErrorType          string                    `json:"error_type"`
-	ErrorCode          string                    `json:"error_code"`
-	ErrorMessage       string                    `json:"error_message"`
+	ID                   string                    `json:"id"`
+	Provider             string                    `json:"provider"`
+	AuthType             string                    `json:"auth_type"`
+	AuthIndex            string                    `json:"auth_index"`
+	Label                string                    `json:"label"`
+	Status               string                    `json:"status"`
+	StatusMessage        string                    `json:"status_message"`
+	SuccessCount         int64                     `json:"success_count"`
+	FailedCount          int64                     `json:"failed_count"`
+	RecentSuccessCount   int64                     `json:"recent_success_count"`
+	RecentFailedCount    int64                     `json:"recent_failed_count"`
+	RecentRequests       []AuthRecentRequestBucket `json:"recent_requests"`
+	Available            bool                      `json:"available"`
+	AvailableSet         bool                      `json:"-"`
+	Disabled             bool                      `json:"disabled"`
+	Unavailable          bool                      `json:"unavailable"`
+	Key                  string                    `json:"key"`
+	Source               string                    `json:"source"`
+	Plan                 string                    `json:"plan"`
+	NextRetryAfter       string                    `json:"next_retry_after"`
+	NextRetryAfterUnix   int64                     `json:"next_retry_after_unix"`
+	QuotaExceeded        bool                      `json:"quota_exceeded"`
+	QuotaReason          string                    `json:"quota_reason"`
+	QuotaNextRecoverAt   string                    `json:"quota_next_recover_at"`
+	QuotaNextRecoverUnix int64                     `json:"quota_next_recover_unix"`
+	ErrorClass           string                    `json:"error_class"`
+	ErrorType            string                    `json:"error_type"`
+	ErrorCode            string                    `json:"error_code"`
+	ErrorMessage         string                    `json:"error_message"`
 }
 
 type AuthFilesResponse struct {
@@ -142,9 +147,10 @@ func (e *AuthFileEntry) UnmarshalJSON(data []byte) error {
 	e.RecentRequests = rawRecentRequests(raw, "recent_requests")
 	e.RecentSuccessCount, e.RecentFailedCount = sumRecentRequests(e.RecentRequests)
 	e.Available = rawBool(raw, "available")
+	_, e.AvailableSet = raw["available"]
 	e.Disabled = rawBool(raw, "disabled")
 	e.Unavailable = rawBool(raw, "unavailable")
-	if _, ok := raw["available"]; !ok {
+	if !e.AvailableSet {
 		e.Available = !e.Disabled && !e.Unavailable
 	}
 	e.Key = rawString(raw, "key")
@@ -155,6 +161,11 @@ func (e *AuthFileEntry) UnmarshalJSON(data []byte) error {
 	}
 	e.NextRetryAfter = firstString(raw, "next_retry_after", "nextRetryAfter")
 	e.NextRetryAfterUnix = firstUnixTime(raw, "next_retry_after", "nextRetryAfter")
+	e.QuotaExceeded, e.QuotaReason, e.QuotaNextRecoverAt, e.QuotaNextRecoverUnix = rawQuotaDetails(raw)
+	if e.NextRetryAfter == "" && e.QuotaNextRecoverAt != "" {
+		e.NextRetryAfter = e.QuotaNextRecoverAt
+		e.NextRetryAfterUnix = e.QuotaNextRecoverUnix
+	}
 	e.ErrorClass = firstString(raw, "error_class", "error_type", "error_code")
 	e.ErrorType = rawString(raw, "error_type")
 	e.ErrorCode = rawString(raw, "error_code")
@@ -171,6 +182,9 @@ func (e *AuthFileEntry) UnmarshalJSON(data []byte) error {
 	}
 	if e.ErrorClass == "" {
 		e.ErrorClass = firstNonEmpty(errorType, errorCode)
+	}
+	if e.ErrorClass == "" && e.QuotaExceeded {
+		e.ErrorClass = firstNonEmpty(e.QuotaReason, "quota")
 	}
 	if e.StatusMessage == "" {
 		e.StatusMessage = errorMessage
@@ -293,15 +307,23 @@ func firstString(raw map[string]json.RawMessage, keys ...string) string {
 }
 
 func rawNestedString(raw map[string]json.RawMessage, objectKey string, keys ...string) string {
-	data, ok := raw[objectKey]
-	if !ok || len(data) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
-		return ""
-	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(data, &obj); err != nil {
+	obj := rawObject(raw, objectKey)
+	if obj == nil {
 		return ""
 	}
 	return firstString(obj, keys...)
+}
+
+func rawObject(raw map[string]json.RawMessage, objectKey string) map[string]json.RawMessage {
+	data, ok := raw[objectKey]
+	if !ok || len(data) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return nil
+	}
+	return obj
 }
 
 func rawRecentRequests(raw map[string]json.RawMessage, key string) []AuthRecentRequestBucket {
@@ -381,6 +403,18 @@ func rawErrorDetails(raw map[string]json.RawMessage) (errorType, errorCode, erro
 			firstString(obj, "message", "error_message", "detail")
 	}
 	return "", "", ""
+}
+
+func rawQuotaDetails(raw map[string]json.RawMessage) (exceeded bool, reason, nextRecoverAt string, nextRecoverUnix int64) {
+	obj := rawObject(raw, "quota")
+	if obj == nil {
+		return false, "", "", 0
+	}
+	exceeded = rawBool(obj, "exceeded")
+	reason = firstString(obj, "reason", "status", "status_message")
+	nextRecoverAt = firstString(obj, "next_recover_at", "nextRecoverAt", "reset_at", "resetAt")
+	nextRecoverUnix = firstUnixTime(obj, "next_recover_at", "nextRecoverAt", "reset_at", "resetAt")
+	return exceeded, reason, nextRecoverAt, nextRecoverUnix
 }
 
 func firstNonEmpty(values ...string) string {

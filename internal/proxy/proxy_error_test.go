@@ -116,6 +116,15 @@ func TestProxyRequest_UpstreamErrorSetsErrorClass(t *testing.T) {
 	if strings.Contains(ev.Error, "127.0.0.1") {
 		t.Errorf("error leaked upstream address: %q", ev.Error)
 	}
+	if rec.Header().Get("X-Metering-Proxy-Error-Type") != "proxy_transport" {
+		t.Fatalf("proxy error type header = %q, want proxy_transport", rec.Header().Get("X-Metering-Proxy-Error-Type"))
+	}
+	if rec.Header().Get("X-Metering-Proxy-Error-Class") != wantClass {
+		t.Fatalf("proxy error class header = %q, want %q", rec.Header().Get("X-Metering-Proxy-Error-Class"), wantClass)
+	}
+	if rec.Header().Get("X-Metering-Proxy-Error-Code") != ev.ErrorCode {
+		t.Fatalf("proxy error code header = %q, want %q", rec.Header().Get("X-Metering-Proxy-Error-Code"), ev.ErrorCode)
+	}
 }
 
 func TestForwardTransparentErrorSetsMeteringHeader(t *testing.T) {
@@ -165,6 +174,15 @@ func TestProxyErrorClassMapsSafeOperationalError(t *testing.T) {
 		if got := proxyErrorClass(code); got != want {
 			t.Fatalf("proxyErrorClass(%q) = %q, want %q", code, got, want)
 		}
+	}
+}
+
+func TestProxyHTTPStatusUsesGatewayTimeoutForTimeouts(t *testing.T) {
+	if got := proxyHTTPStatus(http.StatusBadGateway, "timeout"); got != http.StatusGatewayTimeout {
+		t.Fatalf("proxyHTTPStatus(timeout) = %d, want %d", got, http.StatusGatewayTimeout)
+	}
+	if got := proxyHTTPStatus(http.StatusBadGateway, "connection_refused"); got != http.StatusBadGateway {
+		t.Fatalf("proxyHTTPStatus(connection_refused) = %d, want %d", got, http.StatusBadGateway)
 	}
 }
 

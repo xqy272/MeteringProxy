@@ -703,6 +703,10 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
+	diagnostics := []db.QuotaRefreshEventRow{}
+	if s.quotaPoller != nil {
+		diagnostics = s.recentQuotaDiagnostics(12)
+	}
 	credRows, credTime := []db.CredentialHealthRow{}, time.Time{}
 	if s.credPoller != nil {
 		credRows, credTime = s.credPoller.Snapshot()
@@ -812,6 +816,7 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
 			"checked_at":           checkedAt.Format(time.RFC3339),
 			"providers":            providers,
 			"items":                quotaRows,
+			"diagnostics":          diagnostics,
 		}
 		writeJSON(w, resp)
 		return
@@ -865,6 +870,7 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
 			"checked_at":           credTime.Format(time.RFC3339),
 			"providers":            providers,
 			"items":                credRows,
+			"diagnostics":          diagnostics,
 		}
 		writeJSON(w, resp)
 		return
@@ -878,6 +884,7 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
 		"checked_at":           "",
 		"providers":            []any{},
 		"items":                []any{},
+		"diagnostics":          diagnostics,
 	})
 }
 
@@ -904,6 +911,10 @@ func (s *Server) handleQuotaRefresh(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleObservability(w http.ResponseWriter, r *http.Request) {
 	credRows := []db.CredentialHealthRow{}
 	credTime := time.Time{}
+	quotaDiagnostics := []db.QuotaRefreshEventRow{}
+	if s.quotaPoller != nil {
+		quotaDiagnostics = s.recentQuotaDiagnostics(6)
+	}
 
 	resp := map[string]any{
 		"request_capture": map[string]any{
@@ -1044,10 +1055,58 @@ func (s *Server) handleObservability(w http.ResponseWriter, r *http.Request) {
 			"last_checked_at":      checkedAt.Format(time.RFC3339),
 			"stale_count":          staleCount,
 			"error_count":          errorCount,
+			"latest_event":         latestQuotaDiagnostic(quotaDiagnostics),
+			"last_error":           latestQuotaDiagnosticError(quotaDiagnostics),
 		}
 	}
 
 	writeJSON(w, resp)
+}
+
+func (s *Server) recentQuotaDiagnostics(limit int) []db.QuotaRefreshEventRow {
+	if s.db == nil {
+		return []db.QuotaRefreshEventRow{}
+	}
+	rows, err := s.db.RecentQuotaRefreshEvents(time.Now().Add(-72*time.Hour), limit)
+	if err != nil {
+		return []db.QuotaRefreshEventRow{}
+	}
+	if rows == nil {
+		return []db.QuotaRefreshEventRow{}
+	}
+	return rows
+}
+
+func latestQuotaDiagnostic(rows []db.QuotaRefreshEventRow) map[string]any {
+	if len(rows) == 0 {
+		return nil
+	}
+	row := rows[0]
+	return map[string]any{
+		"checked_at":     row.CheckedAt,
+		"provider":       row.Provider,
+		"phase":          row.Phase,
+		"status":         row.Status,
+		"adapter_status": row.AdapterStatus,
+		"error_class":    row.ErrorClass,
+		"duration_ms":    row.DurationMs,
+	}
+}
+
+func latestQuotaDiagnosticError(rows []db.QuotaRefreshEventRow) string {
+	for _, row := range rows {
+		if row.Status != "error" {
+			continue
+		}
+		if row.ErrorClass != "" {
+			return row.ErrorClass
+		}
+		if row.AdapterStatus != "" {
+			return row.AdapterStatus
+		}
+		return "quota_refresh_failed"
+	}
+	return ""
 }
 
 func getMapVal(m any, key string) any {

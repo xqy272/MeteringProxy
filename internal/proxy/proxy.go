@@ -226,8 +226,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (p *Proxy) forwardTransparent(w http.ResponseWriter, r *http.Request) {
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, p.upstream+r.URL.RequestURI(), r.Body)
 	if err != nil {
-		w.Header().Set("X-Metering-Proxy", "1")
-		http.Error(w, "upstream error", 502)
+		p.writeTransparentProxyError(w, err)
 		return
 	}
 	upstreamReq.ContentLength = r.ContentLength
@@ -239,8 +238,7 @@ func (p *Proxy) forwardTransparent(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := p.transport.RoundTrip(upstreamReq)
 	if err != nil {
-		w.Header().Set("X-Metering-Proxy", "1")
-		http.Error(w, "upstream error", 502)
+		p.writeTransparentProxyError(w, err)
 		return
 	}
 	defer resp.Body.Close()
@@ -1319,17 +1317,17 @@ func truncateUsageRawJSON(raw string) (string, bool) {
 }
 
 func (p *Proxy) writeError(w http.ResponseWriter, start time.Time, ttfb time.Duration, prof *profile.EndpointProfile, endpoint, method, clientIPHash, apiKeyHash, modelRequested string, requestMeta requestUsageMetadata, requestBytes int64, status int, err error) {
-	if status == 0 {
-		status = http.StatusBadGateway
-	}
+	errCode := safeOperationalError(err)
+	errClass := proxyErrorClass(errCode)
+	status = proxyHTTPStatus(status, errCode)
 	w.Header().Set("X-Metering-Proxy", "1")
+	setProxyTransportErrorHeaders(w, errClass, errCode)
 	http.Error(w, "upstream error", status)
 	log.Printf("upstream request error: endpoint=%q method=%q status=%d error=%v", endpoint, method, status, err)
 
 	captureOutcome := event.OutcomeFailed
-	errCode := safeOperationalError(err)
 	errInfo := &extractor.ErrorInfo{
-		Class: proxyErrorClass(errCode),
+		Class: errClass,
 		Type:  "proxy_transport",
 		Code:  errCode,
 	}
@@ -1337,6 +1335,30 @@ func (p *Proxy) writeError(w http.ResponseWriter, start time.Time, ttfb time.Dur
 	p.recordUsage(start, ttfb, prof, endpoint, method, "", status, false,
 		clientIPHash, apiKeyHash, modelRequested, requestMeta, nil, requestBytes, 0, errCode,
 		captureOutcome, event.ReasonUpstreamError, errInfo, "", "", "", "")
+}
+
+func (p *Proxy) writeTransparentProxyError(w http.ResponseWriter, err error) {
+	errCode := safeOperationalError(err)
+	errClass := proxyErrorClass(errCode)
+	w.Header().Set("X-Metering-Proxy", "1")
+	setProxyTransportErrorHeaders(w, errClass, errCode)
+	http.Error(w, "upstream error", proxyHTTPStatus(http.StatusBadGateway, errCode))
+}
+
+func setProxyTransportErrorHeaders(w http.ResponseWriter, class, code string) {
+	w.Header().Set("X-Metering-Proxy-Error-Type", "proxy_transport")
+	w.Header().Set("X-Metering-Proxy-Error-Class", class)
+	w.Header().Set("X-Metering-Proxy-Error-Code", code)
+}
+
+func proxyHTTPStatus(fallback int, code string) int {
+	if code == "timeout" {
+		return http.StatusGatewayTimeout
+	}
+	if fallback != 0 {
+		return fallback
+	}
+	return http.StatusBadGateway
 }
 
 func proxyErrorClass(code string) string {

@@ -477,9 +477,9 @@ chmod 600 /opt/ai-gateway/metering/usage.sqlite
 
 健康状态计数器为进程生命期计数器，容器重启后从零开始。
 
-Quota API 的 `full_quota_available=true` 仅表示后台已拿到受支持的 provider quota 行；如果 CPA `/api-call` 不可用、adapter 未验证或只存在凭证健康数据，API 会返回 `phase=credential_health`，并通过 `module_status=partial|unavailable|disabled` 表达降级状态。一个凭证可以有多条 quota 行，例如订阅常见的 `5h` 窗口和 `weekly` 周限额；WebUI 会按凭证聚合这些窗口，优先展示短窗口压力，再展示周限额和重置时间。
+Quota API 的 `full_quota_available=true` 仅表示后台已拿到受支持的 provider quota 行；如果 CPA `/api-call` 不可用、adapter 未验证或只存在凭证健康数据，API 会返回 `phase=credential_health`，并通过 `module_status=partial|unavailable|unsupported|disabled` 表达降级状态。`/metering/api/quota` 会附带最近 quota refresh 诊断，`/metering/api/observability` 会暴露最近一次 quota 事件与最近错误，便于区分 `api_call_unavailable`、`quota_unsupported` 和 provider adapter 问题。一个凭证可以有多条 quota 行，例如订阅常见的 `5h` 窗口和 `weekly` 周限额；WebUI 会按凭证聚合这些窗口，优先展示短窗口压力，再展示周限额和重置时间。
 
-请求错误展示优先使用 `error_class` / `error_code`，HTTP status 只作为传输层事实保留。例如代理连接失败会细分为 `proxy_connection_refused`、`proxy_timeout`、`proxy_dns_error` 等，而不是只在 UI 中显示 `502`。
+请求错误展示优先使用 `error_class` / `error_code`，HTTP status 只作为传输层事实保留。例如代理连接失败会细分为 `proxy_connection_refused`、`proxy_timeout`、`proxy_dns_error` 等，而不是只在 UI 中显示 `502`。代理自身产生的上游传输错误会返回安全的 `X-Metering-Proxy-Error-Type/Class/Code` 响应头；超时会使用 `504 Gateway Timeout`，其他连接类错误仍保持网关错误语义。
 
 WebUI 为只读面板，不修改配置或数据库。页面默认展示请求总览、成本/Token/请求趋势、模型分布、图片计量、API Key 维度、近期问题、凭证/额度与采集诊断。最近 100 条请求明细默认隐藏，仅在点击展开或从 issue 卡片进入时查询。页面布局支持 Tabs 与长页两种模式，偏好保存在浏览器本地；也可通过 `?layout=classic` 强制回到长页模式，便于回退 Tabs 实验。WebUI 支持中英文切换，语言偏好保存在浏览器本地；页面右上角提供项目 GitHub 链接。
 

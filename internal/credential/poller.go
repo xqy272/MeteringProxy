@@ -151,6 +151,9 @@ func normalizeCredentialStatus(af cliproxy.AuthFileEntry) string {
 	case af.Disabled:
 		return "disabled"
 	case af.Unavailable:
+		if credentialWarningFromCPAHistory(af) {
+			return "warning"
+		}
 		return "unavailable"
 	}
 	status := strings.ToLower(strings.TrimSpace(af.Status))
@@ -161,6 +164,12 @@ func normalizeCredentialStatus(af cliproxy.AuthFileEntry) string {
 		}
 		return "unavailable"
 	case "active", "available", "ready":
+		if af.AvailableSet && !af.Available {
+			if credentialWarningFromCPAHistory(af) {
+				return "warning"
+			}
+			return "unavailable"
+		}
 		return "ready"
 	case "error":
 		if credentialWarningFromCPAHistory(af) {
@@ -196,6 +205,11 @@ func credentialErrorClass(af cliproxy.AuthFileEntry, status string) string {
 		return "credential_stale"
 	case "warning":
 		return credentialWarningClass(af)
+	case "unavailable":
+		if containsQuotaSignal(credentialDiagnosticText(af)) {
+			return "credential_quota_limited"
+		}
+		return firstNonEmpty(af.ErrorClass, "credential_unavailable")
 	case "error":
 		return firstNonEmpty(af.ErrorClass, "credential_error")
 	default:
@@ -238,6 +252,7 @@ func credentialDiagnosticText(af cliproxy.AuthFileEntry) string {
 		af.ErrorType,
 		af.ErrorCode,
 		af.ErrorMessage,
+		af.QuotaReason,
 	}, " "))
 }
 

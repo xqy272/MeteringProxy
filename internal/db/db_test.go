@@ -607,6 +607,14 @@ func TestIssuesIncludeQuotaRefreshFailures(t *testing.T) {
 	if len(rows) != 1 || rows[0].Class != "quota_refresh_failed" || rows[0].SourceGroup != "quota" || rows[0].Message != "api_call_unavailable" {
 		t.Fatalf("issues = %+v, want quota_refresh_failed from refresh event", rows)
 	}
+
+	events, err := d.RecentQuotaRefreshEvents(now.Add(-time.Hour), 5)
+	if err != nil {
+		t.Fatalf("RecentQuotaRefreshEvents: %v", err)
+	}
+	if len(events) != 1 || events[0].Provider != "kimi" || events[0].AdapterStatus != "api_call_unavailable" {
+		t.Fatalf("events = %+v, want latest quota refresh diagnostic", events)
+	}
 }
 
 func TestSeedDemoIncludesCredentialAndQuotaRows(t *testing.T) {

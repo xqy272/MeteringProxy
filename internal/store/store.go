@@ -54,6 +54,7 @@ type ReportStore interface {
 	CaptureOutcomeCounts(since time.Time) (captured, skipped, failed int64, err error)
 	AllCredentialHealth() ([]db.CredentialHealthRow, error)
 	AllQuotaCurrent() ([]db.QuotaCurrentRow, error)
+	RecentQuotaRefreshEvents(since time.Time, limit int) ([]db.QuotaRefreshEventRow, error)
 	SideUsageStatusCounts(since time.Time) (map[string]int64, error)
 	MultimodalSummary(since time.Time) ([]db.MultimodalSummaryRow, error)
 	ImageSummary(since time.Time) (*db.ImageSummaryRow, error)

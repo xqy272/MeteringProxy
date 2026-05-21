@@ -525,8 +525,19 @@ func TestAPIQuotaFallsBackToCredentialRowsWhenQuotaRowsUnsupported(t *testing.T)
 }
 
 func TestAPIObservabilityReportsQuotaModuleStatus(t *testing.T) {
-	s, _ := newTestServer(t, "/metering")
+	s, database := newTestServer(t, "/metering")
 	now := time.Now().UTC().Truncate(time.Second)
+	if err := database.InsertQuotaRefreshEvent(&db.QuotaRefreshEventRow{
+		CheckedAt:     now.Format(time.RFC3339),
+		CheckedAtUnix: now.Unix(),
+		Provider:      "codex",
+		Phase:         "probe",
+		Status:        "error",
+		AdapterStatus: "api_call_unavailable",
+		ErrorClass:    "api_call_unavailable",
+	}); err != nil {
+		t.Fatalf("InsertQuotaRefreshEvent: %v", err)
+	}
 	s.SetQuotaPoller(&fakeQuotaPoller{lastAt: now, apiAvailable: true})
 
 	req := httptest.NewRequest("GET", "/metering/api/observability", nil)
@@ -545,6 +556,45 @@ func TestAPIObservabilityReportsQuotaModuleStatus(t *testing.T) {
 	}
 	if quota["module_status"] != "partial" || quota["full_quota_available"] == true || quota["phase"] != "credential_health" {
 		t.Fatalf("observability quota = %+v, want partial credential_health without full quota", quota)
+	}
+	if quota["last_error"] != "api_call_unavailable" || quota["latest_event"] == nil {
+		t.Fatalf("observability quota diagnostics = %+v, want latest api_call_unavailable", quota)
+	}
+}
+
+func TestAPIQuotaIncludesRefreshDiagnostics(t *testing.T) {
+	s, database := newTestServer(t, "/metering")
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := database.InsertQuotaRefreshEvent(&db.QuotaRefreshEventRow{
+		CheckedAt:     now.Format(time.RFC3339),
+		CheckedAtUnix: now.Unix(),
+		Provider:      "codex",
+		Phase:         "adapter",
+		Status:        "error",
+		AdapterStatus: "unsupported",
+		ErrorClass:    "quota_unsupported",
+	}); err != nil {
+		t.Fatalf("InsertQuotaRefreshEvent: %v", err)
+	}
+	s.SetQuotaPoller(&fakeQuotaPoller{lastAt: now, apiAvailable: true})
+
+	req := httptest.NewRequest("GET", "/metering/api/quota", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("GET /metering/api/quota: status %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal quota: %v", err)
+	}
+	diagnostics, ok := payload["diagnostics"].([]any)
+	if !ok || len(diagnostics) != 1 {
+		t.Fatalf("diagnostics = %#v, want one refresh event", payload["diagnostics"])
+	}
+	first := diagnostics[0].(map[string]any)
+	if first["error_class"] != "quota_unsupported" || first["provider"] != "codex" {
+		t.Fatalf("diagnostic = %+v, want safe quota refresh fields", first)
 	}
 }
 

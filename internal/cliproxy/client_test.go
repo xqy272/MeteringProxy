@@ -154,6 +154,48 @@ func TestFetchAuthFilesDecodesRuntimeHealthFields(t *testing.T) {
 	}
 }
 
+func TestFetchAuthFilesDecodesExplicitAvailabilityAndQuotaState(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"files":[{
+			"id":"codex-1",
+			"type":"codex",
+			"provider":"codex",
+			"status":"active",
+			"available":false,
+			"quota":{
+				"exceeded":true,
+				"reason":"quota",
+				"next_recover_at":"2026-05-21T18:00:00Z"
+			}
+		}]}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(CLIProxyConfig{
+		BaseURL: server.URL + "/v0/management",
+		Key:     "secret",
+		Timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	resp, err := client.FetchAuthFiles()
+	if err != nil {
+		t.Fatalf("FetchAuthFiles: %v", err)
+	}
+	entry := resp.AuthFiles[0]
+	if !entry.AvailableSet || entry.Available {
+		t.Fatalf("availability = set:%v value:%v, want explicit unavailable", entry.AvailableSet, entry.Available)
+	}
+	if !entry.QuotaExceeded || entry.QuotaReason != "quota" || entry.ErrorClass != "quota" {
+		t.Fatalf("quota fields = %#v", entry)
+	}
+	if entry.NextRetryAfterUnix != 1779386400 {
+		t.Fatalf("NextRetryAfterUnix = %d, want quota next_recover_at fallback", entry.NextRetryAfterUnix)
+	}
+}
+
 func TestFetchAuthFilesIgnoresCLIProxyAPIv709ProjectID(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

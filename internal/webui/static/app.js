@@ -304,6 +304,14 @@ function quotaAmountLabel(row) {
   if(!m.hasQuota) return String((row&&row.status)||'').toLowerCase()==='unsupported'?t('quota.unsupported'):'-';
   return `${fmtNum(m.remaining)} / ${fmtNum(m.limit)}`;
 }
+function quotaDiagnosticText(data) {
+  const rows=Array.isArray(data&&data.diagnostics)?data.diagnostics:[];
+  if(!rows.length) return '';
+  const row=rows.find(r=>String(r.status||'').toLowerCase()==='error')||rows[0];
+  const status=[row.provider,row.phase,row.status].filter(Boolean).join('/');
+  const detail=row.error_class||row.adapter_status||row.error_message||'';
+  return [status,detail].filter(Boolean).join(': ');
+}
 function quotaWindowReset(row) {
   return (row&&row.reset_at)||(row&&row.expires_at)||'';
 }
@@ -1199,12 +1207,13 @@ async function loadQuota() {
   if(quotaPage<1) quotaPage=1;
   const moduleStatus=data.module_status||'disabled';
   const moduleLabel=moduleStatusLabel(moduleStatus);
+  const diagnostic=quotaDiagnosticText(data);
   setText('quota-state',moduleLabel);
-  setText('quota-detail',data.full_quota_available?t('obs.full_quota'):(credentialHealthMode?t('obs.credential_fallback'):phase));
+  setText('quota-detail',[data.full_quota_available?t('obs.full_quota'):(credentialHealthMode?t('obs.credential_fallback'):phase),diagnostic].filter(Boolean).join(' / '));
   setText('observability-summary',t('obs.summary',{phase:moduleLabel,quota:credentialHealthMode?items.length:groups.length}));
   if(!items.length){
     const empty = moduleStatus==='disabled'?t('state.quota_disabled'):moduleStatus==='unavailable'?t('state.quota_unavailable'):moduleStatus==='unsupported'?t('state.quota_unsupported'):t('state.no_quota_data');
-    renderQuotaSummary([], empty);
+    renderQuotaSummary([], diagnostic?[empty,diagnostic].join(' · '):empty);
     return;
   }
   if(credentialHealthMode){
@@ -1225,7 +1234,8 @@ async function loadObservability() {
   const quotaStatus=quota.enabled?(quota.module_status||(quota.full_quota_available?'available':'partial')):'disabled';
   const quotaPhase=quota.full_quota_available?t('obs.full_quota'):(quota.credential_fallback?t('obs.credential_fallback'):(quota.phase||'-'));
   setText('quota-state',moduleStatusLabel(quotaStatus));
-  setText('quota-detail',quota.enabled?`${quotaPhase} / ${t('obs.stale_errors',{stale:fmtFull(quota.stale_count||0),errors:fmtFull(quota.error_count||0)})}`:'-');
+  const quotaDiag=quota.last_error?` / ${quota.last_error}`:'';
+  setText('quota-detail',quota.enabled?`${quotaPhase} / ${t('obs.stale_errors',{stale:fmtFull(quota.stale_count||0),errors:fmtFull(quota.error_count||0)})}${quotaDiag}`:'-');
   setText('capture-state',fmtFull(Number(capture.captured_1h||0)));
   setText('capture-state-detail',t('obs.capture_counts',{skipped:fmtFull(capture.skipped_1h||0),failed:fmtFull(capture.failed_1h||0)}));
 }

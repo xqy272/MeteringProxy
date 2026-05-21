@@ -78,7 +78,7 @@ pass through MeteringProxy as `unknown_passthrough`.
 
 | CPA management surface | Status | Notes |
 |---|---|---|
-| `GET /v0/management/auth-files` | supported | Supports CPA `{files:[...]}` and legacy `{auth_files:[...]}`; runtime fields such as `status_message`, `next_retry_after`, `recent_requests`, and Codex `id_token.plan_type` are normalized without storing raw tokens or account identifiers |
+| `GET /v0/management/auth-files` | supported | Supports CPA `{files:[...]}` and legacy `{auth_files:[...]}`; runtime fields such as `status_message`, explicit `available`, `next_retry_after`, `recent_requests`, future `quota` cooldown hints, and Codex `id_token.plan_type` are normalized without storing raw tokens or account identifiers |
 | `GET /v0/management/usage-queue?count=N` | supported | Requires CPA `usage-statistics-enabled: true`; v7.1.17+ may include `response_headers`, which MeteringProxy ignores safely |
 | RESP `AUTH` + `LPOP`/`RPOP` | legacy only | Available in v7.0.4-v7.0.9; v7.1.17+ returns `ERR RESP AUTH disabled; use mTLS`. Configure `usage_queue.transport` as `auto` or `http` for new CPA releases |
 | `POST /v0/management/api-call` | endpoint detected only | CPA v7.0.4-v7.1.19 requires `method` and absolute `url`; it is not treated as a full quota API |
@@ -101,9 +101,10 @@ Supported today:
   signals remain errors.
 - Credential-health rows include bounded diagnostics from CPA management:
   status message, recent success/failure bucket totals, next retry time, plan
-  type when exposed, and structured error type/code/message. MeteringProxy does
-  not persist raw auth files, provider tokens, email addresses, account IDs, or
-  full `recent_requests` timelines.
+  type when exposed, structured error type/code/message, explicit availability
+  flags, and quota cooldown hints if CPA exposes them. MeteringProxy does not
+  persist raw auth files, provider tokens, email addresses, account IDs, or full
+  `recent_requests` timelines.
 - Quota module status as disabled, partial, unsupported, unavailable, or available.
 - Provider quota rows only when explicit provider adapters produce normalized
   `quota_current` rows.
@@ -114,6 +115,10 @@ Supported today:
   `quota_refresh_events`; credential and quota current-state issues remain
   visible even when their last check happened outside the selected request
   range.
+- `/metering/api/quota` includes bounded recent quota refresh diagnostics, and
+  `/metering/api/observability` exposes the latest quota event and last quota
+  refresh error so operators can distinguish unavailable `/api-call`,
+  unsupported adapters, and provider-level failures.
 
 Not supported today:
 

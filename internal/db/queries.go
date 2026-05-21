@@ -288,7 +288,7 @@ func (db *DB) appendCredentialIssues(result []IssueRow, since time.Time) []Issue
 	rows, err := db.read.Query(`
 		SELECT
 			CASE
-				WHEN status = 'warning' AND error_class = 'credential_quota_limited' THEN 'credential_quota_limited'
+				WHEN error_class = 'credential_quota_limited' THEN 'credential_quota_limited'
 				WHEN status = 'warning' THEN 'credential_history_warning'
 				WHEN status = 'error' THEN 'credential_error'
 				WHEN status = 'stale' THEN 'credential_stale'
