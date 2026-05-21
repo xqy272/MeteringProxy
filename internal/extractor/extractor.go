@@ -242,7 +242,14 @@ func ExtractGeminiNonStreaming(body []byte) (*UsageInfo, error) {
 	if body[0] == '[' {
 		var chunks []geminiResponse
 		if err := decodeJSON(body, &chunks); err != nil {
+			if sampleInfo, ok := geminiSampleToInfo(body); ok {
+				return sampleInfo, nil
+			}
 			return nil, err
+		}
+		var imageCount int64
+		for i := range chunks {
+			imageCount += countGeminiImageOutputs(&chunks[i])
 		}
 		for i := len(chunks) - 1; i >= 0; i-- {
 			info, err := geminiResponseToInfo(&chunks[i])
@@ -250,12 +257,33 @@ func ExtractGeminiNonStreaming(body []byte) (*UsageInfo, error) {
 				return nil, err
 			}
 			if info != nil {
+				if imageCount > 0 {
+					info.ImageCount = imageCount
+					info.Operation = "generation"
+				}
 				return info, nil
 			}
 		}
+		if imageCount > 0 {
+			model := ""
+			for i := len(chunks) - 1; i >= 0; i-- {
+				model = geminiResponseModel(&chunks[i])
+				if model != "" {
+					break
+				}
+			}
+			return &UsageInfo{Model: model, ImageCount: imageCount, Operation: "generation"}, nil
+		}
 		return nil, nil
 	}
-	return geminiJSONToInfo(body)
+	info, err := geminiJSONToInfo(body)
+	if err == nil {
+		return info, nil
+	}
+	if sampleInfo, ok := geminiSampleToInfo(body); ok {
+		return sampleInfo, nil
+	}
+	return nil, err
 }
 
 func ExtractImageNonStreaming(body []byte) (*UsageInfo, error) {
@@ -467,6 +495,33 @@ func findJSONStringField(body []byte, field string) string {
 	return value
 }
 
+func countJSONStringFieldPrefix(body []byte, field, prefix string) int64 {
+	pattern := []byte(`"` + field + `"`)
+	var count int64
+	for offset := 0; offset < len(body); {
+		idx := bytes.Index(body[offset:], pattern)
+		if idx < 0 {
+			return count
+		}
+		pos := offset + idx + len(pattern)
+		pos = skipJSONSpace(body, pos)
+		if pos >= len(body) || body[pos] != ':' {
+			offset += idx + len(pattern)
+			continue
+		}
+		pos = skipJSONSpace(body, pos+1)
+		var raw json.RawMessage
+		if err := json.NewDecoder(bytes.NewReader(body[pos:])).Decode(&raw); err == nil && len(raw) > 0 {
+			var value string
+			if err := json.Unmarshal(raw, &value); err == nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), prefix) {
+				count++
+			}
+		}
+		offset += idx + len(pattern)
+	}
+	return count
+}
+
 func findJSONFieldRaw(body []byte, field string) (json.RawMessage, bool) {
 	pattern := []byte(`"` + field + `"`)
 	for offset := 0; offset < len(body); {
@@ -610,23 +665,65 @@ func geminiJSONToInfo(body []byte) (*UsageInfo, error) {
 }
 
 func geminiResponseToInfo(resp *geminiResponse) (*UsageInfo, error) {
-	if resp == nil || len(resp.UsageMetadata) == 0 {
+	if resp == nil {
+		return nil, nil
+	}
+	model := geminiResponseModel(resp)
+	imageCount := countGeminiImageOutputs(resp)
+	if len(resp.UsageMetadata) == 0 {
+		if imageCount > 0 {
+			return &UsageInfo{Model: model, ImageCount: imageCount, Operation: "generation"}, nil
+		}
 		return nil, nil
 	}
 	var usage geminiUsage
 	if err := json.Unmarshal(resp.UsageMetadata, &usage); err != nil {
 		return nil, err
 	}
-	if !hasGeminiUsageTokens(&usage) {
+	if !hasGeminiUsageTokens(&usage) && imageCount == 0 {
 		return nil, nil
 	}
-	model := resp.ModelVersion
-	if model == "" {
-		model = resp.Model
-	}
 	info := geminiUsageToInfo(model, &usage)
+	if imageCount > 0 {
+		info.ImageCount = imageCount
+		info.Operation = "generation"
+	}
 	info.UsageRawJSON = rawUsageString(resp.UsageMetadata)
 	return info, nil
+}
+
+func geminiResponseModel(resp *geminiResponse) string {
+	if resp == nil {
+		return ""
+	}
+	if resp.ModelVersion != "" {
+		return resp.ModelVersion
+	}
+	return resp.Model
+}
+
+func geminiSampleToInfo(body []byte) (*UsageInfo, bool) {
+	model := findJSONStringField(body, "modelVersion")
+	if model == "" {
+		model = findJSONStringField(body, "model")
+	}
+	imageCount := countJSONStringFieldPrefix(body, "mimeType", "image/")
+	info := &UsageInfo{Model: model, ImageCount: imageCount}
+	if raw, ok := findJSONFieldRaw(body, "usageMetadata"); ok {
+		var usage geminiUsage
+		if err := json.Unmarshal(raw, &usage); err == nil {
+			info = geminiUsageToInfo(model, &usage)
+			info.ImageCount = imageCount
+			info.UsageRawJSON = rawUsageString(raw)
+		}
+	}
+	if imageCount > 0 {
+		info.Operation = "generation"
+	}
+	if info.ImageCount == 0 && info.InputTokens == 0 && info.OutputTokens == 0 && info.TotalTokens == 0 {
+		return nil, false
+	}
+	return info, true
 }
 
 func geminiUsageToInfo(model string, u *geminiUsage) *UsageInfo {
@@ -757,9 +854,10 @@ type anthropicUsage struct {
 }
 
 type geminiResponse struct {
-	Model         string          `json:"model"`
-	ModelVersion  string          `json:"modelVersion"`
-	UsageMetadata json.RawMessage `json:"usageMetadata"`
+	Model         string            `json:"model"`
+	ModelVersion  string            `json:"modelVersion"`
+	UsageMetadata json.RawMessage   `json:"usageMetadata"`
+	Candidates    []geminiCandidate `json:"candidates"`
 }
 
 type geminiUsage struct {
@@ -769,6 +867,23 @@ type geminiUsage struct {
 	CachedContentTokenCount int64 `json:"cachedContentTokenCount"`
 	ThoughtsTokenCount      int64 `json:"thoughtsTokenCount"`
 	ToolUsePromptTokenCount int64 `json:"toolUsePromptTokenCount"`
+}
+
+type geminiCandidate struct {
+	Content geminiContent `json:"content"`
+}
+
+type geminiContent struct {
+	Parts []geminiPart `json:"parts"`
+}
+
+type geminiPart struct {
+	InlineData      *geminiInlineData `json:"inlineData"`
+	InlineDataSnake *geminiInlineData `json:"inline_data"`
+}
+
+type geminiInlineData struct {
+	MimeType string `json:"mimeType"`
 }
 
 type imageUsage struct {
@@ -786,4 +901,26 @@ func countResponsesImageOutputs(items []responsesOutputItem) int64 {
 		}
 	}
 	return count
+}
+
+func countGeminiImageOutputs(resp *geminiResponse) int64 {
+	if resp == nil {
+		return 0
+	}
+	var count int64
+	for _, candidate := range resp.Candidates {
+		for _, part := range candidate.Content.Parts {
+			if part.InlineData != nil && isImageMIME(part.InlineData.MimeType) {
+				count++
+			}
+			if part.InlineDataSnake != nil && isImageMIME(part.InlineDataSnake.MimeType) {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+func isImageMIME(value string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), "image/")
 }

@@ -41,6 +41,9 @@ type ModalityPrice struct {
 	PerSecond        float64 `yaml:"per_second"`
 	InputPerSecond   float64 `yaml:"input_per_second"`
 	OutputPerSecond  float64 `yaml:"output_per_second"`
+	PerMinute        float64 `yaml:"per_minute"`
+	InputPerMinute   float64 `yaml:"input_per_minute"`
+	OutputPerMinute  float64 `yaml:"output_per_minute"`
 }
 
 // NewPricing returns an empty Pricing with initialized index.
@@ -134,15 +137,15 @@ func (p *Pricing) CostDimension(model, modality, channel, metric, direction, uni
 	}
 	if metric == "seconds" && unit == "second" {
 		price := mp.AudioSeconds
-		rate := price.PerSecond
+		rate := secondsRate(price.PerSecond, price.PerMinute)
 		switch direction {
 		case "input":
-			if price.InputPerSecond > 0 {
-				rate = price.InputPerSecond
+			if inputRate := secondsRate(price.InputPerSecond, price.InputPerMinute); inputRate > 0 {
+				rate = inputRate
 			}
 		case "output":
-			if price.OutputPerSecond > 0 {
-				rate = price.OutputPerSecond
+			if outputRate := secondsRate(price.OutputPerSecond, price.OutputPerMinute); outputRate > 0 {
+				rate = outputRate
 			}
 		}
 		if rate <= 0 {
@@ -151,6 +154,16 @@ func (p *Pricing) CostDimension(model, modality, channel, metric, direction, uni
 		return amount * rate, true
 	}
 	return 0, false
+}
+
+func secondsRate(perSecond, perMinute float64) float64 {
+	if perSecond > 0 {
+		return perSecond
+	}
+	if perMinute > 0 {
+		return perMinute / 60
+	}
+	return 0
 }
 
 func (p *Pricing) lookup(model string) (ModelPrice, bool) {

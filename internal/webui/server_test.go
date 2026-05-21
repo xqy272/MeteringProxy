@@ -253,6 +253,20 @@ func TestAPIImagesSummary(t *testing.T) {
 	if diff := payload.Cost - expected; diff < -0.0001 || diff > 0.0001 {
 		t.Fatalf("cost = %.6f, want %.6f", payload.Cost, expected)
 	}
+
+	summaryReq := httptest.NewRequest("GET", "/metering/api/summary?range=24h", nil)
+	summaryRec := httptest.NewRecorder()
+	s.ServeHTTP(summaryRec, summaryReq)
+	if summaryRec.Code != 200 {
+		t.Fatalf("GET /metering/api/summary: status %d, want 200; body=%s", summaryRec.Code, summaryRec.Body.String())
+	}
+	var summary event.SummaryReport
+	if err := json.Unmarshal(summaryRec.Body.Bytes(), &summary); err != nil {
+		t.Fatalf("unmarshal summary: %v", err)
+	}
+	if diff := summary.TotalCost - expected; diff < -0.0001 || diff > 0.0001 {
+		t.Fatalf("summary total_cost = %.6f, want image cost %.6f", summary.TotalCost, expected)
+	}
 }
 
 func TestAPIResponsesAreNotCacheable(t *testing.T) {

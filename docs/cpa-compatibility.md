@@ -26,9 +26,9 @@ metered quota data.
 | `POST /backend-api/codex/responses` | `responses` | supported | Codex direct route alias |
 | `POST /backend-api/codex/responses/compact` | `responses` | supported | Codex direct compact alias |
 | `POST /v1/messages` | `anthropic_messages` | supported | Anthropic/Claude messages-compatible usage |
-| `POST /v1/models/{model}:generateContent` | `gemini_generate_content` | supported | Gemini native usage metadata |
+| `POST /v1/models/{model}:generateContent` | `gemini_generate_content` | supported | Gemini native usage metadata; image `inlineData` outputs are counted without storing image data |
 | `POST /v1/models/{model}:streamGenerateContent` | `gemini_generate_content` | supported | Gemini native SSE usage metadata |
-| `POST /v1beta/models/{model}:generateContent` | `gemini_generate_content` | supported | Gemini native usage metadata |
+| `POST /v1beta/models/{model}:generateContent` | `gemini_generate_content` | supported | Gemini native usage metadata; image `inlineData` outputs are counted without storing image data |
 | `POST /v1beta/models/{model}:streamGenerateContent` | `gemini_generate_content` | supported | Gemini native SSE usage metadata |
 | `POST /v1/images/generations` | `openai_images_generations` | supported | OpenAI Images JSON/SSE usage, image count, partial image count, safe request metadata |
 | `POST /v1/images/edits` | `openai_images_edits` | supported | OpenAI Images JSON/SSE usage plus JSON/multipart image metadata without storing image bytes, prompt, filenames, or mask bytes |
@@ -56,9 +56,9 @@ metered quota data.
 | `POST /api/provider/{provider}/v1/embeddings` | `openai_embeddings` | supported | CPA provider alias |
 | `POST /api/provider/{provider}/v1/audio/*` | `openai_audio` | request-only | CPA provider alias |
 | `/api/provider/{provider}/v1/videos*` | `openai_videos` | request-only | CPA provider alias |
-| `POST /api/provider/{provider}/v1/models/{model}:generateContent` | `gemini_generate_content` | supported | CPA Amp provider alias |
+| `POST /api/provider/{provider}/v1/models/{model}:generateContent` | `gemini_generate_content` | supported | CPA Amp provider alias; image `inlineData` outputs are counted without storing image data |
 | `POST /api/provider/{provider}/v1/models/{model}:streamGenerateContent` | `gemini_generate_content` | supported | CPA Amp provider alias |
-| `POST /api/provider/{provider}/v1beta/models/{model}:generateContent` | `gemini_generate_content` | supported | CPA Amp provider alias |
+| `POST /api/provider/{provider}/v1beta/models/{model}:generateContent` | `gemini_generate_content` | supported | CPA Amp provider alias; image `inlineData` outputs are counted without storing image data |
 | `POST /api/provider/{provider}/v1beta/models/{model}:streamGenerateContent` | `gemini_generate_content` | supported | CPA Amp provider alias |
 
 ## Transparent Pass-Through Routes

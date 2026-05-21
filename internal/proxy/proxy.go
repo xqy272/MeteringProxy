@@ -158,9 +158,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	cr := &countingReader{r: &replayReader{prefix: bodyPrefix, src: r.Body}}
-	r.Body = cr
-
 	clientIP := clientIPFromRequest(r)
 	clientIPHash := p.hasher.Hash(clientIP)
 	apiKeyHash := p.hasher.Hash(apiKeyToken(r))
@@ -174,6 +171,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		isSSEMediaType(r.Header.Get("Accept")) ||
 		streamFromPath(r.URL.Path)
 	requestMeta := extractRequestUsageMetadata(prof, r.Header.Get("Content-Type"), bodyPrefix, requestSuggestsStream)
+	requestProbe := newRequestBodyProbe(prof, r.Header.Get("Content-Type"), requestSuggestsStream, p.reqMeta.MaxBytes)
+	cr := &countingReader{r: &replayReader{prefix: bodyPrefix, src: r.Body}, probe: requestProbe}
+	r.Body = cr
 
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, p.upstream+r.URL.RequestURI(), r.Body)
 	if err != nil {
@@ -216,9 +216,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(status)
 
 	if isStream {
-		p.handleStream(w, r, resp, start, ttfb, prof, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested, requestMeta, cr, status)
+		p.handleStream(w, r, resp, start, ttfb, prof, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested, requestMeta, requestProbe, cr, status)
 	} else {
-		p.handleNonStream(w, r, resp, start, ttfb, prof, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested, requestMeta, cr, status)
+		p.handleNonStream(w, r, resp, start, ttfb, prof, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested, requestMeta, requestProbe, cr, status)
 	}
 }
 
@@ -286,12 +286,16 @@ func copyAndFlush(w http.ResponseWriter, r io.Reader) {
 
 type countingReader struct {
 	r         io.ReadCloser
+	probe     io.Writer
 	bytesRead int64
 }
 
 func (cr *countingReader) Read(p []byte) (int, error) {
 	n, err := cr.r.Read(p)
 	cr.bytesRead += int64(n)
+	if n > 0 && cr.probe != nil {
+		_, _ = cr.probe.Write(p[:n])
+	}
 	return n, err
 }
 
@@ -329,7 +333,11 @@ func (r *replayReader) Close() error {
 // ---------- streaming path ----------
 
 func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.Response, start time.Time, ttfb time.Duration,
-	prof *profile.EndpointProfile, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested string, requestMeta requestUsageMetadata, cr *countingReader, status int) {
+	prof *profile.EndpointProfile, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested string, requestMeta requestUsageMetadata, requestProbe *requestBodyProbe, cr *countingReader, status int) {
+
+	finalizeRequest := func() (string, requestUsageMetadata) {
+		return finalizeRequestUsageContext(requestProbe, modelRequested, requestMeta)
+	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -340,8 +348,9 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 		}
 		captureOutcome := event.OutcomeSkipped
 		captureReason := event.ReasonUsageNotPresent
+		finalModelRequested, finalRequestMeta := finalizeRequest()
 		p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, true,
-			clientIPHash, apiKeyHash, modelRequested, requestMeta, nil, cr.bytesRead, written, errStr,
+			clientIPHash, apiKeyHash, finalModelRequested, finalRequestMeta, nil, cr.bytesRead, written, errStr,
 			captureOutcome, captureReason, nil, "", "", "", "")
 		return
 	}
@@ -444,8 +453,9 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 			}
 			result := p.finalizeStreamUsage(lastUsage, responsesState, prof, sseParseErrs)
 			reportParseErrors()
+			finalModelRequested, finalRequestMeta := finalizeRequest()
 			p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, true,
-				clientIPHash, apiKeyHash, modelRequested, requestMeta, result.usage, cr.bytesRead, totalBytes, errStr,
+				clientIPHash, apiKeyHash, finalModelRequested, finalRequestMeta, result.usage, cr.bytesRead, totalBytes, errStr,
 				result.captureOutcome, result.captureReason, streamErrInfo(result), result.modelReturned, result.modelReturnedSource, result.terminalEvent, result.terminalReason)
 			return
 		default:
@@ -459,8 +469,9 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 				flushPendingEvent()
 				result := p.finalizeStreamUsage(lastUsage, responsesState, prof, sseParseErrs)
 				reportParseErrors()
+				finalModelRequested, finalRequestMeta := finalizeRequest()
 				p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, true,
-					clientIPHash, apiKeyHash, modelRequested, requestMeta, result.usage, cr.bytesRead, totalBytes, safeOperationalError(werr),
+					clientIPHash, apiKeyHash, finalModelRequested, finalRequestMeta, result.usage, cr.bytesRead, totalBytes, safeOperationalError(werr),
 					result.captureOutcome, result.captureReason, streamErrInfo(result), result.modelReturned, result.modelReturnedSource, result.terminalEvent, result.terminalReason)
 				return
 			}
@@ -515,8 +526,9 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 			}
 			result := p.finalizeStreamUsage(lastUsage, responsesState, prof, sseParseErrs)
 			reportParseErrors()
+			finalModelRequested, finalRequestMeta := finalizeRequest()
 			p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, true,
-				clientIPHash, apiKeyHash, modelRequested, requestMeta, result.usage, cr.bytesRead, totalBytes, errStr,
+				clientIPHash, apiKeyHash, finalModelRequested, finalRequestMeta, result.usage, cr.bytesRead, totalBytes, errStr,
 				result.captureOutcome, result.captureReason, streamErrInfo(result), result.modelReturned, result.modelReturnedSource, result.terminalEvent, result.terminalReason)
 			return
 		}
@@ -830,8 +842,70 @@ func (b *prefixTailBuffer) Overflow() bool {
 	return b.total > b.max
 }
 
+type requestBodyProbe struct {
+	prof        *profile.EndpointProfile
+	contentType string
+	stream      bool
+	buf         *prefixTailBuffer
+}
+
+func newRequestBodyProbe(prof *profile.EndpointProfile, contentType string, stream bool, maxBytes int64) *requestBodyProbe {
+	max := int(maxBytes)
+	if max <= 0 {
+		max = 65536
+	}
+	return &requestBodyProbe{
+		prof:        prof,
+		contentType: contentType,
+		stream:      stream,
+		buf:         &prefixTailBuffer{max: max},
+	}
+}
+
+func (p *requestBodyProbe) Write(data []byte) (int, error) {
+	if p == nil || p.buf == nil {
+		return len(data), nil
+	}
+	return p.buf.Write(data)
+}
+
+func finalizeRequestUsageContext(probe *requestBodyProbe, modelRequested string, requestMeta requestUsageMetadata) (string, requestUsageMetadata) {
+	if probe == nil || probe.buf == nil {
+		return modelRequested, requestMeta
+	}
+	sample := probe.buf.Bytes()
+	if len(sample) == 0 {
+		return modelRequested, requestMeta
+	}
+	if model := extractModel(sample); model != "" {
+		modelRequested = model
+	}
+	observed := extractRequestUsageMetadata(probe.prof, probe.contentType, sample, probe.stream)
+	return modelRequested, mergeRequestUsageMetadata(requestMeta, observed)
+}
+
+func mergeRequestUsageMetadata(base, observed requestUsageMetadata) requestUsageMetadata {
+	if observed.Size != "" {
+		base.Size = observed.Size
+	}
+	if observed.Quality != "" {
+		base.Quality = observed.Quality
+	}
+	if observed.OutputFormat != "" {
+		base.OutputFormat = observed.OutputFormat
+	}
+	if observed.InputImageCount > 0 {
+		base.InputImageCount = observed.InputImageCount
+	}
+	if observed.HasMask {
+		base.HasMask = true
+	}
+	base.Stream = base.Stream || observed.Stream
+	return base
+}
+
 func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, resp *http.Response, start time.Time, ttfb time.Duration,
-	prof *profile.EndpointProfile, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested string, requestMeta requestUsageMetadata, cr *countingReader, status int) {
+	prof *profile.EndpointProfile, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested string, requestMeta requestUsageMetadata, requestProbe *requestBodyProbe, cr *countingReader, status int) {
 
 	var sampler interface {
 		io.Writer
@@ -909,6 +983,7 @@ func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, resp *ht
 		modelReturnedSource = event.SourceHTTPResponse
 	}
 
+	modelRequested, requestMeta = finalizeRequestUsageContext(requestProbe, modelRequested, requestMeta)
 	p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, false,
 		clientIPHash, apiKeyHash, modelRequested, requestMeta, usage, cr.bytesRead, written, errStr,
 		captureOutcome, captureReason, errInfo, modelReturned, modelReturnedSource, terminalEvent, "")
@@ -1344,6 +1419,8 @@ func extractRequestUsageMetadata(prof *profile.EndpointProfile, contentType stri
 		}
 		if value, ok := topLevelJSONString(body, "output_format"); ok {
 			meta.OutputFormat = value
+		} else if value, ok := topLevelJSONString(body, "response_format"); ok {
+			meta.OutputFormat = value
 		}
 		if value, ok := topLevelJSONBool(body, "stream"); ok {
 			meta.Stream = value
@@ -1360,9 +1437,9 @@ func extractRequestUsageMetadata(prof *profile.EndpointProfile, contentType stri
 	}
 	meta.Size = extractMultipartScalarField(body, "size")
 	meta.Quality = extractMultipartScalarField(body, "quality")
-	meta.OutputFormat = extractMultipartScalarField(body, "output_format")
+	meta.OutputFormat = firstNonEmptyString(extractMultipartScalarField(body, "output_format"), extractMultipartScalarField(body, "response_format"))
 	meta.InputImageCount = int64(countMultipartField(body, "image") + countMultipartField(body, "image[]"))
-	meta.HasMask = countMultipartField(body, "mask") > 0
+	meta.HasMask = countMultipartField(body, "mask") > 0 || countMultipartField(body, "mask[]") > 0 || countMultipartField(body, "input_image_mask") > 0
 	return meta
 }
 
@@ -1376,35 +1453,71 @@ func isJSONMediaType(headerValue string) bool {
 
 func extractMultipartScalarField(body []byte, name string) string {
 	pattern := []byte(`name="` + name + `"`)
-	idx := bytes.Index(body, pattern)
-	if idx < 0 {
-		return ""
+	for offset := 0; offset < len(body); {
+		idxRel := bytes.Index(body[offset:], pattern)
+		if idxRel < 0 {
+			return ""
+		}
+		idx := offset + idxRel
+		headerStart := bytes.LastIndex(body[:idx], []byte("Content-Disposition:"))
+		headerEnd, lineBreakLen := multipartHeaderEnd(body[idx:])
+		headerEndAbs := idx + headerEnd
+		if headerStart < 0 || headerEnd < 0 || headerStart > headerEndAbs {
+			offset = idx + len(pattern)
+			continue
+		}
+		header := body[headerStart:headerEndAbs]
+		if !bytes.Contains(header, pattern) || bytes.Contains(bytes.ToLower(header), []byte("filename=")) {
+			offset = idx + len(pattern)
+			continue
+		}
+		valueStart := headerEndAbs + lineBreakLen
+		valueEnd := len(body)
+		if marker := bytes.Index(body[valueStart:], []byte("\r\n--")); marker >= 0 {
+			valueEnd = valueStart + marker
+		} else if marker := bytes.Index(body[valueStart:], []byte("\n--")); marker >= 0 {
+			valueEnd = valueStart + marker
+		}
+		value := strings.TrimSpace(string(body[valueStart:valueEnd]))
+		if len(value) > 128 || strings.ContainsRune(value, '\x00') {
+			return ""
+		}
+		return value
 	}
-	headerEnd := bytes.Index(body[idx:], []byte("\r\n\r\n"))
-	lineBreakLen := 4
-	if headerEnd < 0 {
-		headerEnd = bytes.Index(body[idx:], []byte("\n\n"))
-		lineBreakLen = 2
-	}
-	if headerEnd < 0 {
-		return ""
-	}
-	valueStart := idx + headerEnd + lineBreakLen
-	valueEnd := len(body)
-	if marker := bytes.Index(body[valueStart:], []byte("\r\n--")); marker >= 0 {
-		valueEnd = valueStart + marker
-	} else if marker := bytes.Index(body[valueStart:], []byte("\n--")); marker >= 0 {
-		valueEnd = valueStart + marker
-	}
-	value := strings.TrimSpace(string(body[valueStart:valueEnd]))
-	if len(value) > 128 || strings.ContainsRune(value, '\x00') {
-		return ""
-	}
-	return value
+	return ""
 }
 
 func countMultipartField(body []byte, name string) int {
-	return bytes.Count(body, []byte(`name="`+name+`"`))
+	pattern := []byte(`name="` + name + `"`)
+	count := 0
+	for offset := 0; offset < len(body); {
+		idxRel := bytes.Index(body[offset:], pattern)
+		if idxRel < 0 {
+			break
+		}
+		idx := offset + idxRel
+		headerStart := bytes.LastIndex(body[:idx], []byte("Content-Disposition:"))
+		headerEnd, _ := multipartHeaderEnd(body[idx:])
+		headerEndAbs := idx + headerEnd
+		if headerStart >= 0 && headerEnd >= 0 && headerStart <= headerEndAbs {
+			header := body[headerStart:headerEndAbs]
+			if bytes.Contains(header, pattern) {
+				count++
+			}
+		}
+		offset = idx + len(pattern)
+	}
+	return count
+}
+
+func multipartHeaderEnd(data []byte) (idx int, lineBreakLen int) {
+	if headerEnd := bytes.Index(data, []byte("\r\n\r\n")); headerEnd >= 0 {
+		return headerEnd, 4
+	}
+	if headerEnd := bytes.Index(data, []byte("\n\n")); headerEnd >= 0 {
+		return headerEnd, 2
+	}
+	return -1, 0
 }
 
 func extractModelFromPath(path string) string {
@@ -1439,15 +1552,14 @@ func isImageProfile(prof *profile.EndpointProfile) bool {
 }
 
 func usesPrefixTailSampling(prof *profile.EndpointProfile) bool {
-	return isImageProfile(prof) || (prof != nil && prof.Name == "responses")
+	return isImageProfile(prof) || (prof != nil && (prof.Name == "responses" || prof.Name == "gemini_generate_content"))
 }
 
 func shouldRecordImageUsage(prof *profile.EndpointProfile, usage *extractor.UsageInfo) bool {
 	if isImageProfile(prof) {
 		return true
 	}
-	return prof != nil && prof.Name == "responses" && usage != nil &&
-		(usage.ImageCount > 0 || usage.PartialImageCount > 0)
+	return usage != nil && (usage.ImageCount > 0 || usage.PartialImageCount > 0)
 }
 
 func mergeUsageInfo(current, next *extractor.UsageInfo) *extractor.UsageInfo {

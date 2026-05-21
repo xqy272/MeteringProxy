@@ -810,6 +810,42 @@ func TestProxyGeminiGenerateContent_NonStreaming(t *testing.T) {
 	}
 }
 
+func TestProxyGeminiGenerateContent_ImageOutputUsage(t *testing.T) {
+	upstreamResp := `{"modelVersion":"gemini-3.1-flash-image","candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"private-image-bytes"}}]}}],"usageMetadata":{"promptTokenCount":20,"candidatesTokenCount":30,"totalTokenCount":50}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(upstreamResp))
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
+
+	req := httptest.NewRequest("POST", "/v1beta/models/gemini-3.1-flash-image:generateContent", strings.NewReader(`{"contents":[{"parts":[{"text":"draw"}]}]}`))
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	ev := lastEvent(rw)
+	if ev.ImageUsage == nil || ev.ImageUsage.Operation != "generation" || ev.ImageUsage.ImageCount != 1 {
+		t.Fatalf("image usage = %+v", ev.ImageUsage)
+	}
+	var foundImageCount bool
+	for _, d := range ev.UsageDimensions {
+		if d.Modality == "image" && d.Metric == "count" && d.Direction == "output" && d.Amount == 1 {
+			foundImageCount = true
+		}
+	}
+	if !foundImageCount {
+		t.Fatalf("usage dimensions = %+v, want image output count", ev.UsageDimensions)
+	}
+	if strings.Contains(ev.UsageRawJSON, "private-image-bytes") {
+		t.Fatalf("usage raw JSON leaked image bytes: %q", ev.UsageRawJSON)
+	}
+}
+
 func TestProxyGeminiGenerateContent_Streaming(t *testing.T) {
 	streamBody := "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}]}}]}\n" +
 		"data: {\"modelVersion\":\"gemini-2.5-flash\",\"usageMetadata\":{\"promptTokenCount\":50,\"candidatesTokenCount\":12,\"totalTokenCount\":62}}\n"
@@ -1372,6 +1408,83 @@ func TestImageEditMultipartMetadataIsCaptured(t *testing.T) {
 	}
 	if ev.ImageUsage == nil || ev.ImageUsage.Operation != "edit" || ev.ImageUsage.InputImageCount != 1 || !ev.ImageUsage.HasMask || ev.ImageUsage.Size != "1024x1024" {
 		t.Fatalf("image usage = %+v", ev.ImageUsage)
+	}
+}
+
+func TestImageEditMultipartMetadataIsCapturedFromRequestTail(t *testing.T) {
+	largeImage := strings.Repeat("A", 20*1024)
+	body := strings.Join([]string{
+		"--x",
+		`Content-Disposition: form-data; name="image"; filename="source.png"`,
+		"Content-Type: image/png",
+		"",
+		largeImage,
+		"--x",
+		`Content-Disposition: form-data; name="model"`,
+		"",
+		"gpt-image-2",
+		"--x",
+		`Content-Disposition: form-data; name="size"`,
+		"",
+		"1536x1024",
+		"--x",
+		`Content-Disposition: form-data; name="quality"`,
+		"",
+		"high",
+		"--x",
+		`Content-Disposition: form-data; name="output_format"`,
+		"",
+		"webp",
+		"--x--",
+		"",
+	}, "\r\n")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"created":1713833628,"data":[{"b64_json":"..."}],"usage":{"total_tokens":100,"input_tokens":50,"output_tokens":50,"input_tokens_details":{"text_tokens":10,"image_tokens":40}}}`))
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 128, MaxBytes: 4096, ExtendedModelScan: false})
+
+	req := httptest.NewRequest("POST", "/v1/images/edits", strings.NewReader(body))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary=x")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	ev := lastEvent(rw)
+	if ev.ModelRequested != "gpt-image-2" {
+		t.Fatalf("model_requested = %q, want gpt-image-2", ev.ModelRequested)
+	}
+	if ev.ImageUsage == nil {
+		t.Fatal("image usage was not attached")
+	}
+	if ev.ImageUsage.InputImageCount != 1 || ev.ImageUsage.Size != "1536x1024" || ev.ImageUsage.Quality != "high" || ev.ImageUsage.OutputFormat != "webp" {
+		t.Fatalf("image usage = %+v", ev.ImageUsage)
+	}
+}
+
+func TestMultipartScalarFieldIgnoresFileParts(t *testing.T) {
+	body := strings.Join([]string{
+		"--x",
+		`Content-Disposition: form-data; name="model"; filename="source.txt"`,
+		"Content-Type: text/plain",
+		"",
+		"not-a-model",
+		"--x",
+		`Content-Disposition: form-data; name="model"`,
+		"",
+		"gpt-image-2",
+		"--x--",
+		"",
+	}, "\r\n")
+
+	if got := extractMultipartScalarField([]byte(body), "model"); got != "gpt-image-2" {
+		t.Fatalf("model scalar = %q, want gpt-image-2", got)
 	}
 }
 

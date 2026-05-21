@@ -473,6 +473,32 @@ multimodal_pricing:
 	}
 }
 
+func TestCostDimension_RealtimeSecondsFromPerMinute(t *testing.T) {
+	p, err := Load(writePricing(t, `
+multimodal_pricing:
+  gpt-realtime-translate:
+    audio_seconds:
+      input_per_minute: 0.0342
+      output_per_minute: 0.0684
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	inputCost, known := p.CostDimension("gpt-realtime-translate", "audio", "audio", "seconds", "input", "second", 30)
+	if !known {
+		t.Fatal("input audio minutes should be priced")
+	}
+	outputCost, known := p.CostDimension("gpt-realtime-translate", "audio", "audio", "seconds", "output", "second", 15)
+	if !known {
+		t.Fatal("output audio minutes should be priced")
+	}
+	expected := 30/60.0*0.0342 + 15/60.0*0.0684
+	got := inputCost + outputCost
+	if diff := got - expected; diff < -0.0001 || diff > 0.0001 {
+		t.Fatalf("cost = %.6f, want %.6f", got, expected)
+	}
+}
+
 func TestCanonicalize(t *testing.T) {
 	tests := []struct {
 		input, want string

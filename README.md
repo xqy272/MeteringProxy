@@ -423,7 +423,7 @@ chmod 600 /opt/ai-gateway/metering/usage.sqlite
 | `queue_capacity` | `1000` | 计量事件队列最大容量，满后丢弃 |
 | `batch_size` | `50` | 每次 SQLite 批量插入的最大记录数 |
 | `flush_interval` | `1s` | 刷新批次的最大等待时间 |
-| `max_nonstream_sample_bytes` | `2097152` (2 MiB) | 非流式响应采样前缀字节数 |
+| `max_nonstream_sample_bytes` | `2097152` (2 MiB) | 非流式响应采样窗口；图片、Responses、Gemini 使用首尾采样以保留尾部 usage |
 | `metering_enabled` | `true` | 计量开关，设为 `false` 时仅透明转发 |
 | `webui.enabled` | `true` | 启用仪表盘 |
 | `webui.base_path` | `/metering` | 仪表盘路径前缀，勿设为 `/` |

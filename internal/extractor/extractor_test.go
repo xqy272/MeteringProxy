@@ -376,6 +376,37 @@ func TestExtractGeminiUsage_StreamingChunk(t *testing.T) {
 	}
 }
 
+func TestExtractGeminiNonStreaming_ImageOutput(t *testing.T) {
+	body := []byte(`{"modelVersion":"gemini-3.1-flash-image","candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"private-image-bytes"}}]}}],"usageMetadata":{"promptTokenCount":20,"candidatesTokenCount":30,"totalTokenCount":50}}`)
+	u, err := ExtractGeminiNonStreaming(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u == nil {
+		t.Fatal("expected non-nil usage")
+	}
+	if u.Model != "gemini-3.1-flash-image" || u.ImageCount != 1 || u.Operation != "generation" {
+		t.Fatalf("image usage = %+v, want model image count", u)
+	}
+	if strings.Contains(u.UsageRawJSON, "private-image-bytes") {
+		t.Fatalf("UsageRawJSON leaked image bytes: %q", u.UsageRawJSON)
+	}
+}
+
+func TestExtractGeminiNonStreaming_PrefixTailImageSample(t *testing.T) {
+	sample := []byte(`{"modelVersion":"gemini-3.1-flash-image","candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"` + "\n" + `"}}]}}],"usageMetadata":{"promptTokenCount":20,"candidatesTokenCount":30,"totalTokenCount":50}}`)
+	u, err := ExtractGeminiNonStreaming(sample)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u == nil {
+		t.Fatal("expected non-nil usage from sampled response")
+	}
+	if u.Model != "gemini-3.1-flash-image" || u.ImageCount != 1 || u.InputTokens != 20 || u.OutputTokens != 30 || u.TotalTokens != 50 {
+		t.Fatalf("sample usage = %+v", u)
+	}
+}
+
 func TestExtractImageNonStreaming(t *testing.T) {
 	body := []byte(`{"created":1713833628,"data":[{"b64_json":"..."}],"usage":{"total_tokens":100,"input_tokens":50,"output_tokens":50,"input_tokens_details":{"text_tokens":10,"image_tokens":40}}}`)
 	u, err := ExtractImageNonStreaming(body)
@@ -435,6 +466,23 @@ func TestExtractGeminiNonStreaming_ArrayUsesLastUsage(t *testing.T) {
 	}
 	if u.InputTokens != 8 || u.OutputTokens != 5 || u.TotalTokens != 13 {
 		t.Errorf("usage = %+v, want 8/5/13", u)
+	}
+}
+
+func TestExtractGeminiNonStreaming_ArrayKeepsImageOutputFromEarlierChunk(t *testing.T) {
+	body := []byte(`[{"modelVersion":"gemini-3.1-flash-image","candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"private-image-bytes"}}]}}]},{"modelVersion":"gemini-3.1-flash-image","usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":5,"totalTokenCount":13}}]`)
+	u, err := ExtractGeminiNonStreaming(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u == nil {
+		t.Fatal("expected non-nil usage")
+	}
+	if u.ImageCount != 1 || u.Operation != "generation" || u.InputTokens != 8 || u.OutputTokens != 5 {
+		t.Fatalf("usage = %+v, want image count and final usage", u)
+	}
+	if strings.Contains(u.UsageRawJSON, "private-image-bytes") {
+		t.Fatalf("UsageRawJSON leaked image bytes: %q", u.UsageRawJSON)
 	}
 }
 

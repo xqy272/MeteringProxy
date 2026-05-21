@@ -230,10 +230,24 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	models, _ := s.db.Models(since)
 	var totalCost float64
+	imageModels, _ := s.db.ImageModels(since)
+	imageModelSet := map[string]struct{}{}
+	for _, row := range imageModels {
+		if row.Model != "" {
+			imageModelSet[row.Model] = struct{}{}
+		}
+	}
 	for _, m := range models {
 		cost, _ := s.pricing.CostWithCacheCreation(m.Model, m.InputTokens, m.OutputTokens, m.ReasoningTokens, m.CachedTokens, m.CacheCreationTokens)
+		if cost == 0 {
+			if _, handledAsImage := imageModelSet[m.Model]; handledAsImage {
+				continue
+			}
+		}
 		totalCost += cost
 	}
+	imageCost, _, _ := s.imageModelsCost(imageModels)
+	totalCost += imageCost
 	report := event.SummaryFromDB(row)
 	report.TotalCost = totalCost
 	writeJSON(w, report)

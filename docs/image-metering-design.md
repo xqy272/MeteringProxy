@@ -11,9 +11,11 @@
 - 新增 `usage_dimensions` 与 `image_usage` schema，`request_usage` 继续兼容旧报表。
 - `/v1/images/generations` 与 `/v1/images/edits` 已进入 usage-metered；支持 OpenAI Images JSON/SSE usage、图片数、partial image 数、图片请求安全元数据。
 - `/v1/responses` 的 `image_generation_call` 已进入图片事实计量；记录 image_count/partial_image_count，不保存 `result` 或 `revised_prompt`。
+- Gemini/Google `generateContent` 的图片 `inlineData` 输出已进入图片事实计量；只记录图片数量与 usage metadata，不保存 `data`。
 - `/v1/images/variations`、`/v1/audio/*`、`/v1/videos*` 已进入 request-only，先保证请求事实可见。
 - `/v1/embeddings` 已进入 usage-metered。
 - 非流式图片响应改为 prefix+tail 采样，避免大 `b64_json` 把尾部 `usage` 挤出采样窗口。
+- Gemini 非流式响应同样使用 prefix+tail 兜底，避免大 `inlineData.data` 把尾部 `usageMetadata` 挤出采样窗口。
 - `pricing.yaml` 支持 `multimodal_pricing`，可按 text/image/audio channel 和 direction 分别估算成本；图片成本会区分非缓存输入、缓存输入和输出。
 - WebUI/API 新增 `/api/multimodal/summary`、`/api/images/summary`、`/api/images/models`、`/api/images/requests`。
 
@@ -141,6 +143,7 @@ CREATE TABLE IF NOT EXISTS image_usage (
 | `POST /v1/images/variations` | `openai_images_variations` | request-only first | 需 CPA 实测后再升 usage metered |
 | `POST /api/provider/{provider}/v1/images/variations` | `openai_images_variations` | request-only first | 预留 |
 | `POST /v1/responses` with `image_generation` tool | `responses` + image detail | mixed usage | 不保存 result/revised_prompt |
+| `POST /v1beta/models/{model}:generateContent` with image `inlineData` output | `gemini_generate_content` + image detail | mixed usage | 不保存 inlineData.data |
 
 ### P1：继续推进
 
@@ -181,7 +184,7 @@ Multipart request 提取：
 
 - 只解析 form field header 和小文本字段。
 - `image`、`image[]`、`mask` 文件 part 只计数，不保存文件名，不读取正文。
-- 如果 `model` 不在前缀内，不阻塞转发，等待响应或 CPA side-channel 补齐。
+- 请求转发时同步维护首尾采样窗口；如果 `model`、`size`、`quality`、`output_format` 在大文件之后，仍尽力从尾部安全字段补齐，不阻塞转发。
 
 ### 非流式响应
 
@@ -190,6 +193,7 @@ Multipart request 提取：
 - 转发响应时同步喂给 scanner。
 - 识别顶层 `usage`、`data` 数组长度、model。
 - 遇到 `b64_json`、`url`、`result` 只跳过字符串内容并计数。
+- Gemini 响应遇到 `inlineData.data` 只跳过字符串内容，并按 `mimeType=image/*` 计数。
 - scanner 内存上限固定，例如 128 KiB。
 
 最低 MVP 可以用 prefix + tail sample，但必须标记 `capture_confidence=best_effort`。推荐直接做 scanner。
@@ -254,7 +258,7 @@ multimodal_pricing:
 
 - `usage_dimensions.modality/channel/direction` 决定使用哪组价格。
 - `metric=tokens` 且 `unit=token` 时按每 1M token 计价。
-- `metric=seconds` 且 `unit=second` 时优先用 `per_second`，没有则用 `per_minute / 60`。
+- `metric=seconds` 且 `unit=second` 时优先用 `per_second`/`input_per_second`/`output_per_second`，没有则用对应 `per_minute / 60`。
 - 配置中没有对应价格时，成本返回 `known=false`，WebUI 显示 partial，而不是显示 0 当成免费。
 - 价格来自 operator 配置；代码不硬编码官方价格。
 

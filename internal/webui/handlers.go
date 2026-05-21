@@ -20,13 +20,32 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	if modelsErr != nil {
 		dbOverview.Cost.Error = modelsErr.Error()
 	} else {
+		imageModels, imageModelsErr := s.db.ImageModels(since)
+		imageModelSet := map[string]struct{}{}
+		for _, row := range imageModels {
+			if row.Model != "" {
+				imageModelSet[row.Model] = struct{}{}
+			}
+		}
 		for _, m := range models {
 			cost, costKnown := s.pricing.CostWithCacheCreation(m.Model, m.InputTokens, m.OutputTokens, m.ReasoningTokens, m.CachedTokens, m.CacheCreationTokens)
 			if costKnown {
 				knownCost += cost
 			} else {
+				if _, handledAsImage := imageModelSet[m.Model]; handledAsImage {
+					continue
+				}
 				unpricedModels++
 			}
+		}
+		if imageModelsErr == nil {
+			imageCost, imageCostKnown, imageUnpriced := s.imageModelsCost(imageModels)
+			knownCost += imageCost
+			if !imageCostKnown {
+				unpricedModels += imageUnpriced
+			}
+		} else if dbOverview.Cost.Error == "" {
+			dbOverview.Cost.Error = imageModelsErr.Error()
 		}
 		partial := unpricedModels > 0
 
