@@ -328,7 +328,7 @@ func (p *Poller) recordUnsupportedProvider(provider, nowStr string, nowUnix int6
 		WindowKey:      "default",
 		CheckedAt:      nowStr,
 		CheckedAtUnix:  nowUnix,
-		Status:         "unknown",
+		Status:         "unsupported",
 		QuotaSupported: 0,
 		AdapterStatus:  "unsupported",
 		ErrorClass:     "quota_unsupported",
@@ -374,6 +374,13 @@ func jsonQuotaStatus(remaining, limit, lowThreshold, warningThreshold float64) s
 }
 
 func (p *Poller) recordRefreshEvent(provider, credHash, phase, status, adapterStatus string, durationMs int64, nowStr string, nowUnix int64) {
+	errorClass := ""
+	if status == "error" {
+		errorClass = adapterStatus
+		if errorClass == "" {
+			errorClass = "quota_refresh_failed"
+		}
+	}
 	row := &db.QuotaRefreshEventRow{
 		CheckedAt:      nowStr,
 		CheckedAtUnix:  nowUnix,
@@ -383,6 +390,7 @@ func (p *Poller) recordRefreshEvent(provider, credHash, phase, status, adapterSt
 		Status:         status,
 		AdapterStatus:  adapterStatus,
 		DurationMs:     durationMs,
+		ErrorClass:     errorClass,
 	}
 	if err := p.database.InsertQuotaRefreshEvent(row); err != nil {
 		log.Printf("quota refresh event insert error: %v", err)

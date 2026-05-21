@@ -481,11 +481,138 @@ func TestIssuesAggregatesByEffectiveModelAndUsesLatestSample(t *testing.T) {
 	if rows[0].Class != "auth_failed" {
 		t.Fatalf("first issue class = %q, want auth_failed sorted before warning", rows[0].Class)
 	}
-	if rows[1].Class != "rate_limited" || rows[1].Count != 2 || rows[1].Message != "new sample" || rows[1].RequestID != "req-new" {
-		t.Fatalf("rate limit issue = %+v, want count=2 with latest sample", rows[1])
+	if rows[1].Class != "rate_limited" || rows[1].Count != 2 || rows[1].Message != "new" || rows[1].RequestID != "req-new" {
+		t.Fatalf("rate limit issue = %+v, want count=2 with latest structured diagnostic", rows[1])
 	}
 	if rows[1].Model != "gpt-4o" || rows[1].ModelSource != "requested" {
 		t.Fatalf("rate limit model attribution = %+v, want requested gpt-4o", rows[1])
+	}
+}
+
+func TestIssuesIncludeCurrentCredentialAndQuotaState(t *testing.T) {
+	d := newTestDB(t)
+	old := time.Now().UTC().Add(-48 * time.Hour).Truncate(time.Second)
+	if err := d.UpsertCredentialHealth(&CredentialHealthRow{
+		Provider:       "claude",
+		CredentialHash: "cred-a",
+		Status:         "unavailable",
+		CheckedAt:      old.Format(time.RFC3339),
+		CheckedAtUnix:  old.Unix(),
+		ErrorClass:     "credential_unavailable",
+	}); err != nil {
+		t.Fatalf("UpsertCredentialHealth: %v", err)
+	}
+	if err := d.UpsertQuotaCurrent(&QuotaCurrentRow{
+		Provider:        "codex",
+		CredentialHash:  "cred-b",
+		WindowKey:       "default",
+		CheckedAt:       old.Format(time.RFC3339),
+		CheckedAtUnix:   old.Unix(),
+		Status:          "low",
+		QuotaSupported:  1,
+		AdapterStatus:   "available",
+		LimitAmount:     100,
+		RemainingAmount: 10,
+		Unit:            "requests",
+	}); err != nil {
+		t.Fatalf("UpsertQuotaCurrent: %v", err)
+	}
+
+	rows, err := d.Issues(time.Now().UTC().Add(-time.Hour), 20)
+	if err != nil {
+		t.Fatalf("Issues: %v", err)
+	}
+	classes := map[string]bool{}
+	for _, row := range rows {
+		classes[row.Class] = true
+	}
+	if !classes["credential_unavailable"] || !classes["quota_low"] {
+		t.Fatalf("issues = %+v, want current credential and quota issues even when last check is outside selected request range", rows)
+	}
+}
+
+func TestIssuesIncludeQuotaRefreshFailures(t *testing.T) {
+	d := newTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := d.InsertQuotaRefreshEvent(&QuotaRefreshEventRow{
+		CheckedAt:     now.Format(time.RFC3339),
+		CheckedAtUnix: now.Unix(),
+		Provider:      "kimi",
+		Phase:         "probe",
+		Status:        "error",
+		AdapterStatus: "api_call_unavailable",
+		ErrorClass:    "api_call_unavailable",
+		DurationMs:    12,
+	}); err != nil {
+		t.Fatalf("InsertQuotaRefreshEvent: %v", err)
+	}
+
+	rows, err := d.Issues(now.Add(-time.Hour), 20)
+	if err != nil {
+		t.Fatalf("Issues: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Class != "quota_refresh_failed" || rows[0].SourceGroup != "quota" || rows[0].Message != "api_call_unavailable" {
+		t.Fatalf("issues = %+v, want quota_refresh_failed from refresh event", rows)
+	}
+}
+
+func TestSeedDemoIncludesCredentialAndQuotaRows(t *testing.T) {
+	d := newTestDB(t)
+	if err := SeedDemo(d); err != nil {
+		t.Fatalf("SeedDemo: %v", err)
+	}
+
+	credentials, err := d.AllCredentialHealth()
+	if err != nil {
+		t.Fatalf("AllCredentialHealth: %v", err)
+	}
+	if len(credentials) < 4 {
+		t.Fatalf("credential demo rows = %d, want at least 4", len(credentials))
+	}
+
+	quotaRows, err := d.AllQuotaCurrent()
+	if err != nil {
+		t.Fatalf("AllQuotaCurrent: %v", err)
+	}
+	if len(quotaRows) < 4 {
+		t.Fatalf("quota demo rows = %d, want at least 4", len(quotaRows))
+	}
+	hasSupported := false
+	hasLowOrExhausted := false
+	hasUnsupported := false
+	hasFiveHour := false
+	hasWeekly := false
+	for _, row := range quotaRows {
+		if row.QuotaSupported > 0 {
+			hasSupported = true
+		}
+		if row.Status == "low" || row.Status == "exhausted" {
+			hasLowOrExhausted = true
+		}
+		if row.Status == "unsupported" {
+			hasUnsupported = true
+		}
+		if row.WindowKey == "5h" {
+			hasFiveHour = true
+		}
+		if row.WindowKey == "weekly" {
+			hasWeekly = true
+		}
+	}
+	if !hasSupported || !hasLowOrExhausted || !hasUnsupported || !hasFiveHour || !hasWeekly {
+		t.Fatalf("quota demo rows = %+v, want supported, low/exhausted, unsupported, 5h, and weekly examples", quotaRows)
+	}
+
+	issues, err := d.Issues(time.Now().UTC().Add(-time.Hour), 50)
+	if err != nil {
+		t.Fatalf("Issues: %v", err)
+	}
+	classes := map[string]bool{}
+	for _, row := range issues {
+		classes[row.Class] = true
+	}
+	if !classes["credential_disabled"] || !classes["quota_low"] || !classes["quota_exhausted"] || !classes["quota_unsupported"] || !classes["quota_refresh_failed"] {
+		t.Fatalf("demo issues = %+v, want credential/quota health examples", issues)
 	}
 }
 
@@ -682,7 +809,7 @@ func TestActivity(t *testing.T) {
 	records := []UsageRecord{
 		{CreatedAt: now.Add(-30 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/responses", Method: "POST", Status: 200, LatencyMs: 100, TTFBMs: 20, CaptureOutcome: "captured", ModelReturned: "gpt-5.4"},
 		{CreatedAt: now.Add(-20 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/responses", Method: "POST", Status: 500, LatencyMs: 300, TTFBMs: 60, CaptureOutcome: "failed", CaptureReason: "parse_error", Error: "upstream failed", ModelReturned: "gpt-5.4"},
-		{CreatedAt: now.Add(-10 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/chat/completions", Method: "POST", Status: 429, LatencyMs: 200, TTFBMs: 40, CaptureOutcome: "skipped", CaptureReason: "rate_limited", Error: "rate limited", ModelRequested: "gpt-4o"},
+		{CreatedAt: now.Add(-10 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/chat/completions", Method: "POST", Status: 429, LatencyMs: 200, TTFBMs: 40, CaptureOutcome: "skipped", CaptureReason: "rate_limited", Error: "rate limited", ErrorClass: "rate_limited", ErrorCode: "rate_limit_exceeded", ModelRequested: "gpt-4o"},
 	}
 	if err := d.InsertBatch(records); err != nil {
 		t.Fatalf("InsertBatch: %v", err)
@@ -706,6 +833,9 @@ func TestActivity(t *testing.T) {
 	}
 	if row.LatestErrorStatus != 429 || row.LatestErrorEndpoint != "/v1/chat/completions" || row.LatestErrorModel != "gpt-4o" {
 		t.Fatalf("latest error = %+v, want 429 chat completions gpt-4o", row)
+	}
+	if row.LatestErrorClass != "rate_limited" || row.LatestErrorCode != "rate_limit_exceeded" {
+		t.Fatalf("latest error diagnostic = class %q code %q, want rate_limited/rate_limit_exceeded", row.LatestErrorClass, row.LatestErrorCode)
 	}
 }
 

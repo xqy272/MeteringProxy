@@ -16,6 +16,10 @@ const (
 )
 
 func SeedDemo(database *DB) error {
+	if err := clearDemoData(database); err != nil {
+		return err
+	}
+
 	now := time.Now().UTC()
 	var records []UsageRecord
 
@@ -100,8 +104,9 @@ func SeedDemo(database *DB) error {
 				errCode = "context_length_exceeded"
 				errMessage = "This model's maximum context length is 128000 tokens."
 			case "proxy_upstream_error":
-				errType = ""
-				errCode = ""
+				errClass = "proxy_connection_refused"
+				errType = "proxy_transport"
+				errCode = "connection_refused"
 				errMessage = "dial tcp: connection refused"
 			}
 			errMsg = errClass
@@ -152,5 +157,221 @@ func SeedDemo(database *DB) error {
 		})
 	}
 
-	return database.InsertBatch(records)
+	if err := database.InsertBatch(records); err != nil {
+		return err
+	}
+	return seedCredentialQuotaDemo(database, now)
+}
+
+func clearDemoData(database *DB) error {
+	if _, err := database.sql.Exec(`
+		DELETE FROM usage_dimensions
+		WHERE request_usage_id IN (SELECT id FROM request_usage WHERE request_id LIKE 'seed_%')
+	`); err != nil {
+		return err
+	}
+	if _, err := database.sql.Exec(`
+		DELETE FROM image_usage
+		WHERE request_usage_id IN (SELECT id FROM request_usage WHERE request_id LIKE 'seed_%')
+	`); err != nil {
+		return err
+	}
+	if _, err := database.sql.Exec(`DELETE FROM request_usage WHERE request_id LIKE 'seed_%'`); err != nil {
+		return err
+	}
+	if _, err := database.sql.Exec(`DELETE FROM credential_health WHERE credential_hash LIKE 'demo_cred_%'`); err != nil {
+		return err
+	}
+	if _, err := database.sql.Exec(`DELETE FROM quota_current WHERE credential_hash LIKE 'demo_cred_%'`); err != nil {
+		return err
+	}
+	if _, err := database.sql.Exec(`DELETE FROM quota_refresh_events WHERE credential_hash LIKE 'demo_cred_%'`); err != nil {
+		return err
+	}
+	return nil
+}
+
+func seedCredentialQuotaDemo(database *DB, now time.Time) error {
+	checkedAt := now.Format(time.RFC3339)
+	checkedAtUnix := now.Unix()
+	fiveHourReset := now.Add(2*time.Hour + 17*time.Minute)
+	fiveHourResetStr := fiveHourReset.Format(time.RFC3339)
+	fiveHourResetUnix := fiveHourReset.Unix()
+	weeklyReset := now.Add(4*24*time.Hour + 6*time.Hour)
+	weeklyResetStr := weeklyReset.Format(time.RFC3339)
+	weeklyResetUnix := weeklyReset.Unix()
+
+	credentials := []CredentialHealthRow{
+		{
+			Provider:       "codex",
+			CredentialHash: "demo_cred_codex_primary",
+			AuthIndexHash:  "demo_auth_codex_0",
+			LabelHash:      "demo_label_codex_primary",
+			Status:         "ready",
+			SuccessCount:   184,
+			FailedCount:    3,
+			CheckedAt:      checkedAt,
+			CheckedAtUnix:  checkedAtUnix,
+		},
+		{
+			Provider:       "codex",
+			CredentialHash: "demo_cred_codex_spare",
+			AuthIndexHash:  "demo_auth_codex_1",
+			LabelHash:      "demo_label_codex_spare",
+			Status:         "unavailable",
+			SuccessCount:   42,
+			FailedCount:    19,
+			CheckedAt:      checkedAt,
+			CheckedAtUnix:  checkedAtUnix,
+			ErrorClass:     "auth_failed",
+		},
+		{
+			Provider:       "claude",
+			CredentialHash: "demo_cred_claude_team",
+			AuthIndexHash:  "demo_auth_claude_0",
+			LabelHash:      "demo_label_claude_team",
+			Status:         "ready",
+			SuccessCount:   91,
+			FailedCount:    1,
+			CheckedAt:      checkedAt,
+			CheckedAtUnix:  checkedAtUnix,
+		},
+		{
+			Provider:       "kimi",
+			CredentialHash: "demo_cred_kimi_disabled",
+			AuthIndexHash:  "demo_auth_kimi_0",
+			LabelHash:      "demo_label_kimi_disabled",
+			Status:         "disabled",
+			SuccessCount:   0,
+			FailedCount:    0,
+			CheckedAt:      checkedAt,
+			CheckedAtUnix:  checkedAtUnix,
+			ErrorClass:     "credential_disabled",
+		},
+	}
+	for i := range credentials {
+		if err := database.UpsertCredentialHealth(&credentials[i]); err != nil {
+			return err
+		}
+	}
+
+	quotaRows := []QuotaCurrentRow{
+		{
+			Provider:        "codex",
+			CredentialHash:  "demo_cred_codex_primary",
+			WindowKey:       "5h",
+			CheckedAt:       checkedAt,
+			CheckedAtUnix:   checkedAtUnix,
+			Plan:            "team",
+			LimitAmount:     180,
+			RemainingAmount: 64,
+			UsedAmount:      116,
+			Unit:            "requests",
+			ResetAt:         fiveHourResetStr,
+			ResetAtUnix:     fiveHourResetUnix,
+			Status:          "ok",
+			QuotaSupported:  1,
+			AdapterStatus:   "available",
+		},
+		{
+			Provider:        "codex",
+			CredentialHash:  "demo_cred_codex_primary",
+			WindowKey:       "weekly",
+			CheckedAt:       checkedAt,
+			CheckedAtUnix:   checkedAtUnix,
+			Plan:            "team",
+			LimitAmount:     900,
+			RemainingAmount: 514,
+			UsedAmount:      386,
+			Unit:            "requests",
+			ResetAt:         weeklyResetStr,
+			ResetAtUnix:     weeklyResetUnix,
+			Status:          "ok",
+			QuotaSupported:  1,
+			AdapterStatus:   "available",
+		},
+		{
+			Provider:        "codex",
+			CredentialHash:  "demo_cred_codex_spare",
+			WindowKey:       "5h",
+			CheckedAt:       checkedAt,
+			CheckedAtUnix:   checkedAtUnix,
+			Plan:            "team",
+			LimitAmount:     180,
+			RemainingAmount: 0,
+			UsedAmount:      180,
+			Unit:            "requests",
+			ResetAt:         fiveHourResetStr,
+			ResetAtUnix:     fiveHourResetUnix,
+			Status:          "exhausted",
+			QuotaSupported:  1,
+			AdapterStatus:   "available",
+			ErrorClass:      "quota_exhausted",
+		},
+		{
+			Provider:        "claude",
+			CredentialHash:  "demo_cred_claude_team",
+			WindowKey:       "5h",
+			CheckedAt:       checkedAt,
+			CheckedAtUnix:   checkedAtUnix,
+			Plan:            "max",
+			LimitAmount:     45,
+			RemainingAmount: 4,
+			UsedAmount:      41,
+			Unit:            "credits",
+			ResetAt:         fiveHourResetStr,
+			ResetAtUnix:     fiveHourResetUnix,
+			Status:          "low",
+			QuotaSupported:  1,
+			AdapterStatus:   "available",
+			ErrorClass:      "quota_low",
+		},
+		{
+			Provider:        "claude",
+			CredentialHash:  "demo_cred_claude_team",
+			WindowKey:       "weekly",
+			CheckedAt:       checkedAt,
+			CheckedAtUnix:   checkedAtUnix,
+			Plan:            "max",
+			LimitAmount:     250,
+			RemainingAmount: 188,
+			UsedAmount:      62,
+			Unit:            "credits",
+			ResetAt:         weeklyResetStr,
+			ResetAtUnix:     weeklyResetUnix,
+			Status:          "ok",
+			QuotaSupported:  1,
+			AdapterStatus:   "available",
+		},
+		{
+			Provider:       "kimi",
+			CredentialHash: "demo_cred_kimi_disabled",
+			WindowKey:      "weekly",
+			CheckedAt:      checkedAt,
+			CheckedAtUnix:  checkedAtUnix,
+			Status:         "unsupported",
+			QuotaSupported: 0,
+			AdapterStatus:  "unsupported",
+			ErrorClass:     "quota_unsupported",
+			Partial:        1,
+		},
+	}
+	for i := range quotaRows {
+		if err := database.UpsertQuotaCurrent(&quotaRows[i]); err != nil {
+			return err
+		}
+	}
+
+	return database.InsertQuotaRefreshEvent(&QuotaRefreshEventRow{
+		CheckedAt:      checkedAt,
+		CheckedAtUnix:  checkedAtUnix,
+		Provider:       "kimi",
+		CredentialHash: "demo_cred_kimi_disabled",
+		Phase:          "provider_adapter",
+		Status:         "error",
+		AdapterStatus:  "unsupported",
+		DurationMs:     18,
+		ErrorClass:     "quota_unsupported",
+		Partial:        1,
+	})
 }

@@ -97,8 +97,18 @@ func TestProxyRequest_UpstreamErrorSetsErrorClass(t *testing.T) {
 		t.Fatal("no event recorded")
 	}
 	ev := lastEvent(rw)
-	if ev.ErrorClass != "proxy_upstream_error" {
-		t.Errorf("error_class = %q, want proxy_upstream_error", ev.ErrorClass)
+	wantClass := "proxy_connection_refused"
+	if ev.Error == "upstream_error" {
+		wantClass = "proxy_upstream_error"
+	}
+	if ev.ErrorClass != wantClass {
+		t.Errorf("error_class = %q, want %s", ev.ErrorClass, wantClass)
+	}
+	if ev.ErrorType != "proxy_transport" {
+		t.Errorf("error_type = %q, want proxy_transport", ev.ErrorType)
+	}
+	if ev.ErrorCode != "connection_refused" && ev.ErrorCode != "upstream_error" {
+		t.Errorf("error_code = %q, want safe upstream category", ev.ErrorCode)
 	}
 	if ev.Error != "connection_refused" && ev.Error != "upstream_error" {
 		t.Errorf("error = %q, want safe upstream category", ev.Error)
@@ -135,6 +145,26 @@ func TestSafeOperationalErrorRedactsDetails(t *testing.T) {
 	}
 	if strings.Contains(got, "127.0.0.1") || strings.Contains(got, "8317") {
 		t.Fatalf("safeOperationalError leaked address: %q", got)
+	}
+}
+
+func TestProxyErrorClassMapsSafeOperationalError(t *testing.T) {
+	cases := map[string]string{
+		"connection_refused":  "proxy_connection_refused",
+		"connection_reset":    "proxy_connection_reset",
+		"timeout":             "proxy_timeout",
+		"dns_error":           "proxy_dns_error",
+		"no_route":            "proxy_network_unreachable",
+		"network_unreachable": "proxy_network_unreachable",
+		"tls_error":           "proxy_tls_error",
+		"connection_closed":   "proxy_connection_closed",
+		"client_write_error":  "proxy_connection_closed",
+		"upstream_error":      "proxy_upstream_error",
+	}
+	for code, want := range cases {
+		if got := proxyErrorClass(code); got != want {
+			t.Fatalf("proxyErrorClass(%q) = %q, want %q", code, got, want)
+		}
 	}
 }
 

@@ -203,6 +203,8 @@ func ActivityFromDB(row *db.ActivityRow) ActivityReport {
 		LatestErrorStatus:   row.LatestErrorStatus,
 		LatestErrorAt:       row.LatestErrorAt,
 		LatestError:         row.LatestError,
+		LatestErrorClass:    row.LatestErrorClass,
+		LatestErrorCode:     row.LatestErrorCode,
 		LatestErrorEndpoint: row.LatestErrorEndpoint,
 		LatestErrorModel:    row.LatestErrorModel,
 	}

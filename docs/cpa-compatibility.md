@@ -94,9 +94,16 @@ than claiming full quota availability.
 Supported today:
 
 - Credential health from `auth-files`.
-- Quota module status as disabled, partial, unsupported, or unavailable.
+- Quota module status as disabled, partial, unsupported, unavailable, or available.
 - Provider quota rows only when explicit provider adapters produce normalized
   `quota_current` rows.
+- `full_quota_available=true` only when at least one supported provider quota
+  row is present. A detectable `/api-call` endpoint by itself is not enough to
+  claim full quota support.
+- Quota refresh failures are surfaced as WebUI issues through
+  `quota_refresh_events`; credential and quota current-state issues remain
+  visible even when their last check happened outside the selected request
+  range.
 
 Not supported today:
 

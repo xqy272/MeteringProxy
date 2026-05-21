@@ -31,7 +31,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 			cost, costKnown := s.pricing.CostWithCacheCreation(m.Model, m.InputTokens, m.OutputTokens, m.ReasoningTokens, m.CachedTokens, m.CacheCreationTokens)
 			if costKnown {
 				knownCost += cost
-			} else {
+			} else if hasBillableTextUsage(m) {
 				if _, handledAsImage := imageModelSet[m.Model]; handledAsImage {
 					continue
 				}

@@ -1,4 +1,5 @@
 *.exe
+*.exe~
 ai-gateway-metering-proxy
 usage.sqlite*
 usage.dev.sqlite*

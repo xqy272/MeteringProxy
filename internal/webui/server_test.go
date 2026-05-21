@@ -201,6 +201,60 @@ func TestAPIModelsCostIncludesCacheCreationTokens(t *testing.T) {
 	}
 }
 
+func TestAPIModelsDoesNotMarkZeroTokenUnknownModelUnpriced(t *testing.T) {
+	s, database := newTestServer(t, "/metering")
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := database.InsertBatch([]db.UsageRecord{{
+		CreatedAt:      now.Add(-10 * time.Minute).Format(time.RFC3339),
+		Endpoint:       "/v1/images/variations",
+		Method:         "POST",
+		Status:         200,
+		LatencyMs:      100,
+		ModelRequested: "unconfigured-request-only-model",
+		CaptureMode:    event.CaptureRequestOnly,
+		MeteringKind:   event.MeteringRequestOnly,
+		CaptureOutcome: event.OutcomeSkipped,
+		CaptureReason:  event.ReasonRequestOnlyProfile,
+	}}); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/metering/api/models?range=24h", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("GET /metering/api/models: status %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var rows []event.ModelReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("unmarshal models: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("models = %+v, want one row", rows)
+	}
+	if !rows[0].CostKnown || rows[0].Cost != 0 {
+		t.Fatalf("zero-token request-only row cost = %.6f known=%v, want known zero cost", rows[0].Cost, rows[0].CostKnown)
+	}
+
+	req = httptest.NewRequest("GET", "/metering/api/overview?range=24h", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("GET /metering/api/overview: status %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var overview event.OverviewReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &overview); err != nil {
+		t.Fatalf("unmarshal overview: %v", err)
+	}
+	costData, ok := overview.Cost.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("cost data = %T, want map", overview.Cost.Data)
+	}
+	if partial, _ := costData["partial"].(bool); partial {
+		t.Fatalf("overview cost partial = true for zero-token request-only row: %+v", costData)
+	}
+}
+
 func TestAPIImagesSummary(t *testing.T) {
 	s, database := newTestServer(t, "/metering")
 	s.pricing.Multimodal["gpt-image-2"] = pricing.MultimodalModelPrice{
@@ -335,6 +389,128 @@ func TestAPIOverviewAndIssuesAreRoutedNoStore(t *testing.T) {
 	}
 }
 
+type fakeQuotaPoller struct {
+	rows         []db.QuotaCurrentRow
+	lastAt       time.Time
+	apiAvailable bool
+}
+
+func (p *fakeQuotaPoller) Snapshot() ([]db.QuotaCurrentRow, time.Time, bool) {
+	rows := make([]db.QuotaCurrentRow, len(p.rows))
+	copy(rows, p.rows)
+	return rows, p.lastAt, p.apiAvailable
+}
+
+func (p *fakeQuotaPoller) APICallAvailable() bool { return p.apiAvailable }
+func (p *fakeQuotaPoller) Refresh()               {}
+
+func TestAPIQuotaDoesNotClaimFullQuotaForProbeOnlyAvailability(t *testing.T) {
+	s, _ := newTestServer(t, "/metering")
+	now := time.Now().UTC().Truncate(time.Second)
+	s.SetQuotaPoller(&fakeQuotaPoller{lastAt: now, apiAvailable: true})
+
+	req := httptest.NewRequest("GET", "/metering/api/quota", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("GET /metering/api/quota: status %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal quota: %v", err)
+	}
+	if payload["full_quota_available"] == true {
+		t.Fatalf("quota payload claimed full quota without provider rows: %+v", payload)
+	}
+	if payload["module_status"] != "partial" || payload["phase"] != "credential_health" {
+		t.Fatalf("quota payload = %+v, want partial credential_health", payload)
+	}
+}
+
+func TestAPIQuotaClaimsFullQuotaOnlyWithSupportedRows(t *testing.T) {
+	s, _ := newTestServer(t, "/metering")
+	now := time.Now().UTC().Truncate(time.Second)
+	s.SetQuotaPoller(&fakeQuotaPoller{
+		lastAt:       now,
+		apiAvailable: true,
+		rows: []db.QuotaCurrentRow{{
+			Provider:        "codex",
+			CredentialHash:  "cred",
+			WindowKey:       "daily",
+			CheckedAt:       now.Format(time.RFC3339),
+			CheckedAtUnix:   now.Unix(),
+			LimitAmount:     100,
+			RemainingAmount: 80,
+			Unit:            "requests",
+			Status:          "ok",
+			QuotaSupported:  1,
+			AdapterStatus:   "available",
+		}},
+	})
+
+	req := httptest.NewRequest("GET", "/metering/api/quota", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("GET /metering/api/quota: status %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal quota: %v", err)
+	}
+	if payload["full_quota_available"] != true || payload["module_status"] != "available" || payload["phase"] != "quota_snapshot" {
+		t.Fatalf("quota payload = %+v, want available quota_snapshot", payload)
+	}
+}
+
+func TestAPIObservabilityReportsQuotaModuleStatus(t *testing.T) {
+	s, _ := newTestServer(t, "/metering")
+	now := time.Now().UTC().Truncate(time.Second)
+	s.SetQuotaPoller(&fakeQuotaPoller{lastAt: now, apiAvailable: true})
+
+	req := httptest.NewRequest("GET", "/metering/api/observability", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("GET /metering/api/observability: status %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal observability: %v", err)
+	}
+	quota, ok := payload["quota"].(map[string]any)
+	if !ok {
+		t.Fatalf("observability quota = %T, want object: %+v", payload["quota"], payload)
+	}
+	if quota["module_status"] != "partial" || quota["full_quota_available"] == true || quota["phase"] != "credential_health" {
+		t.Fatalf("observability quota = %+v, want partial credential_health without full quota", quota)
+	}
+}
+
+func TestAPIObservabilityReportsQuotaUnavailableWithoutProbeOrRows(t *testing.T) {
+	s, _ := newTestServer(t, "/metering")
+	now := time.Now().UTC().Truncate(time.Second)
+	s.SetQuotaPoller(&fakeQuotaPoller{lastAt: now, apiAvailable: false})
+
+	req := httptest.NewRequest("GET", "/metering/api/observability", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("GET /metering/api/observability: status %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal observability: %v", err)
+	}
+	quota, ok := payload["quota"].(map[string]any)
+	if !ok {
+		t.Fatalf("observability quota = %T, want object: %+v", payload["quota"], payload)
+	}
+	if quota["module_status"] != "unavailable" || quota["full_quota_available"] == true {
+		t.Fatalf("observability quota = %+v, want unavailable without probe or rows", quota)
+	}
+}
+
 func TestIndexRequiresRevalidation(t *testing.T) {
 	s, _ := newTestServer(t, "/metering")
 	req := httptest.NewRequest("GET", "/metering", nil)
@@ -372,7 +548,7 @@ func TestAPIActivity(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	if err := database.InsertBatch([]db.UsageRecord{
 		{CreatedAt: now.Add(-time.Hour).Format(time.RFC3339), Endpoint: "/v1/responses", Method: "POST", Status: 200, LatencyMs: 100, TTFBMs: 20, CaptureOutcome: "captured"},
-		{CreatedAt: now.Add(-30 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/responses", Method: "POST", Status: 500, LatencyMs: 300, TTFBMs: 60, CaptureOutcome: "failed", Error: "upstream"},
+		{CreatedAt: now.Add(-30 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/responses", Method: "POST", Status: 500, LatencyMs: 300, TTFBMs: 60, CaptureOutcome: "failed", Error: "upstream", ErrorClass: "upstream_5xx", ErrorCode: "internal_error"},
 	}); err != nil {
 		t.Fatalf("InsertBatch: %v", err)
 	}
@@ -389,6 +565,9 @@ func TestAPIActivity(t *testing.T) {
 	}
 	if data.SampleSize != 2 || data.FailedCount != 1 || data.P95LatencyMs != 300 || data.LatestErrorStatus != 500 {
 		t.Fatalf("activity response = %+v, want sample=2 failed=1 p95=300 latest=500", data)
+	}
+	if data.LatestErrorClass != "upstream_5xx" || data.LatestErrorCode != "internal_error" {
+		t.Fatalf("activity latest diagnostic = class %q code %q, want upstream_5xx/internal_error", data.LatestErrorClass, data.LatestErrorCode)
 	}
 }
 

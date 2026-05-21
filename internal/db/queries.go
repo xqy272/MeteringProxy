@@ -80,7 +80,7 @@ func (db *DB) Overview(since time.Time) *OverviewRow {
 				`+effectiveModelExpr+`,
 				`+modelSourceExpr+`,
 				COALESCE(NULLIF(TRIM(error_class), ''), 'unknown'),
-				COALESCE(NULLIF(TRIM(error_message), ''), error, ''),
+				COALESCE(NULLIF(TRIM(error_code), ''), NULLIF(TRIM(error_type), ''), NULLIF(TRIM(error_class), ''), error, ''),
 				COALESCE(request_id, '')
 			FROM request_usage
 			WHERE created_at_unix >= ? AND status >= 400
@@ -138,7 +138,7 @@ func (db *DB) Issues(since time.Time, limit int) ([]IssueRow, error) {
 				CASE WHEN NULLIF(TRIM(model_requested), '') IS NOT NULL THEN 1 ELSE 0 END AS requested_present,
 				COALESCE(error_type, '') AS error_type,
 				COALESCE(error_code, '') AS error_code,
-				COALESCE(error_message, '') AS error_message,
+				COALESCE(NULLIF(TRIM(error_code), ''), NULLIF(TRIM(error_type), ''), NULLIF(TRIM(error_class), ''), '') AS error_message,
 				COALESCE(request_id, '') AS request_id
 			FROM request_usage
 			WHERE created_at_unix >= ? AND (
@@ -195,7 +195,9 @@ func (db *DB) Issues(since time.Time, limit int) ([]IssueRow, error) {
 			AND latest.api_key_hash = agg.api_key_hash
 		ORDER BY
 			CASE
-				WHEN agg.class IN ('auth_failed', 'quota_exhausted', 'proxy_upstream_error', 'db_write_error', 'response_error_event') THEN 0
+				WHEN agg.class IN ('auth_failed', 'quota_exhausted', 'proxy_upstream_error', 'proxy_connection_refused',
+					'proxy_connection_reset', 'proxy_timeout', 'proxy_dns_error', 'proxy_network_unreachable',
+					'proxy_tls_error', 'proxy_connection_closed', 'db_write_error', 'response_error_event') THEN 0
 				WHEN agg.class IN ('rate_limited', 'upstream_5xx', 'context_length', 'capture_parse_error', 'dropped_event',
 					'response_completed_without_usage', 'stream_ended_without_completed', 'response_incomplete',
 					'capture_failed', 'parse_error', 'usage_not_present') THEN 1
@@ -288,6 +290,7 @@ func (db *DB) appendCredentialIssues(result []IssueRow, since time.Time) []Issue
 			CASE status
 				WHEN 'error' THEN 'credential_error'
 				WHEN 'stale' THEN 'credential_stale'
+				WHEN 'disabled' THEN 'credential_disabled'
 				ELSE 'credential_unavailable'
 			END AS class,
 			COUNT(*) AS count,
@@ -295,9 +298,9 @@ func (db *DB) appendCredentialIssues(result []IssueRow, since time.Time) []Issue
 			COALESCE(provider, '') AS endpoint,
 			COALESCE(error_class, '') AS message
 		FROM credential_health
-		WHERE checked_at_unix >= ? AND status IN ('unavailable', 'disabled', 'error', 'stale')
+		WHERE status IN ('unavailable', 'disabled', 'error', 'stale')
 		GROUP BY class, provider, error_class
-	`, since.Unix())
+	`)
 	if err != nil {
 		return result
 	}
@@ -321,6 +324,8 @@ func (db *DB) appendQuotaIssues(result []IssueRow, since time.Time) []IssueRow {
 				WHEN 'low' THEN 'quota_low'
 				WHEN 'exhausted' THEN 'quota_exhausted'
 				WHEN 'stale' THEN 'quota_stale'
+				WHEN 'unsupported' THEN 'quota_unsupported'
+				WHEN 'unknown' THEN 'quota_unknown'
 				ELSE 'quota_refresh_failed'
 			END AS class,
 			COUNT(*) AS count,
@@ -328,8 +333,36 @@ func (db *DB) appendQuotaIssues(result []IssueRow, since time.Time) []IssueRow {
 			COALESCE(provider, '') AS endpoint,
 			COALESCE(error_class, '') AS message
 		FROM quota_current
-		WHERE checked_at_unix >= ? AND status IN ('low', 'exhausted', 'error', 'stale')
+		WHERE status IN ('low', 'exhausted', 'error', 'stale', 'unsupported', 'unknown')
 		GROUP BY class, provider, error_class
+	`)
+	if err != nil {
+		return db.appendQuotaRefreshIssues(result, since)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var r IssueRow
+		if err := rows.Scan(&r.Class, &r.Count, &r.LatestAt, &r.Endpoint, &r.Message); err == nil {
+			r.Label = classLabel(r.Class)
+			r.Severity = classSeverity(r.Class)
+			r.SourceGroup = "quota"
+			result = append(result, r)
+		}
+	}
+	return db.appendQuotaRefreshIssues(result, since)
+}
+
+func (db *DB) appendQuotaRefreshIssues(result []IssueRow, since time.Time) []IssueRow {
+	rows, err := db.read.Query(`
+		SELECT
+			'quota_refresh_failed' AS class,
+			COUNT(*) AS count,
+			MAX(COALESCE(checked_at, '')) AS latest_at,
+			COALESCE(provider, '') AS endpoint,
+			COALESCE(NULLIF(TRIM(error_class), ''), NULLIF(TRIM(adapter_status), ''), 'quota_refresh_failed') AS message
+		FROM quota_refresh_events
+		WHERE checked_at_unix >= ? AND status = 'error'
+		GROUP BY provider, message
 	`, since.Unix())
 	if err != nil {
 		return result
@@ -386,6 +419,20 @@ func classLabel(class string) string {
 		return "Upstream 5xx error"
 	case "proxy_upstream_error":
 		return "Proxy upstream error"
+	case "proxy_connection_refused":
+		return "Proxy connection refused"
+	case "proxy_connection_reset":
+		return "Proxy connection reset"
+	case "proxy_timeout":
+		return "Proxy upstream timeout"
+	case "proxy_dns_error":
+		return "Proxy DNS error"
+	case "proxy_network_unreachable":
+		return "Proxy network unreachable"
+	case "proxy_tls_error":
+		return "Proxy TLS error"
+	case "proxy_connection_closed":
+		return "Proxy connection closed"
 	case "capture_parse_error":
 		return "Capture parse error"
 	case "db_write_error":
@@ -402,12 +449,18 @@ func classLabel(class string) string {
 		return "Response incomplete"
 	case "credential_unavailable":
 		return "Credential unavailable"
+	case "credential_disabled":
+		return "Credential disabled"
 	case "quota_low":
 		return "Quota low"
 	case "quota_refresh_failed":
 		return "Quota refresh failed"
 	case "quota_stale":
 		return "Quota data stale"
+	case "quota_unsupported":
+		return "Quota unsupported"
+	case "quota_unknown":
+		return "Quota unknown"
 	case "credential_error":
 		return "Credential health error"
 	case "credential_stale":
@@ -429,11 +482,13 @@ func classLabel(class string) string {
 
 func classSeverity(class string) string {
 	switch class {
-	case "auth_failed", "quota_exhausted", "proxy_upstream_error", "db_write_error", "response_error_event", "credential_error", "usage_conflict":
+	case "auth_failed", "quota_exhausted", "proxy_upstream_error", "proxy_connection_refused", "proxy_connection_reset",
+		"proxy_timeout", "proxy_dns_error", "proxy_network_unreachable", "proxy_tls_error", "db_write_error",
+		"response_error_event", "credential_error", "credential_disabled", "usage_conflict":
 		return "error"
 	case "rate_limited", "upstream_5xx", "context_length", "capture_parse_error", "dropped_event",
 		"response_completed_without_usage", "stream_ended_without_completed", "response_incomplete",
-		"credential_unavailable", "credential_stale", "quota_low", "quota_refresh_failed", "quota_stale",
+		"proxy_connection_closed", "credential_unavailable", "credential_stale", "quota_low", "quota_refresh_failed", "quota_stale", "quota_unsupported", "quota_unknown",
 		"side_channel_expired", "side_channel_invalid_payload", "side_channel_unmatched":
 		return "warning"
 	default:

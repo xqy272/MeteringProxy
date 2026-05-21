@@ -73,6 +73,8 @@ type ActivityReport struct {
 	LatestErrorStatus   int     `json:"latest_error_status"`
 	LatestErrorAt       string  `json:"latest_error_at"`
 	LatestError         string  `json:"latest_error"`
+	LatestErrorClass    string  `json:"latest_error_class"`
+	LatestErrorCode     string  `json:"latest_error_code"`
 	LatestErrorEndpoint string  `json:"latest_error_endpoint"`
 	LatestErrorModel    string  `json:"latest_error_model"`
 }

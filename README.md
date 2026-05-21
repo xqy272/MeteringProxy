@@ -304,6 +304,8 @@ docker exec caddy caddy reload --config /etc/caddy/Caddyfile
 docker ps -a --filter name=metering-proxy
 docker logs metering-proxy
 curl -s http://127.0.0.1:8320/metering/api/health
+curl -s http://127.0.0.1:8320/metering/api/overview?range=24h
+curl -s http://127.0.0.1:8320/metering/api/issues?range=24h
 curl -s http://127.0.0.1:8320/metering/api/summary?range=24h
 curl -s http://127.0.0.1:8320/metering/api/quota
 curl -s http://127.0.0.1:8320/metering/api/observability
@@ -405,6 +407,8 @@ chmod 600 /opt/ai-gateway/metering/usage.sqlite
 - API Key 和客户端 IP 的 HMAC-SHA256 加盐哈希
 - 请求模型与返回模型名称
 - 输入、输出、缓存、推理及总 token 数量
+- 多模态用量维度（如 image/text/audio channel、direction、unit、amount）
+- 图片请求事实（operation、size、quality、format、图片数量、输入图片数量、mask 是否存在）
 - 请求/响应字节数
 - 错误分类及 provider type/code/param（如有；不落库 provider 原始 message）
 
@@ -440,7 +444,7 @@ chmod 600 /opt/ai-gateway/metering/usage.sqlite
 | `cliproxy_management.usage_queue.transport` | `auto` | usage queue 消费方式：`auto` 优先 HTTP；`resp` 仅旧 CPA 兼容，v7.1.17 起不可用 |
 | `cliproxy_management.usage_queue.merge_mode` | `stored_only` | 默认仅存 side event；request-id 传播验证后才可设为 `request_id` |
 | `cliproxy_management.credential_health.enabled` | `true` | 从 `auth-files` 同步凭证健康 |
-| `cliproxy_management.quota.enabled` | `false` | 完整 quota 快照；无 provider-specific adapter 时保持关闭 |
+| `cliproxy_management.quota.enabled` | `false` | 完整 quota 快照开关；只有 provider adapter 产出受支持的 quota 行时才报告 `full_quota_available=true` |
 
 ## WebUI
 
@@ -451,6 +455,8 @@ chmod 600 /opt/ai-gateway/metering/usage.sqlite
 
 | 端点 | 说明 |
 |---|---|
+| `GET /metering/api/overview?range=24h\|today\|7d\|30d` | 首屏总览、最近 1h、采集健康、成本完整性 |
+| `GET /metering/api/issues?range=...&limit=20` | 请求、采集、side-channel、凭证和 quota 问题聚合 |
 | `GET /metering/api/summary?range=24h\|today\|7d\|30d` | 用量摘要 |
 | `GET /metering/api/timeseries?range=...&bucket=10m\|1h\|1d` | 时序数据（请求数、token、延迟） |
 | `GET /metering/api/activity?range=...` | 成功率、P95 延迟、capture 健康 |
@@ -471,7 +477,11 @@ chmod 600 /opt/ai-gateway/metering/usage.sqlite
 
 健康状态计数器为进程生命期计数器，容器重启后从零开始。
 
-WebUI 为只读面板，不修改配置或数据库。页面默认展示请求总览、token 堆叠趋势、请求趋势、模型成本占比、API Key 维度、请求健康摘要。最近 100 条请求明细默认隐藏，仅在点击展开后查询。WebUI 支持中英文切换，语言偏好保存在浏览器本地；页面右上角提供项目 GitHub 链接。
+Quota API 的 `full_quota_available=true` 仅表示后台已拿到受支持的 provider quota 行；如果 CPA `/api-call` 不可用、adapter 未验证或只存在凭证健康数据，API 会返回 `phase=credential_health`，并通过 `module_status=partial|unavailable|disabled` 表达降级状态。一个凭证可以有多条 quota 行，例如订阅常见的 `5h` 窗口和 `weekly` 周限额；WebUI 会按凭证聚合这些窗口，优先展示短窗口压力，再展示周限额和重置时间。
+
+请求错误展示优先使用 `error_class` / `error_code`，HTTP status 只作为传输层事实保留。例如代理连接失败会细分为 `proxy_connection_refused`、`proxy_timeout`、`proxy_dns_error` 等，而不是只在 UI 中显示 `502`。
+
+WebUI 为只读面板，不修改配置或数据库。页面默认展示请求总览、成本/Token/请求趋势、模型分布、图片计量、API Key 维度、近期问题、凭证/额度与采集诊断。最近 100 条请求明细默认隐藏，仅在点击展开或从 issue 卡片进入时查询。WebUI 支持中英文切换，语言偏好保存在浏览器本地；页面右上角提供项目 GitHub 链接。
 
 后端为 `/metering/api/*` 设置不可缓存响应头。若页面顶部显示 `Partial` 或 `Error`，说明至少一个 API 请求失败，其余面板仍会继续展示。排查时优先检查反向代理是否缓存了 `/metering/api/*`，以及 Basic Auth 凭据是否正确传递。
 
@@ -625,7 +635,8 @@ go run . --config config.dev.yaml --dev-static
 ```
 
 - `--dev-static`：静态文件从 `internal/webui/static/` 磁盘路径加载，非内嵌文件系统。
-- `--seed-demo`：向数据库插入约 220 条模拟记录。要求同时传 `--dev-static`，且数据库文件名必须以 `.dev.sqlite` 结尾、不可用绝对路径。
+- `--seed-demo`：向数据库插入约 220 条模拟请求记录，并写入演示用凭证健康、`5h`/`weekly` 额度快照和 quota refresh 诊断行。要求同时传 `--dev-static`，且数据库文件名必须以 `.dev.sqlite` 结尾、不可用绝对路径。
+- 当 `--seed-demo` 未启用真实 `cliproxy_management` 时，WebUI 会使用这些演示快照展示凭证健康与额度状态；不传该 flag 时生产行为完全不变。
 - `config.dev.yaml`：本地开发配置，监听 `127.0.0.1:8320`，使用本地 `salt`、`pricing.yaml` 及 `usage.dev.sqlite`。已加入 `.gitignore`。
 - 两个 flag 默认均为 `false`，不传时生产行为完全不变。
 

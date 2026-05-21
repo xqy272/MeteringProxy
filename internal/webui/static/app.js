@@ -109,6 +109,152 @@ function fmtTime(v) { if(!v)return'-'; const d=new Date(v); return isNaN(d)?v:d.
 function fmtShort(v) { if(!v)return'-'; const d=new Date(v); return isNaN(d)?v:d.toLocaleString(locale(),{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}); }
 function shortHash(h) { return h ? String(h).slice(0,10)+'...' : '-'; }
 function modelName(m) { return !m||m==='unknown'||m==='unidentified' ? t('model.unidentified') : m; }
+function statusBadgeClass(status) {
+  status=String(status||'').toLowerCase();
+  if(['ok','ready','available','connected','healthy'].includes(status)) return 'ok';
+  if(['warning','low','stale','unknown','unsupported','partial'].includes(status)) return 'warn';
+  if(['error','exhausted','unavailable','disabled','disconnected'].includes(status)) return 'err';
+  return 'neutral';
+}
+function moduleStatusLabel(status) {
+  status=String(status||'disabled').toLowerCase();
+  if(status==='available') return t('obs.available');
+  if(status==='unavailable') return t('obs.unavailable');
+  if(status==='disabled') return t('obs.disabled');
+  return t('obs.partial');
+}
+function errorDiagnosticLabel(row) {
+  return row && (row.error_code || row.latest_error_code || row.error_class || row.latest_error_class || row.error_type || row.latest_error || row.error || '');
+}
+function quotaWindowRank(key) {
+  key=String(key||'').toLowerCase();
+  if(key.includes('5h')||key.includes('5_hour')||key.includes('five')) return 0;
+  if(key.includes('week')) return 1;
+  if(key.includes('day')) return 2;
+  if(key.includes('month')) return 3;
+  return 9;
+}
+function quotaWindowLabel(key) {
+  const raw=String(key||'').trim();
+  const k=raw.toLowerCase();
+  if(k.includes('5h')||k.includes('5_hour')||k.includes('five')) return t('quota.window_5h');
+  if(k.includes('week')) return t('quota.window_weekly');
+  if(k.includes('day')) return t('quota.window_daily');
+  if(k.includes('month')) return t('quota.window_monthly');
+  return raw || '-';
+}
+function quotaResetText(reset) {
+  return reset ? t('quota.resets_at',{time:fmtShort(reset)}) : t('quota.no_reset');
+}
+function quotaStatusClass(status) {
+  status=String(status||'').toLowerCase();
+  if(status==='exhausted') return 'exhausted';
+  if(status==='low'||status==='warning') return 'low';
+  if(status==='unsupported'||status==='unknown'||status==='stale') return 'warn';
+  if(status==='error'||status==='unavailable'||status==='disabled') return 'err';
+  return 'ok';
+}
+function quotaStatusRank(row) {
+  const status=String((row&&row.status)||(row&&row.adapter_status)||'').toLowerCase();
+  if(status==='exhausted') return 0;
+  if(status==='error'||status==='unavailable'||status==='disabled') return 1;
+  if(status==='low'||status==='warning') return 2;
+  if(status==='unsupported'||status==='unknown'||status==='stale') return 3;
+  return 4;
+}
+function quotaRowCompare(a,b) {
+  const wr=quotaWindowRank(a.window_key)-quotaWindowRank(b.window_key);
+  if(wr) return wr;
+  const sr=quotaStatusRank(a)-quotaStatusRank(b);
+  if(sr) return sr;
+  return String(a.window_key||'').localeCompare(String(b.window_key||''));
+}
+function quotaMetric(row) {
+  const limit=Number(row&&row.limit_amount||0);
+  const remaining=Number(row&&row.remaining_amount||0);
+  const hasQuota=limit>0;
+  const pct=hasQuota?Math.max(0,Math.min(100,Math.round(remaining/limit*100))):0;
+  return { limit, remaining, hasQuota, pct };
+}
+function quotaAmountLabel(row) {
+  const m=quotaMetric(row);
+  if(!m.hasQuota) return String((row&&row.status)||'').toLowerCase()==='unsupported'?t('quota.unsupported'):'-';
+  return `${fmtNum(m.remaining)} / ${fmtNum(m.limit)}`;
+}
+function quotaWindowReset(row) {
+  return (row&&row.reset_at)||(row&&row.expires_at)||'';
+}
+function quotaGroups(items) {
+  const map=new Map();
+  items.forEach(row=>{
+    const credential=row.credential_hash||row.auth_index_hash||row.label_hash||'';
+    const key=[row.provider||'',credential,row.plan||''].join('\u0001');
+    if(!map.has(key)) map.set(key,{ provider:row.provider||'-', credential, plan:row.plan||'-', rows:[] });
+    map.get(key).rows.push(row);
+  });
+  return Array.from(map.values()).map(group=>{
+    group.rows=group.rows.slice().sort(quotaRowCompare);
+    group.primary=group.rows.slice().sort((a,b)=>quotaStatusRank(a)-quotaStatusRank(b)||quotaRowCompare(a,b))[0]||{};
+    return group;
+  }).sort((a,b)=>{
+    const pc=String(a.provider||'').localeCompare(String(b.provider||''));
+    if(pc) return pc;
+    const sr=quotaStatusRank(a.primary)-quotaStatusRank(b.primary);
+    if(sr) return sr;
+    return String(a.credential||'').localeCompare(String(b.credential||''));
+  });
+}
+function quotaLatest(rows, field) {
+  return rows.map(row=>row&&row[field]).filter(Boolean).sort((a,b)=>new Date(b).getTime()-new Date(a).getTime())[0]||'';
+}
+function quotaNextReset(rows) {
+  return rows.map(quotaWindowReset).filter(Boolean).sort((a,b)=>new Date(a).getTime()-new Date(b).getTime())[0]||'';
+}
+function quotaMeterHTML(row) {
+  const m=quotaMetric(row);
+  const qClass=quotaStatusClass((row&&row.status)||(row&&row.adapter_status));
+  const unit=row&&row.unit?`<div class="quota-unit">${esc(row.unit)}</div>`:'';
+  if(!m.hasQuota) return `<div class="quota-empty mono">${esc(quotaAmountLabel(row))}</div>${unit}`;
+  return `<div class="quota-meter ${qClass}" style="--pct:${m.pct}%"><span></span><strong class="mono">${esc(quotaAmountLabel(row))}</strong></div>${unit}`;
+}
+function quotaWindowItemHTML(row, compact) {
+  const status=(row&&row.status)||(row&&row.adapter_status)||'-';
+  const qClass=quotaStatusClass(status);
+  const window=row&&row.window_key?row.window_key:'-';
+  const reset=quotaWindowReset(row);
+  const title=[row&&row.adapter_status,row&&row.error_class,quotaWindowLabel(window),quotaResetText(reset)].filter(Boolean).join(' / ');
+  return `<div class="quota-window-item ${compact?'compact':''} ${qClass}">
+    <div class="quota-window-line">
+      <div>
+        <div class="quota-window ${qClass}">${esc(quotaWindowLabel(window))}</div>
+        <div class="quota-window-sub mono">${esc(window)}</div>
+      </div>
+      <span class="badge ${statusBadgeClass(status)}" title="${esc(title)}">${esc(status)}</span>
+    </div>
+    ${quotaMeterHTML(row)}
+    <div class="quota-window-foot">${esc(quotaResetText(reset))}</div>
+  </div>`;
+}
+function renderQuotaSummary(groups) {
+  const el=$('quota-window-summary');
+  if(!el) return;
+  if(!groups.length){ el.innerHTML=''; return; }
+  el.innerHTML=groups.map(group=>{
+    const primary=group.primary||{};
+    const status=primary.status||primary.adapter_status||'-';
+    const title=[primary.adapter_status,primary.error_class].filter(Boolean).join(' / ');
+    return `<div class="quota-account ${quotaStatusClass(status)}">
+      <div class="quota-account-head">
+        <div>
+          <div class="quota-account-title">${esc(group.provider)}</div>
+          <div class="quota-account-sub"><code>${esc(shortHash(group.credential))}</code>${group.plan&&group.plan!=='-'?`<span>${esc(group.plan)}</span>`:''}</div>
+        </div>
+        <span class="badge ${statusBadgeClass(status)}" title="${esc(title)}">${esc(status)}</span>
+      </div>
+      <div class="quota-account-windows">${group.rows.map(row=>quotaWindowItemHTML(row,false)).join('')}</div>
+    </div>`;
+  }).join('');
+}
 
 /* --- Status / refresh -------------------------------------- */
 function setStatus(kind, title, detail) {
@@ -218,8 +364,9 @@ async function loadActivity() {
   setText('capture-issues', fmtFull(capF+capS));
   setText('capture-issues-detail', t('metric.capture_failed_skipped',{failed:fmtFull(capF),skipped:fmtFull(capS)}));
   if(Number(data.latest_error_status||0)>0) {
-    $('latest-error-status').innerHTML=`<span class="badge err">${esc(data.latest_error_status)}</span>`;
-    $('latest-error-detail').textContent=[fmtShort(data.latest_error_at),data.latest_error_endpoint||'',data.latest_error_model||''].filter(Boolean).join(' / ');
+    const diag=errorDiagnosticLabel(data)||String(data.latest_error_status);
+    $('latest-error-status').innerHTML=`<span class="badge err" title="HTTP ${esc(data.latest_error_status)}">${esc(diag)}</span>`;
+    $('latest-error-detail').textContent=[fmtShort(data.latest_error_at),'HTTP '+data.latest_error_status,data.latest_error_endpoint||'',data.latest_error_model||''].filter(Boolean).join(' / ');
   } else {
     $('latest-error-status').innerHTML=`<span class="badge ok">${esc(t('badge.none'))}</span>`;
     $('latest-error-detail').textContent=t('metric.no_request_errors');
@@ -332,12 +479,15 @@ async function loadRequests() {
   if(!rows.length){tbody.innerHTML=emptyRow(11,t('state.no_matching_requests'),t('state.adjust_filters'));return;}
   tbody.innerHTML=rows.map(r=>{
     const sc=r.status<400?'ok':r.status<500?'warn':'err';
+    const diag=errorDiagnosticLabel(r);
+    const statusTitle=[diag&&`error:${diag}`,r.error_type&&`type:${r.error_type}`,r.error_param&&`param:${r.error_param}`].filter(Boolean).join(' / ');
+    const statusCell=`<span class="badge ${sc}" title="${esc(statusTitle)}">${esc(r.status)}</span>${diag?`<div class="request-error-code">${esc(diag)}</div>`:''}`;
     const md2=modelName(r.model_returned||r.model_requested||'unidentified');
     const sourceBits=[r.model_returned_source&&`model:${r.model_returned_source}`,r.usage_source&&`usage:${r.usage_source}`,r.terminal_event&&`terminal:${r.terminal_event}`,r.side_usage_event_id&&`side:${r.side_usage_event_id}`].filter(Boolean);
     const capTitle=[r.capture_reason&&`reason:${r.capture_reason}`,r.terminal_reason&&`terminal_reason:${r.terminal_reason}`].concat(sourceBits).filter(Boolean).join(' / ');
     const cap=r.capture_outcome==='captured'?`<span class="badge ok" title="${esc(capTitle)}">${esc(t('badge.captured'))}</span>`:r.capture_outcome==='failed'?`<span class="badge err" title="${esc(capTitle)}">${esc(t('badge.failed'))}</span>`:r.capture_outcome==='skipped'?`<span class="badge warn" title="${esc(capTitle)}">${esc(t('badge.skipped'))}</span>`:`<span class="badge neutral" title="${esc(capTitle)}">${esc(r.capture_reason||t('badge.not_recorded'))}</span>`;
     const ep2=r.stream?`${esc(r.endpoint)} <span class="badge info">SSE</span>`:esc(r.endpoint);
-    return `<tr><td class="mono">${esc(fmtTime(r.created_at))}</td><td><span class="badge ${sc}">${esc(r.status)}</span></td><td>${ep2}</td><td><div class="model-name" title="${esc(sourceBits.join(' / ')||md2)}">${esc(md2)}</div>${sourceBits.length?`<div class="model-source">${esc(sourceBits.slice(0,2).join(' / '))}</div>`:''}</td><td class="numeric mono">${fmtNum(r.input_tokens)}</td><td class="numeric mono">${fmtNum(r.output_tokens)}</td><td class="numeric mono">${fmtNum(r.total_tokens)}</td><td class="numeric mono">${fmtLat(r.ttfb_ms)}</td><td class="numeric mono">${fmtLat(r.latency_ms)}</td><td>${cap}</td><td><code>${esc(shortHash(r.api_key_hash))}</code></td></tr>`;
+    return `<tr><td class="mono">${esc(fmtTime(r.created_at))}</td><td>${statusCell}</td><td>${ep2}</td><td><div class="model-name" title="${esc(sourceBits.join(' / ')||md2)}">${esc(md2)}</div>${sourceBits.length?`<div class="model-source">${esc(sourceBits.slice(0,2).join(' / '))}</div>`:''}</td><td class="numeric mono">${fmtNum(r.input_tokens)}</td><td class="numeric mono">${fmtNum(r.output_tokens)}</td><td class="numeric mono">${fmtNum(r.total_tokens)}</td><td class="numeric mono">${fmtLat(r.ttfb_ms)}</td><td class="numeric mono">${fmtLat(r.latency_ms)}</td><td>${cap}</td><td><code>${esc(shortHash(r.api_key_hash))}</code></td></tr>`;
   }).join('');
 }
 
@@ -745,9 +895,11 @@ async function loadIssues() {
       const cls=item.class||'unknown';
       const source=item.source_group||item.scope||'system';
       const key=source+'::'+cls;
-      const g=groups.get(key)||{class:cls,source,label:issueClassLabel(cls,item.label),count:0,latestAt:'',messages:[],models:new Set(),endpoints:new Set(),statuses:new Set(),systemOnly:true};
+      const g=groups.get(key)||{class:cls,source,label:issueClassLabel(cls,item.label),count:0,latestAt:'',messages:[],codes:new Set(),models:new Set(),endpoints:new Set(),statuses:new Set(),systemOnly:true};
       g.count+=Number(item.count||0);
       if((Date.parse(item.latest_at||'')||0)>(Date.parse(g.latestAt||'')||0)) g.latestAt=item.latest_at||g.latestAt;
+      const diag=errorDiagnosticLabel(item);
+      if(diag) g.codes.add(diag);
       if(item.message||item.error_code||item.error_type) g.messages.push(item.message||item.error_code||item.error_type);
       if(item.model) g.models.add(modelName(item.model));
       if(item.endpoint) g.endpoints.add(item.endpoint);
@@ -759,9 +911,9 @@ async function loadIssues() {
     list.classList.remove('hidden');
     list.innerHTML=`<div class="issue-class-head">${esc(issueSevLabel(selectedIssueSeverity))}${esc(t('issues.class_breakdown_suffix'))}</div>
       <div class="issue-filter-grid">${rows.map(g=>{
-        const bits=[...g.statuses].slice(0,2).concat([...g.models].slice(0,1),[...g.endpoints].slice(0,1)).filter(Boolean);
+        const bits=[...g.codes].slice(0,2).concat([...g.statuses].slice(0,1).map(s=>'HTTP '+s),[...g.models].slice(0,1),[...g.endpoints].slice(0,1)).filter(Boolean);
         const detail=[g.source,bits.join(' / ') || (g.systemOnly?t('issues.scope_process'):t('issues.no_message'))].filter(Boolean).join(' / ');
-        const msg=g.messages[0]||'';
+        const msg=(g.messages[0]&&!g.codes.has(g.messages[0]))?g.messages[0]:'';
         const active=currentIssueClassFilter===g.class;
         const cardClass=g.systemOnly?'issue-filter-card':`issue-filter-card clickable ${active?'active':''}`;
         const attrs=g.systemOnly?'':` role="button" tabindex="0" data-issue-class="${esc(g.class)}"`;
@@ -817,34 +969,42 @@ async function loadQuota() {
   const data=await fetchJSON('quota');
   latestQuota=data;
   const phase=data.phase||'-';
-  const items=Array.isArray(data.items)?data.items:[];
-  setText('quota-state',data.full_quota_available?t('obs.available'):data.module_status==='disabled'?t('obs.disabled'):t('obs.partial'));
-  setText('quota-detail',phase);
-  setText('observability-summary',t('obs.summary',{phase,quota:items.length}));
+  const items=(Array.isArray(data.items)?data.items:[]).slice().sort((a,b)=>{
+    const pc=String(a.provider||'').localeCompare(String(b.provider||''));
+    if(pc) return pc;
+    const ac=String(a.credential_hash||a.auth_index_hash||a.label_hash||'').localeCompare(String(b.credential_hash||b.auth_index_hash||b.label_hash||''));
+    if(ac) return ac;
+    return quotaRowCompare(a,b);
+  });
+  const groups=quotaGroups(items);
+  const moduleStatus=data.module_status||'disabled';
+  const moduleLabel=moduleStatusLabel(moduleStatus);
+  setText('quota-state',moduleLabel);
+  setText('quota-detail',data.full_quota_available?t('obs.full_quota'):phase);
+  setText('observability-summary',t('obs.summary',{phase:moduleLabel,quota:items.length}));
+  renderQuotaSummary(groups);
   const table=$('quota-table');
   if(!table) return;
   if(!items.length){
-    table.innerHTML=`<tr><td colspan="11" class="empty-state">${esc(t('state.no_quota_data'))}</td></tr>`;
+    const empty = moduleStatus==='disabled'?t('state.quota_disabled'):moduleStatus==='unavailable'?t('state.quota_unavailable'):t('state.no_quota_data');
+    table.innerHTML=`<tr><td colspan="7" class="empty-state">${esc(empty)}</td></tr>`;
     return;
   }
-  table.innerHTML=items.map(row=>{
-    const remaining=row.remaining_amount!=null?fmtNum(row.remaining_amount):'-';
-    const limit=row.limit_amount!=null?fmtNum(row.limit_amount):'-';
-    const credential=shortHash(row.credential_hash||row.auth_index_hash||row.label_hash||'');
-    const window=row.window_key||'-';
-    const reset=row.reset_at||row.expires_at||'';
+  table.innerHTML=groups.map(group=>{
+    const primary=group.primary||{};
+    const status=primary.status||primary.adapter_status||'-';
+    const qClass=quotaStatusClass(status);
+    const statusTitle=[primary.adapter_status,primary.error_class,primary.error_message].filter(Boolean).join(' / ');
+    const reset=quotaNextReset(group.rows);
+    const checked=quotaLatest(group.rows,'checked_at');
     return `<tr>
-      <td>${esc(row.provider||'-')}</td>
-      <td><span class="badge ${row.status==='ok'||row.status==='ready'?'ok':row.status==='low'||row.status==='warning'?'warn':'err'}">${esc(row.status||'-')}</span></td>
-      <td><code>${esc(credential)}</code></td>
-      <td class="mono">${esc(window)}</td>
-      <td>${esc(row.plan||'-')}</td>
-      <td class="numeric mono">${esc(remaining)}</td>
-      <td class="numeric mono">${esc(limit)}</td>
-      <td class="numeric mono">${fmtFull(row.success_count||0)}</td>
-      <td class="numeric mono">${fmtFull(row.failed_count||0)}</td>
-      <td class="mono">${esc(fmtShort(reset))}</td>
-      <td class="mono">${esc(fmtShort(row.checked_at))}</td>
+      <td>${esc(group.provider||'-')}</td>
+      <td><span class="badge ${statusBadgeClass(status)}" title="${esc(statusTitle)}">${esc(status)}</span></td>
+      <td><code>${esc(shortHash(group.credential))}</code></td>
+      <td>${esc(group.plan||'-')}</td>
+      <td><div class="quota-window-stack ${qClass}">${group.rows.map(row=>quotaWindowItemHTML(row,true)).join('')}</div></td>
+      <td class="mono">${esc(reset?fmtShort(reset):'-')}</td>
+      <td class="mono">${esc(fmtShort(checked))}</td>
     </tr>`;
   }).join('');
 }
@@ -857,8 +1017,10 @@ async function loadObservability() {
   setText('side-channel-detail',side.enabled?`${side.merge_mode||'-'} / ${side.last_error||t('obs.no_error')}`:'-');
   setText('credential-state',cred.enabled?t('obs.enabled'):t('obs.disabled'));
   setText('credential-detail',cred.enabled?t('obs.credential_counts',{unavailable:fmtFull(cred.unavailable_count||0),errors:fmtFull(cred.error_count||0)}):'-');
-  setText('quota-state',quota.enabled?(quota.full_quota_available?t('obs.available'):t('obs.partial')):t('obs.disabled'));
-  setText('quota-detail',quota.enabled?`${quota.phase||'-'} / ${t('obs.stale_errors',{stale:fmtFull(quota.stale_count||0),errors:fmtFull(quota.error_count||0)})}`:'-');
+  const quotaStatus=quota.enabled?(quota.module_status||(quota.full_quota_available?'available':'partial')):'disabled';
+  const quotaPhase=quota.full_quota_available?t('obs.full_quota'):(quota.phase||'-');
+  setText('quota-state',moduleStatusLabel(quotaStatus));
+  setText('quota-detail',quota.enabled?`${quotaPhase} / ${t('obs.stale_errors',{stale:fmtFull(quota.stale_count||0),errors:fmtFull(quota.error_count||0)})}`:'-');
   setText('capture-state',fmtFull(Number(capture.captured_1h||0)));
   setText('capture-state-detail',t('obs.capture_counts',{skipped:fmtFull(capture.skipped_1h||0),failed:fmtFull(capture.failed_1h||0)}));
 }

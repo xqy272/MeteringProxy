@@ -229,6 +229,14 @@ func main() {
 		if quotaPoller != nil {
 			webuiServer.SetQuotaPoller(quotaPoller)
 		}
+		if *seedDemo {
+			if credPoller == nil {
+				webuiServer.SetCredPoller(demoCredentialPoller{database: database})
+			}
+			if quotaPoller == nil {
+				webuiServer.SetQuotaPoller(demoQuotaPoller{database: database})
+			}
+		}
 		if usageQueuePoller != nil {
 			webuiServer.SetUsageQueuePoller(usageQueuePoller)
 		}
@@ -273,4 +281,65 @@ func main() {
 		log.Fatalf("Server error: %v", err)
 	}
 	log.Println("Server stopped")
+}
+
+type demoCredentialPoller struct {
+	database *db.DB
+}
+
+func (p demoCredentialPoller) Snapshot() ([]db.CredentialHealthRow, time.Time) {
+	rows, err := p.database.AllCredentialHealth()
+	if err != nil {
+		log.Printf("demo credential snapshot error: %v", err)
+		return nil, time.Time{}
+	}
+	return rows, latestCredentialCheck(rows)
+}
+
+func (p demoCredentialPoller) Refresh() {}
+
+type demoQuotaPoller struct {
+	database *db.DB
+}
+
+func (p demoQuotaPoller) Snapshot() ([]db.QuotaCurrentRow, time.Time, bool) {
+	rows, err := p.database.AllQuotaCurrent()
+	if err != nil {
+		log.Printf("demo quota snapshot error: %v", err)
+		return nil, time.Time{}, false
+	}
+	return rows, latestQuotaCheck(rows), len(rows) > 0
+}
+
+func (p demoQuotaPoller) APICallAvailable() bool {
+	rows, err := p.database.AllQuotaCurrent()
+	return err == nil && len(rows) > 0
+}
+
+func (p demoQuotaPoller) Refresh() {}
+
+func latestCredentialCheck(rows []db.CredentialHealthRow) time.Time {
+	var latestUnix int64
+	for _, row := range rows {
+		if row.CheckedAtUnix > latestUnix {
+			latestUnix = row.CheckedAtUnix
+		}
+	}
+	if latestUnix <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(latestUnix, 0).UTC()
+}
+
+func latestQuotaCheck(rows []db.QuotaCurrentRow) time.Time {
+	var latestUnix int64
+	for _, row := range rows {
+		if row.CheckedAtUnix > latestUnix {
+			latestUnix = row.CheckedAtUnix
+		}
+	}
+	if latestUnix <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(latestUnix, 0).UTC()
 }

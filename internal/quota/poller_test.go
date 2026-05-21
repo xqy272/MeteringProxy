@@ -81,7 +81,7 @@ func TestUnsupportedProviderWritesUnsupportedQuotaRow(t *testing.T) {
 		t.Fatalf("rows = %d, want 1", len(store.rows))
 	}
 	row := store.rows[0]
-	if row.AdapterStatus != "unsupported" || row.QuotaSupported != 0 || row.Status != "unknown" {
+	if row.AdapterStatus != "unsupported" || row.QuotaSupported != 0 || row.Status != "unsupported" {
 		t.Fatalf("row = %#v", row)
 	}
 }

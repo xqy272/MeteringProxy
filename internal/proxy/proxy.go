@@ -1327,14 +1327,37 @@ func (p *Proxy) writeError(w http.ResponseWriter, start time.Time, ttfb time.Dur
 	log.Printf("upstream request error: endpoint=%q method=%q status=%d error=%v", endpoint, method, status, err)
 
 	captureOutcome := event.OutcomeFailed
+	errCode := safeOperationalError(err)
 	errInfo := &extractor.ErrorInfo{
-		Class:   "proxy_upstream_error",
-		Message: "upstream request failed",
+		Class: proxyErrorClass(errCode),
+		Type:  "proxy_transport",
+		Code:  errCode,
 	}
 
 	p.recordUsage(start, ttfb, prof, endpoint, method, "", status, false,
-		clientIPHash, apiKeyHash, modelRequested, requestMeta, nil, requestBytes, 0, safeOperationalError(err),
+		clientIPHash, apiKeyHash, modelRequested, requestMeta, nil, requestBytes, 0, errCode,
 		captureOutcome, event.ReasonUpstreamError, errInfo, "", "", "", "")
+}
+
+func proxyErrorClass(code string) string {
+	switch code {
+	case "connection_refused":
+		return "proxy_connection_refused"
+	case "connection_reset":
+		return "proxy_connection_reset"
+	case "timeout":
+		return "proxy_timeout"
+	case "dns_error":
+		return "proxy_dns_error"
+	case "no_route", "network_unreachable":
+		return "proxy_network_unreachable"
+	case "tls_error":
+		return "proxy_tls_error"
+	case "connection_closed", "client_write_error", "context_canceled":
+		return "proxy_connection_closed"
+	default:
+		return "proxy_upstream_error"
+	}
 }
 
 const maxErrorStringLen = 500

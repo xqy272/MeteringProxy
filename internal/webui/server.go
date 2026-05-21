@@ -329,7 +329,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	for i := range report {
 		cost, known := s.pricing.CostWithCacheCreation(report[i].Model, report[i].InputTokens, report[i].OutputTokens, report[i].ReasoningTokens, report[i].CachedTokens, report[i].CacheCreationTokens)
 		report[i].Cost = cost
-		report[i].CostKnown = known
+		report[i].CostKnown = known || !hasBillableTextUsage(rows[i])
 		if rows[i].MissingUsageCount > 0 || len(rows[i].ModelReturnedSourceCounts) > 0 || len(rows[i].UsageSourceCounts) > 0 {
 			report[i].MissingUsageCount = rows[i].MissingUsageCount
 		}
@@ -536,6 +536,15 @@ func splitCachedInput(input, cached int64) (int64, int64) {
 	return input - cached, cached
 }
 
+func hasBillableTextUsage(row db.ModelRow) bool {
+	return row.InputTokens > 0 ||
+		row.OutputTokens > 0 ||
+		row.ReasoningTokens > 0 ||
+		row.CachedTokens > 0 ||
+		row.CacheCreationTokens > 0 ||
+		row.TotalTokens > 0
+}
+
 func (s *Server) handleErrors(w http.ResponseWriter, r *http.Request) {
 	since, _ := parseRange(r)
 
@@ -704,17 +713,22 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
 		quotaRows, quotaTime, apiCallAvail = s.quotaPoller.Snapshot()
 	}
 
-	if len(quotaRows) > 0 || (s.quotaPoller != nil && apiCallAvail) {
+	if len(quotaRows) > 0 || (s.quotaPoller != nil && apiCallAvail) || (s.quotaPoller != nil && len(credRows) == 0) {
 		type providerSummary struct {
 			Provider         string `json:"provider"`
 			CredentialCount  int    `json:"credential_count"`
+			OKCount          int    `json:"ok_count"`
+			WarningCount     int    `json:"warning_count"`
 			LowCount         int    `json:"low_count"`
 			ExhaustedCount   int    `json:"exhausted_count"`
 			ErrorCount       int    `json:"error_count"`
+			StaleCount       int    `json:"stale_count"`
 			UnsupportedCount int    `json:"unsupported_count"`
 			UnknownCount     int    `json:"unknown_count"`
 		}
 		summaryMap := map[string]*providerSummary{}
+		supportedRows := 0
+		unhealthyRows := 0
 		for _, q := range quotaRows {
 			ps, ok := summaryMap[q.Provider]
 			if !ok {
@@ -722,22 +736,37 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
 				summaryMap[q.Provider] = ps
 			}
 			ps.CredentialCount++
+			if q.QuotaSupported > 0 {
+				supportedRows++
+			}
 			switch q.Status {
+			case "ok":
+				ps.OKCount++
+			case "warning":
+				ps.WarningCount++
+				unhealthyRows++
 			case "low":
 				ps.LowCount++
+				unhealthyRows++
 			case "exhausted":
 				ps.ExhaustedCount++
+				unhealthyRows++
 			case "error":
 				ps.ErrorCount++
+				unhealthyRows++
+			case "stale":
+				ps.StaleCount++
+				unhealthyRows++
 			case "unknown":
 				ps.UnknownCount++
 			case "unsupported":
 				ps.UnsupportedCount++
+				unhealthyRows++
 			}
 		}
 
 		phase := "quota_snapshot"
-		if len(quotaRows) == 0 {
+		if len(quotaRows) == 0 || supportedRows == 0 {
 			phase = "credential_health"
 		}
 
@@ -750,13 +779,22 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
 		if checkedAt.IsZero() {
 			checkedAt = credTime
 		}
+		moduleStatus := "unavailable"
+		if len(quotaRows) > 0 {
+			moduleStatus = "partial"
+			if apiCallAvail && supportedRows > 0 && unhealthyRows == 0 {
+				moduleStatus = "available"
+			}
+		} else if apiCallAvail {
+			moduleStatus = "partial"
+		}
 
 		resp := map[string]any{
 			"status":               "ok",
 			"phase":                phase,
-			"full_quota_available": apiCallAvail,
-			"module_status":        "available",
-			"stale":                false,
+			"full_quota_available": apiCallAvail && supportedRows > 0,
+			"module_status":        moduleStatus,
+			"stale":                unhealthyRows > 0,
 			"checked_at":           checkedAt.Format(time.RFC3339),
 			"providers":            providers,
 			"items":                quotaRows,
@@ -920,23 +958,45 @@ func (s *Server) handleObservability(w http.ResponseWriter, r *http.Request) {
 	if s.quotaPoller != nil {
 		quotaRows, quotaTime, apiCallAvail := s.quotaPoller.Snapshot()
 		phase := "credential_health"
-		if len(quotaRows) > 0 || apiCallAvail {
+		supportedRows := 0
+		unhealthyRows := 0
+		if len(quotaRows) > 0 {
 			phase = "quota_snapshot"
 		}
 		staleCount := 0
 		errorCount := 0
 		for _, q := range quotaRows {
+			if q.QuotaSupported > 0 {
+				supportedRows++
+			}
 			if q.Status == "stale" {
 				staleCount++
 			}
-			if q.Status == "error" {
+			if q.Status == "error" || q.Status == "unsupported" {
 				errorCount++
 			}
+			switch q.Status {
+			case "warning", "low", "exhausted", "error", "stale", "unsupported":
+				unhealthyRows++
+			}
+		}
+		if supportedRows == 0 {
+			phase = "credential_health"
+		}
+		moduleStatus := "unavailable"
+		if len(quotaRows) > 0 {
+			moduleStatus = "partial"
+			if apiCallAvail && supportedRows > 0 && unhealthyRows == 0 {
+				moduleStatus = "available"
+			}
+		} else if apiCallAvail {
+			moduleStatus = "partial"
 		}
 		resp["quota"] = map[string]any{
 			"enabled":              true,
 			"phase":                phase,
-			"full_quota_available": apiCallAvail,
+			"full_quota_available": apiCallAvail && supportedRows > 0,
+			"module_status":        moduleStatus,
 			"last_checked_at":      quotaTime.Format(time.RFC3339),
 			"stale_count":          staleCount,
 			"error_count":          errorCount,

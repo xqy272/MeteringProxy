@@ -2,6 +2,13 @@
 
 This document records the current design decision for possible CLIProxyAPI quota and OAuth integration.
 
+Current implementation note: MeteringProxy already exposes credential health,
+quota status, and refresh diagnostics in the read-only WebUI. Full quota is
+reported only when a server-side provider adapter produces normalized quota
+rows; otherwise the UI falls back to credential health and marks quota as
+partial, unavailable, unsupported, or disabled. A generic `/api-call` endpoint
+alone is not treated as proof of full quota support.
+
 ## Project Boundary
 
 MeteringProxy's core priorities remain:
@@ -68,7 +75,7 @@ Implementation constraints:
 - timeout on every upstream quota request
 - bounded concurrency
 - cached snapshots, preferably 5-10 minutes
-- no writes to MeteringProxy's SQLite schema unless a later version explicitly needs historical quota snapshots
+- no raw quota payload persistence; current implementation stores only normalized current-state rows and bounded diagnostic refresh events
 - no impact on proxy forwarding if quota fails
 
 ## UI Direction
@@ -101,7 +108,7 @@ Display rules:
 - Remaining should use a progress bar where possible.
 - Above 50% is normal, 20-50% is warning, below 20% is danger.
 - Unknown remaining should use a neutral state.
-- A single credential may produce multiple rows if the provider has multiple quota windows.
+- A single credential may produce multiple rows if the provider has multiple quota windows. Current subscription-style providers should be rendered as short-window plus long-window state, for example `5h` and `weekly`, instead of collapsing the credential to one remaining/limit number.
 - Query errors should be visible per credential and must not hide other providers.
 
 Plan display:

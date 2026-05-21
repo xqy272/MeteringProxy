@@ -183,6 +183,8 @@ type ActivityRow struct {
 	LatestErrorStatus   int     `json:"latest_error_status"`
 	LatestErrorAt       string  `json:"latest_error_at"`
 	LatestError         string  `json:"latest_error"`
+	LatestErrorClass    string  `json:"latest_error_class"`
+	LatestErrorCode     string  `json:"latest_error_code"`
 	LatestErrorEndpoint string  `json:"latest_error_endpoint"`
 	LatestErrorModel    string  `json:"latest_error_model"`
 }
@@ -1469,6 +1471,8 @@ func (db *DB) Activity(since time.Time) (*ActivityRow, error) {
 			COALESCE(status, 0),
 			COALESCE(created_at, ''),
 			COALESCE(error, ''),
+			COALESCE(error_class, ''),
+			COALESCE(error_code, ''),
 			COALESCE(endpoint, ''),
 			`+effectiveModelExpr+`
 		FROM sampled
@@ -1476,6 +1480,7 @@ func (db *DB) Activity(since time.Time) (*ActivityRow, error) {
 		ORDER BY id DESC LIMIT 1
 	`, since.Unix(), activitySampleLimit).Scan(
 		&row.LatestErrorStatus, &row.LatestErrorAt, &row.LatestError,
+		&row.LatestErrorClass, &row.LatestErrorCode,
 		&row.LatestErrorEndpoint, &row.LatestErrorModel,
 	)
 	if err == sql.ErrNoRows {
