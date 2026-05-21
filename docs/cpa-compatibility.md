@@ -78,7 +78,7 @@ pass through MeteringProxy as `unknown_passthrough`.
 
 | CPA management surface | Status | Notes |
 |---|---|---|
-| `GET /v0/management/auth-files` | supported | Supports CPA `{files:[...]}` and legacy `{auth_files:[...]}`; v7.0.9 `project_id` is ignored safely |
+| `GET /v0/management/auth-files` | supported | Supports CPA `{files:[...]}` and legacy `{auth_files:[...]}`; runtime fields such as `status_message`, `next_retry_after`, `recent_requests`, and Codex `id_token.plan_type` are normalized without storing raw tokens or account identifiers |
 | `GET /v0/management/usage-queue?count=N` | supported | Requires CPA `usage-statistics-enabled: true`; v7.1.17+ may include `response_headers`, which MeteringProxy ignores safely |
 | RESP `AUTH` + `LPOP`/`RPOP` | legacy only | Available in v7.0.4-v7.0.9; v7.1.17+ returns `ERR RESP AUTH disabled; use mTLS`. Configure `usage_queue.transport` as `auto` or `http` for new CPA releases |
 | `POST /v0/management/api-call` | endpoint detected only | CPA v7.0.4-v7.1.19 requires `method` and absolute `url`; it is not treated as a full quota API |
@@ -94,6 +94,16 @@ than claiming full quota availability.
 Supported today:
 
 - Credential health from `auth-files`.
+- CPA `auth-files` entries that remain marked as `error` because of historical
+  quota or transient failures are downgraded to credential warnings when they
+  are still available and have healthy success history or recent successful
+  request buckets. Hard disabled, unavailable, and authentication-failure
+  signals remain errors.
+- Credential-health rows include bounded diagnostics from CPA management:
+  status message, recent success/failure bucket totals, next retry time, plan
+  type when exposed, and structured error type/code/message. MeteringProxy does
+  not persist raw auth files, provider tokens, email addresses, account IDs, or
+  full `recent_requests` timelines.
 - Quota module status as disabled, partial, unsupported, unavailable, or available.
 - Provider quota rows only when explicit provider adapters produce normalized
   `quota_current` rows.

@@ -307,16 +307,25 @@ type SideUsageEvent struct {
 }
 
 type CredentialHealthRow struct {
-	Provider       string `json:"provider"`
-	CredentialHash string `json:"credential_hash"`
-	AuthIndexHash  string `json:"auth_index_hash"`
-	LabelHash      string `json:"label_hash"`
-	Status         string `json:"status"`
-	SuccessCount   int64  `json:"success_count"`
-	FailedCount    int64  `json:"failed_count"`
-	CheckedAt      string `json:"checked_at"`
-	CheckedAtUnix  int64  `json:"checked_at_unix"`
-	ErrorClass     string `json:"error_class"`
+	Provider           string `json:"provider"`
+	CredentialHash     string `json:"credential_hash"`
+	AuthIndexHash      string `json:"auth_index_hash"`
+	LabelHash          string `json:"label_hash"`
+	Status             string `json:"status"`
+	StatusMessage      string `json:"status_message"`
+	Plan               string `json:"plan"`
+	SuccessCount       int64  `json:"success_count"`
+	FailedCount        int64  `json:"failed_count"`
+	RecentSuccessCount int64  `json:"recent_success_count"`
+	RecentFailedCount  int64  `json:"recent_failed_count"`
+	NextRetryAfter     string `json:"next_retry_after"`
+	NextRetryAfterUnix int64  `json:"next_retry_after_unix"`
+	CheckedAt          string `json:"checked_at"`
+	CheckedAtUnix      int64  `json:"checked_at_unix"`
+	ErrorClass         string `json:"error_class"`
+	ErrorType          string `json:"error_type"`
+	ErrorCode          string `json:"error_code"`
+	ErrorMessage       string `json:"error_message"`
 }
 
 type QuotaCurrentRow struct {
@@ -556,6 +565,9 @@ func migrate(sqlDB *sql.DB) error {
 	if err := createTablesV6(sqlDB); err != nil {
 		return err
 	}
+	if err := ensureColumns(sqlDB, "credential_health", credentialHealthColumns()); err != nil {
+		return err
+	}
 	if err := createMultimodalTables(sqlDB); err != nil {
 		return err
 	}
@@ -612,11 +624,20 @@ func createTablesV6(sqlDB *sql.DB) error {
 			auth_index_hash TEXT NOT NULL DEFAULT '',
 			label_hash TEXT NOT NULL DEFAULT '',
 			status TEXT NOT NULL DEFAULT '',
+			status_message TEXT NOT NULL DEFAULT '',
+			plan TEXT NOT NULL DEFAULT '',
 			success_count INTEGER NOT NULL DEFAULT 0,
 			failed_count INTEGER NOT NULL DEFAULT 0,
+			recent_success_count INTEGER NOT NULL DEFAULT 0,
+			recent_failed_count INTEGER NOT NULL DEFAULT 0,
+			next_retry_after TEXT NOT NULL DEFAULT '',
+			next_retry_after_unix INTEGER NOT NULL DEFAULT 0,
 			checked_at TEXT NOT NULL,
 			checked_at_unix INTEGER NOT NULL DEFAULT 0,
 			error_class TEXT NOT NULL DEFAULT '',
+			error_type TEXT NOT NULL DEFAULT '',
+			error_code TEXT NOT NULL DEFAULT '',
+			error_message TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY (provider, credential_hash)
 		)`,
 		`CREATE TABLE IF NOT EXISTS quota_current (
@@ -829,6 +850,20 @@ func sideUsageEventColumns() []columnSpec {
 	return []columnSpec{
 		{"cache_read_tokens", "cache_read_tokens INTEGER NOT NULL DEFAULT 0"},
 		{"cache_creation_tokens", "cache_creation_tokens INTEGER NOT NULL DEFAULT 0"},
+	}
+}
+
+func credentialHealthColumns() []columnSpec {
+	return []columnSpec{
+		{"status_message", "status_message TEXT NOT NULL DEFAULT ''"},
+		{"plan", "plan TEXT NOT NULL DEFAULT ''"},
+		{"recent_success_count", "recent_success_count INTEGER NOT NULL DEFAULT 0"},
+		{"recent_failed_count", "recent_failed_count INTEGER NOT NULL DEFAULT 0"},
+		{"next_retry_after", "next_retry_after TEXT NOT NULL DEFAULT ''"},
+		{"next_retry_after_unix", "next_retry_after_unix INTEGER NOT NULL DEFAULT 0"},
+		{"error_type", "error_type TEXT NOT NULL DEFAULT ''"},
+		{"error_code", "error_code TEXT NOT NULL DEFAULT ''"},
+		{"error_message", "error_message TEXT NOT NULL DEFAULT ''"},
 	}
 }
 
@@ -2001,24 +2036,40 @@ func (db *DB) InsertSideUsageEvent(e SideUsageEvent) (int64, error) {
 
 func (db *DB) UpsertCredentialHealth(row *CredentialHealthRow) error {
 	_, err := db.sql.Exec(`
-		INSERT INTO credential_health (provider, credential_hash, auth_index_hash, label_hash, status, success_count, failed_count, checked_at, checked_at_unix, error_class)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO credential_health (provider, credential_hash, auth_index_hash, label_hash, status, status_message, plan,
+			success_count, failed_count, recent_success_count, recent_failed_count, next_retry_after, next_retry_after_unix,
+			checked_at, checked_at_unix, error_class, error_type, error_code, error_message)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(provider, credential_hash) DO UPDATE SET
 			auth_index_hash = excluded.auth_index_hash,
 			label_hash = excluded.label_hash,
 			status = excluded.status,
+			status_message = excluded.status_message,
+			plan = excluded.plan,
 			success_count = excluded.success_count,
 			failed_count = excluded.failed_count,
+			recent_success_count = excluded.recent_success_count,
+			recent_failed_count = excluded.recent_failed_count,
+			next_retry_after = excluded.next_retry_after,
+			next_retry_after_unix = excluded.next_retry_after_unix,
 			checked_at = excluded.checked_at,
 			checked_at_unix = excluded.checked_at_unix,
-			error_class = excluded.error_class
+			error_class = excluded.error_class,
+			error_type = excluded.error_type,
+			error_code = excluded.error_code,
+			error_message = excluded.error_message
 	`, row.Provider, row.CredentialHash, row.AuthIndexHash, row.LabelHash, row.Status,
-		row.SuccessCount, row.FailedCount, row.CheckedAt, row.CheckedAtUnix, row.ErrorClass)
+		row.StatusMessage, row.Plan, row.SuccessCount, row.FailedCount, row.RecentSuccessCount, row.RecentFailedCount,
+		row.NextRetryAfter, row.NextRetryAfterUnix, row.CheckedAt, row.CheckedAtUnix,
+		row.ErrorClass, row.ErrorType, row.ErrorCode, row.ErrorMessage)
 	return err
 }
 
 func (db *DB) AllCredentialHealth() ([]CredentialHealthRow, error) {
-	rows, err := db.read.Query(`SELECT provider, credential_hash, auth_index_hash, label_hash, status, success_count, failed_count, checked_at, checked_at_unix, error_class FROM credential_health ORDER BY provider, credential_hash`)
+	rows, err := db.read.Query(`SELECT provider, credential_hash, auth_index_hash, label_hash, status, status_message, plan,
+		success_count, failed_count, recent_success_count, recent_failed_count, next_retry_after, next_retry_after_unix,
+		checked_at, checked_at_unix, error_class, error_type, error_code, error_message
+		FROM credential_health ORDER BY provider, credential_hash`)
 	if err != nil {
 		return nil, err
 	}
@@ -2026,7 +2077,9 @@ func (db *DB) AllCredentialHealth() ([]CredentialHealthRow, error) {
 	var result []CredentialHealthRow
 	for rows.Next() {
 		var r CredentialHealthRow
-		if err := rows.Scan(&r.Provider, &r.CredentialHash, &r.AuthIndexHash, &r.LabelHash, &r.Status, &r.SuccessCount, &r.FailedCount, &r.CheckedAt, &r.CheckedAtUnix, &r.ErrorClass); err != nil {
+		if err := rows.Scan(&r.Provider, &r.CredentialHash, &r.AuthIndexHash, &r.LabelHash, &r.Status, &r.StatusMessage, &r.Plan,
+			&r.SuccessCount, &r.FailedCount, &r.RecentSuccessCount, &r.RecentFailedCount, &r.NextRetryAfter, &r.NextRetryAfterUnix,
+			&r.CheckedAt, &r.CheckedAtUnix, &r.ErrorClass, &r.ErrorType, &r.ErrorCode, &r.ErrorMessage); err != nil {
 			return nil, err
 		}
 		result = append(result, r)

@@ -502,6 +502,16 @@ func TestIssuesIncludeCurrentCredentialAndQuotaState(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertCredentialHealth: %v", err)
 	}
+	if err := d.UpsertCredentialHealth(&CredentialHealthRow{
+		Provider:       "codex",
+		CredentialHash: "cred-warning",
+		Status:         "warning",
+		CheckedAt:      old.Format(time.RFC3339),
+		CheckedAtUnix:  old.Unix(),
+		ErrorClass:     "credential_history_warning",
+	}); err != nil {
+		t.Fatalf("UpsertCredentialHealth warning: %v", err)
+	}
 	if err := d.UpsertQuotaCurrent(&QuotaCurrentRow{
 		Provider:        "codex",
 		CredentialHash:  "cred-b",
@@ -526,8 +536,51 @@ func TestIssuesIncludeCurrentCredentialAndQuotaState(t *testing.T) {
 	for _, row := range rows {
 		classes[row.Class] = true
 	}
-	if !classes["credential_unavailable"] || !classes["quota_low"] {
+	if !classes["credential_unavailable"] || !classes["credential_history_warning"] || !classes["quota_low"] {
 		t.Fatalf("issues = %+v, want current credential and quota issues even when last check is outside selected request range", rows)
+	}
+}
+
+func TestCredentialHealthPersistsRuntimeDiagnostics(t *testing.T) {
+	d := newTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := d.UpsertCredentialHealth(&CredentialHealthRow{
+		Provider:           "codex",
+		CredentialHash:     "cred-runtime",
+		AuthIndexHash:      "auth-index",
+		LabelHash:          "label",
+		Status:             "warning",
+		StatusMessage:      "quota exhausted",
+		Plan:               "plus",
+		SuccessCount:       10,
+		FailedCount:        2,
+		RecentSuccessCount: 3,
+		RecentFailedCount:  1,
+		NextRetryAfter:     "2026-05-21T18:00:00Z",
+		NextRetryAfterUnix: 1779386400,
+		CheckedAt:          now.Format(time.RFC3339),
+		CheckedAtUnix:      now.Unix(),
+		ErrorClass:         "credential_history_warning",
+		ErrorType:          "server_error",
+		ErrorCode:          "bad_gateway",
+		ErrorMessage:       "upstream failed",
+	}); err != nil {
+		t.Fatalf("UpsertCredentialHealth: %v", err)
+	}
+
+	rows, err := d.AllCredentialHealth()
+	if err != nil {
+		t.Fatalf("AllCredentialHealth: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %+v, want one row", rows)
+	}
+	row := rows[0]
+	if row.Plan != "plus" || row.StatusMessage != "quota exhausted" || row.RecentSuccessCount != 3 || row.RecentFailedCount != 1 {
+		t.Fatalf("runtime fields = %+v", row)
+	}
+	if row.NextRetryAfterUnix != 1779386400 || row.ErrorType != "server_error" || row.ErrorCode != "bad_gateway" || row.ErrorMessage != "upstream failed" {
+		t.Fatalf("diagnostic fields = %+v", row)
 	}
 }
 

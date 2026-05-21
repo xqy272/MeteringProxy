@@ -83,6 +83,77 @@ func TestFetchAuthFilesDecodesCLIProxyAPIv704FilesResponse(t *testing.T) {
 	}
 }
 
+func TestFetchAuthFilesDecodesCredentialErrorObject(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"files":[{"id":"codex-1","type":"codex","provider":"codex","status":"error","success":12,"failed":1,"error":{"type":"usage_limit_reached","code":"quota_window","message":"The usage limit has been reached","resets_in_seconds":7200}}]}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(CLIProxyConfig{
+		BaseURL: server.URL + "/v0/management",
+		Key:     "secret",
+		Timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	resp, err := client.FetchAuthFiles()
+	if err != nil {
+		t.Fatalf("FetchAuthFiles: %v", err)
+	}
+	entry := resp.AuthFiles[0]
+	if entry.ErrorClass != "usage_limit_reached" || entry.ErrorType != "usage_limit_reached" || entry.ErrorCode != "quota_window" {
+		t.Fatalf("entry error fields = %#v", entry)
+	}
+	if entry.StatusMessage != "The usage limit has been reached" || entry.ErrorMessage != "The usage limit has been reached" {
+		t.Fatalf("entry error message = %#v", entry)
+	}
+}
+
+func TestFetchAuthFilesDecodesRuntimeHealthFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"files":[{
+			"id":"codex-1",
+			"type":"codex",
+			"provider":"codex",
+			"status":"error",
+			"status_message":"quota exhausted",
+			"next_retry_after":"2026-05-21T18:00:00Z",
+			"recent_requests":[
+				{"time":"17:20-17:30","success":3,"failed":1},
+				{"time":"17:30-17:40","success":2,"failed":0}
+			],
+			"id_token":{"plan_type":"plus"}
+		}]}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(CLIProxyConfig{
+		BaseURL: server.URL + "/v0/management",
+		Key:     "secret",
+		Timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	resp, err := client.FetchAuthFiles()
+	if err != nil {
+		t.Fatalf("FetchAuthFiles: %v", err)
+	}
+	entry := resp.AuthFiles[0]
+	if entry.Plan != "plus" {
+		t.Fatalf("Plan = %q, want plus", entry.Plan)
+	}
+	if entry.RecentSuccessCount != 5 || entry.RecentFailedCount != 1 {
+		t.Fatalf("recent counts = %d/%d, want 5/1", entry.RecentSuccessCount, entry.RecentFailedCount)
+	}
+	if entry.NextRetryAfterUnix != 1779386400 {
+		t.Fatalf("NextRetryAfterUnix = %d, want 1779386400", entry.NextRetryAfterUnix)
+	}
+}
+
 func TestFetchAuthFilesIgnoresCLIProxyAPIv709ProjectID(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

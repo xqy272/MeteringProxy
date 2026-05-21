@@ -404,6 +404,19 @@ func (p *fakeQuotaPoller) Snapshot() ([]db.QuotaCurrentRow, time.Time, bool) {
 func (p *fakeQuotaPoller) APICallAvailable() bool { return p.apiAvailable }
 func (p *fakeQuotaPoller) Refresh()               {}
 
+type fakeCredPoller struct {
+	rows   []db.CredentialHealthRow
+	lastAt time.Time
+}
+
+func (p *fakeCredPoller) Snapshot() ([]db.CredentialHealthRow, time.Time) {
+	rows := make([]db.CredentialHealthRow, len(p.rows))
+	copy(rows, p.rows)
+	return rows, p.lastAt
+}
+
+func (p *fakeCredPoller) Refresh() {}
+
 func TestAPIQuotaDoesNotClaimFullQuotaForProbeOnlyAvailability(t *testing.T) {
 	s, _ := newTestServer(t, "/metering")
 	now := time.Now().UTC().Truncate(time.Second)
@@ -463,6 +476,54 @@ func TestAPIQuotaClaimsFullQuotaOnlyWithSupportedRows(t *testing.T) {
 	}
 }
 
+func TestAPIQuotaFallsBackToCredentialRowsWhenQuotaRowsUnsupported(t *testing.T) {
+	s, _ := newTestServer(t, "/metering")
+	now := time.Now().UTC().Truncate(time.Second)
+	s.SetCredPoller(&fakeCredPoller{
+		lastAt: now,
+		rows: []db.CredentialHealthRow{{
+			Provider:       "codex",
+			CredentialHash: "cred",
+			Status:         "warning",
+			CheckedAt:      now.Format(time.RFC3339),
+			CheckedAtUnix:  now.Unix(),
+			ErrorClass:     "credential_history_warning",
+		}},
+	})
+	s.SetQuotaPoller(&fakeQuotaPoller{
+		lastAt:       now,
+		apiAvailable: true,
+		rows: []db.QuotaCurrentRow{{
+			Provider:       "codex",
+			CredentialHash: "unsupported",
+			WindowKey:      "default",
+			Status:         "unsupported",
+			QuotaSupported: 0,
+			AdapterStatus:  "unsupported",
+			ErrorClass:     "quota_unsupported",
+		}},
+	})
+
+	req := httptest.NewRequest("GET", "/metering/api/quota", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("GET /metering/api/quota: status %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal quota: %v", err)
+	}
+	if payload["module_status"] != "unsupported" || payload["phase"] != "credential_health" || payload["full_quota_available"] == true {
+		t.Fatalf("quota payload = %+v, want unsupported credential_health fallback", payload)
+	}
+	items := payload["items"].([]any)
+	item := items[0].(map[string]any)
+	if item["credential_hash"] != "cred" {
+		t.Fatalf("items = %+v, want credential health rows rather than unsupported quota rows", items)
+	}
+}
+
 func TestAPIObservabilityReportsQuotaModuleStatus(t *testing.T) {
 	s, _ := newTestServer(t, "/metering")
 	now := time.Now().UTC().Truncate(time.Second)
@@ -484,6 +545,42 @@ func TestAPIObservabilityReportsQuotaModuleStatus(t *testing.T) {
 	}
 	if quota["module_status"] != "partial" || quota["full_quota_available"] == true || quota["phase"] != "credential_health" {
 		t.Fatalf("observability quota = %+v, want partial credential_health without full quota", quota)
+	}
+}
+
+func TestAPIObservabilityReportsCredentialHealthFallback(t *testing.T) {
+	s, _ := newTestServer(t, "/metering")
+	now := time.Now().UTC().Truncate(time.Second)
+	s.SetCredPoller(&fakeCredPoller{
+		lastAt: now,
+		rows: []db.CredentialHealthRow{{
+			Provider:       "codex",
+			CredentialHash: "cred",
+			Status:         "warning",
+			CheckedAt:      now.Format(time.RFC3339),
+			CheckedAtUnix:  now.Unix(),
+			ErrorClass:     "credential_history_warning",
+		}},
+	})
+	s.SetQuotaPoller(&fakeQuotaPoller{lastAt: now, apiAvailable: false})
+
+	req := httptest.NewRequest("GET", "/metering/api/observability", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("GET /metering/api/observability: status %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal observability: %v", err)
+	}
+	quota := payload["quota"].(map[string]any)
+	if quota["module_status"] != "partial" || quota["credential_fallback"] != true || quota["full_quota_available"] == true {
+		t.Fatalf("observability quota = %+v, want partial credential fallback without full quota", quota)
+	}
+	credential := payload["credential_health"].(map[string]any)
+	if credential["warning_count"] != float64(1) || credential["error_count"] != float64(0) {
+		t.Fatalf("credential health = %+v, want one warning and no errors", credential)
 	}
 }
 

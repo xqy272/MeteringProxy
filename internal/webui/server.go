@@ -713,7 +713,18 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
 		quotaRows, quotaTime, apiCallAvail = s.quotaPoller.Snapshot()
 	}
 
-	if len(quotaRows) > 0 || (s.quotaPoller != nil && apiCallAvail) || (s.quotaPoller != nil && len(credRows) == 0) {
+	supportedQuotaRows := 0
+	unsupportedQuotaRows := 0
+	for _, q := range quotaRows {
+		if q.QuotaSupported > 0 {
+			supportedQuotaRows++
+		}
+		if q.Status == "unsupported" {
+			unsupportedQuotaRows++
+		}
+	}
+
+	if supportedQuotaRows > 0 || (len(credRows) == 0 && (len(quotaRows) > 0 || s.quotaPoller != nil && apiCallAvail || s.quotaPoller != nil)) {
 		type providerSummary struct {
 			Provider         string `json:"provider"`
 			CredentialCount  int    `json:"credential_count"`
@@ -782,6 +793,9 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
 		moduleStatus := "unavailable"
 		if len(quotaRows) > 0 {
 			moduleStatus = "partial"
+			if supportedRows == 0 && unsupportedQuotaRows > 0 && apiCallAvail {
+				moduleStatus = "unsupported"
+			}
 			if apiCallAvail && supportedRows > 0 && unhealthyRows == 0 {
 				moduleStatus = "available"
 			}
@@ -808,6 +822,7 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
 			Provider         string `json:"provider"`
 			CredentialCount  int    `json:"credential_count"`
 			ReadyCount       int    `json:"ready_count"`
+			WarningCount     int    `json:"warning_count"`
 			UnavailableCount int    `json:"unavailable_count"`
 			DisabledCount    int    `json:"disabled_count"`
 		}
@@ -822,6 +837,8 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
 			switch c.Status {
 			case "ready":
 				ps.ReadyCount++
+			case "warning":
+				ps.WarningCount++
 			case "unavailable":
 				ps.UnavailableCount++
 			case "disabled":
@@ -834,11 +851,17 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
 			providers = append(providers, *ps)
 		}
 
+		moduleStatus := "partial"
+		if s.quotaPoller != nil {
+			if apiCallAvail && unsupportedQuotaRows > 0 && supportedQuotaRows == 0 {
+				moduleStatus = "unsupported"
+			}
+		}
 		resp := map[string]any{
 			"status":               "ok",
 			"phase":                "credential_health",
 			"full_quota_available": false,
-			"module_status":        "partial",
+			"module_status":        moduleStatus,
 			"checked_at":           credTime.Format(time.RFC3339),
 			"providers":            providers,
 			"items":                credRows,
@@ -879,6 +902,9 @@ func (s *Server) handleQuotaRefresh(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleObservability(w http.ResponseWriter, r *http.Request) {
+	credRows := []db.CredentialHealthRow{}
+	credTime := time.Time{}
+
 	resp := map[string]any{
 		"request_capture": map[string]any{
 			"parse_errors":   0,
@@ -936,12 +962,16 @@ func (s *Server) handleObservability(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.credPoller != nil {
-		credRows, credTime := s.credPoller.Snapshot()
+		credRows, credTime = s.credPoller.Snapshot()
 		unavailableCount := 0
+		warningCount := 0
 		errorCount := 0
 		for _, c := range credRows {
 			if c.Status == "unavailable" {
 				unavailableCount++
+			}
+			if c.Status == "warning" {
+				warningCount++
 			}
 			if c.Status == "error" {
 				errorCount++
@@ -950,6 +980,7 @@ func (s *Server) handleObservability(w http.ResponseWriter, r *http.Request) {
 		resp["credential_health"] = map[string]any{
 			"enabled":           true,
 			"last_checked_at":   credTime.Format(time.RFC3339),
+			"warning_count":     warningCount,
 			"unavailable_count": unavailableCount,
 			"error_count":       errorCount,
 		}
@@ -965,6 +996,7 @@ func (s *Server) handleObservability(w http.ResponseWriter, r *http.Request) {
 		}
 		staleCount := 0
 		errorCount := 0
+		unsupportedCount := 0
 		for _, q := range quotaRows {
 			if q.QuotaSupported > 0 {
 				supportedRows++
@@ -975,6 +1007,9 @@ func (s *Server) handleObservability(w http.ResponseWriter, r *http.Request) {
 			if q.Status == "error" || q.Status == "unsupported" {
 				errorCount++
 			}
+			if q.Status == "unsupported" {
+				unsupportedCount++
+			}
 			switch q.Status {
 			case "warning", "low", "exhausted", "error", "stale", "unsupported":
 				unhealthyRows++
@@ -983,21 +1018,30 @@ func (s *Server) handleObservability(w http.ResponseWriter, r *http.Request) {
 		if supportedRows == 0 {
 			phase = "credential_health"
 		}
+		credentialFallback := phase == "credential_health" && len(quotaRows) == 0 && len(credRows) > 0
 		moduleStatus := "unavailable"
 		if len(quotaRows) > 0 {
 			moduleStatus = "partial"
+			if apiCallAvail && supportedRows == 0 && unsupportedCount > 0 {
+				moduleStatus = "unsupported"
+			}
 			if apiCallAvail && supportedRows > 0 && unhealthyRows == 0 {
 				moduleStatus = "available"
 			}
-		} else if apiCallAvail {
+		} else if apiCallAvail || credentialFallback {
 			moduleStatus = "partial"
+		}
+		checkedAt := quotaTime
+		if checkedAt.IsZero() {
+			checkedAt = credTime
 		}
 		resp["quota"] = map[string]any{
 			"enabled":              true,
 			"phase":                phase,
 			"full_quota_available": apiCallAvail && supportedRows > 0,
+			"credential_fallback":  credentialFallback,
 			"module_status":        moduleStatus,
-			"last_checked_at":      quotaTime.Format(time.RFC3339),
+			"last_checked_at":      checkedAt.Format(time.RFC3339),
 			"stale_count":          staleCount,
 			"error_count":          errorCount,
 		}

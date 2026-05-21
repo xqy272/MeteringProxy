@@ -114,16 +114,25 @@ func (p *Poller) poll() {
 		status := normalizeCredentialStatus(af)
 
 		row := db.CredentialHealthRow{
-			Provider:       af.Provider,
-			CredentialHash: credHash,
-			AuthIndexHash:  authIndexHash,
-			LabelHash:      labelHash,
-			Status:         status,
-			SuccessCount:   af.SuccessCount,
-			FailedCount:    af.FailedCount,
-			CheckedAt:      nowStr,
-			CheckedAtUnix:  nowUnix,
-			ErrorClass:     firstNonEmpty(af.ErrorClass, credentialErrorClass(status)),
+			Provider:           af.Provider,
+			CredentialHash:     credHash,
+			AuthIndexHash:      authIndexHash,
+			LabelHash:          labelHash,
+			Status:             status,
+			StatusMessage:      af.StatusMessage,
+			Plan:               af.Plan,
+			SuccessCount:       af.SuccessCount,
+			FailedCount:        af.FailedCount,
+			RecentSuccessCount: af.RecentSuccessCount,
+			RecentFailedCount:  af.RecentFailedCount,
+			NextRetryAfter:     af.NextRetryAfter,
+			NextRetryAfterUnix: af.NextRetryAfterUnix,
+			CheckedAt:          nowStr,
+			CheckedAtUnix:      nowUnix,
+			ErrorClass:         credentialErrorClass(af, status),
+			ErrorType:          af.ErrorType,
+			ErrorCode:          af.ErrorCode,
+			ErrorMessage:       af.ErrorMessage,
 		}
 		if err := p.db.UpsertCredentialHealth(&row); err != nil {
 			log.Printf("credential health upsert error: %v", err)
@@ -153,6 +162,11 @@ func normalizeCredentialStatus(af cliproxy.AuthFileEntry) string {
 		return "unavailable"
 	case "active", "available", "ready":
 		return "ready"
+	case "error":
+		if credentialWarningFromCPAHistory(af) {
+			return "warning"
+		}
+		return "error"
 	default:
 		return status
 	}
@@ -172,7 +186,7 @@ func (p *Poller) hashCredential(provider, material string) string {
 	return p.hasher.Hash("credential:" + provider + ":" + material)
 }
 
-func credentialErrorClass(status string) string {
+func credentialErrorClass(af cliproxy.AuthFileEntry, status string) string {
 	switch status {
 	case "", "active", "available", "ready", "unknown":
 		return ""
@@ -180,11 +194,90 @@ func credentialErrorClass(status string) string {
 		return "credential_disabled"
 	case "stale":
 		return "credential_stale"
+	case "warning":
+		return credentialWarningClass(af)
 	case "error":
-		return "credential_error"
+		return firstNonEmpty(af.ErrorClass, "credential_error")
 	default:
-		return "credential_unavailable"
+		return firstNonEmpty(af.ErrorClass, "credential_unavailable")
 	}
+}
+
+func credentialWarningClass(af cliproxy.AuthFileEntry) string {
+	if containsQuotaSignal(credentialDiagnosticText(af)) {
+		return "credential_quota_limited"
+	}
+	return "credential_history_warning"
+}
+
+func credentialWarningFromCPAHistory(af cliproxy.AuthFileEntry) bool {
+	text := credentialDiagnosticText(af)
+	if containsAuthFailureSignal(text) {
+		return false
+	}
+	if af.RecentSuccessCount > 0 && af.RecentSuccessCount >= af.RecentFailedCount {
+		return true
+	}
+	if containsQuotaSignal(text) {
+		return true
+	}
+	if !af.Available || af.SuccessCount <= 0 {
+		return false
+	}
+	if af.FailedCount <= 0 {
+		return true
+	}
+	return af.SuccessCount >= af.FailedCount*4
+}
+
+func credentialDiagnosticText(af cliproxy.AuthFileEntry) string {
+	return strings.ToLower(strings.Join([]string{
+		af.Status,
+		af.StatusMessage,
+		af.ErrorClass,
+		af.ErrorType,
+		af.ErrorCode,
+		af.ErrorMessage,
+	}, " "))
+}
+
+func containsQuotaSignal(text string) bool {
+	for _, needle := range []string{
+		"usage_limit_reached",
+		"usage limit",
+		"quota",
+		"rate_limit",
+		"rate limit",
+		"limit reached",
+		"resets_at",
+		"resets_in_seconds",
+		"resource_exhausted",
+		"too many requests",
+	} {
+		if strings.Contains(text, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAuthFailureSignal(text string) bool {
+	for _, needle := range []string{
+		"invalid_api_key",
+		"invalid api key",
+		"unauthorized",
+		"authentication",
+		"auth_failed",
+		"forbidden",
+		"revoked",
+		"expired token",
+		"token expired",
+	} {
+		if strings.Contains(text, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func firstNonEmpty(values ...string) string {

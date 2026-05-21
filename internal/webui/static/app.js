@@ -43,6 +43,7 @@ let selectedIssueSeverity = '';
 let currentIssueClassFilter = '';
 let statusHideTimer = null;
 let latestQuotaGroups = [];
+let latestCredentialRows = [];
 let quotaPage = 1;
 
 const fallbackRanges = [
@@ -196,6 +197,7 @@ function moduleStatusLabel(status) {
   status=String(status||'disabled').toLowerCase();
   if(status==='available') return t('obs.available');
   if(status==='unavailable') return t('obs.unavailable');
+  if(status==='unsupported') return t('obs.unsupported');
   if(status==='disabled') return t('obs.disabled');
   return t('obs.partial');
 }
@@ -230,6 +232,10 @@ function syncRequestFiltersForIssue(group) {
   if(fs) fs.value=status;
   if(fm) fm.value=model;
   if(fe) fe.value=endpoint;
+}
+function issueClassLabel(cls, fb) {
+  const key='issues.class.'+(cls||'unknown'), fallback=I18N.en||{}, dict=I18N[currentLang]||fallback;
+  return dict[key]||fallback[key]||fb||cls||'';
 }
 function diagnosticGuide(cls, code) {
   const fb=I18N.en||{}, dict=I18N[currentLang]||fb;
@@ -321,6 +327,68 @@ function quotaGroups(items) {
     return String(a.credential||'').localeCompare(String(b.credential||''));
   });
 }
+function isCredentialHealthRow(row) {
+  if(!row) return false;
+  return !row.window_key && ('success_count' in row || 'failed_count' in row || 'auth_index_hash' in row || 'label_hash' in row);
+}
+function credentialIdentity(row) {
+  return (row&&row.credential_hash)||(row&&row.auth_index_hash)||(row&&row.label_hash)||'';
+}
+function credentialHealthCardHTML(row) {
+  const status=(row&&row.status)||'-';
+  const qClass=quotaStatusClass(status);
+  const credential=credentialIdentity(row);
+  const detail=row&&(row.status_message||row.error_message||row.error_code||row.error_type)||'';
+  const title=[row&&row.error_class,detail,row&&row.checked_at&&fmtTime(row.checked_at)].filter(Boolean).join(' / ');
+  const plan=row&&row.plan?`<span>${esc(row.plan)}</span>`:'';
+  const recentTotal=Number(row&&row.recent_success_count||0)+Number(row&&row.recent_failed_count||0);
+  const recent=recentTotal>0?`<div class="credential-line"><span>${esc(t('credential.recent'))}</span><code>${esc(t('metric.success_failed',{success:fmtFull(row.recent_success_count||0),failed:fmtFull(row.recent_failed_count||0)}))}</code></div>`:'';
+  const retry=row&&row.next_retry_after?`<div class="credential-line"><span>${esc(t('credential.next_retry'))}</span><code>${esc(fmtShort(row.next_retry_after))}</code></div>`:'';
+  const authHash=row&&row.auth_index_hash?`<div class="credential-line"><span>${esc(t('credential.auth_index'))}</span><code title="${esc(row.auth_index_hash)}">${esc(quotaCredentialLabel(row.auth_index_hash))}</code></div>`:'';
+  const labelHash=row&&row.label_hash?`<div class="credential-line"><span>${esc(t('credential.label_hash'))}</span><code title="${esc(row.label_hash)}">${esc(quotaCredentialLabel(row.label_hash))}</code></div>`:'';
+  const errLevel=qClass==='err'?'err':(qClass==='low'||qClass==='warn'?'warn':'neutral');
+  const err=row&&(row.error_class||detail)?`<div class="credential-error ${errLevel}" title="${esc(title)}">${esc(row.error_class?issueClassLabel(row.error_class,row.error_class):t('credential.message'))}${detail?` · ${esc(detail)}`:''}</div>`:'';
+  return `<div class="quota-account credential-card ${qClass}">
+    <div class="quota-account-head">
+      <div>
+        <div class="quota-account-title">${esc((row&&row.provider)||'-')}</div>
+        <div class="quota-account-sub"><code class="quota-credential" title="${esc(credential)}">${esc(quotaCredentialLabel(credential))}</code>${plan}</div>
+      </div>
+      <span class="badge ${statusBadgeClass(status)}" title="${esc(title)}">${esc(status)}</span>
+    </div>
+    <div class="credential-health-metrics">
+      <div><span>${esc(t('credential.success'))}</span><strong class="mono">${esc(fmtFull(row&&row.success_count||0))}</strong></div>
+      <div><span>${esc(t('credential.failed'))}</span><strong class="mono">${esc(fmtFull(row&&row.failed_count||0))}</strong></div>
+    </div>
+    <div class="credential-lines">${recent}${retry}${authHash}${labelHash}</div>
+    <div class="quota-window-foot">${esc(t('credential.checked_at',{time:fmtShort(row&&row.checked_at)}))}</div>
+    ${err}
+  </div>`;
+}
+function renderCredentialHealthSummary(rows, emptyText) {
+  const el=$('quota-window-summary');
+  if(!el) return;
+  latestCredentialRows=Array.isArray(rows)?rows:[];
+  latestQuotaGroups=[];
+  if(!latestCredentialRows.length){
+    el.innerHTML=`<div class="quota-empty-card">${esc(emptyText||t('state.no_quota_data'))}</div>`;
+    return;
+  }
+  const totalPages=Math.max(1,Math.ceil(latestCredentialRows.length/QUOTA_PAGE_SIZE));
+  quotaPage=Math.min(Math.max(1,quotaPage),totalPages);
+  const start=(quotaPage-1)*QUOTA_PAGE_SIZE;
+  const visibleRows=latestCredentialRows.slice(start,start+QUOTA_PAGE_SIZE);
+  const pager=latestCredentialRows.length>QUOTA_PAGE_SIZE?`<div class="quota-pager">
+    <button class="ctrl-btn" type="button" data-credential-page="prev" ${quotaPage<=1?'disabled':''}>${esc(t('action.prev_page'))}</button>
+    <span>${esc(t('quota.page_status',{page:quotaPage,total:totalPages,count:latestCredentialRows.length}))}</span>
+    <button class="ctrl-btn" type="button" data-credential-page="next" ${quotaPage>=totalPages?'disabled':''}>${esc(t('action.next_page'))}</button>
+  </div>`:'';
+  el.innerHTML=visibleRows.map(credentialHealthCardHTML).join('')+pager;
+  el.querySelectorAll('[data-credential-page]').forEach(btn=>btn.addEventListener('click',()=>{
+    quotaPage+=btn.dataset.credentialPage==='next'?1:-1;
+    renderCredentialHealthSummary(latestCredentialRows);
+  }));
+}
 function quotaMeterHTML(row) {
   const m=quotaMetric(row);
   const qClass=quotaStatusClass((row&&row.status)||(row&&row.adapter_status));
@@ -350,6 +418,7 @@ function renderQuotaSummary(groups, emptyText) {
   const el=$('quota-window-summary');
   if(!el) return;
   latestQuotaGroups=Array.isArray(groups)?groups:[];
+  latestCredentialRows=[];
   if(!groups.length){
     el.innerHTML=`<div class="quota-empty-card">${esc(emptyText||t('state.no_quota_data'))}</div>`;
     return;
@@ -1013,7 +1082,6 @@ async function loadIssues() {
     list.innerHTML=`<div class="issue-class-placeholder">${esc(t('issues.no_issue_types'))}</div>`; return;
   }
   state.classList.add('hidden');
-  const issueClassLabel=(cls,fb)=>{const k='issues.class.'+(cls||'unknown'),fb2=I18N.en||{},d=I18N[currentLang]||fb2;return d[k]||fb2[k]||fb||'';};
   const issueSevLabel=sev=>{const k='issues.severity.'+(sev||'info'),fb=I18N.en||{},d=I18N[currentLang]||fb;return d[k]||fb[k]||sev||'';};
   const countsBySeverity={error:0,warning:0,info:0};
   items.forEach(item=>{const sev=item.severity||'info'; countsBySeverity[sev]=(countsBySeverity[sev]||0)+Number(item.count||0);});
@@ -1126,16 +1194,21 @@ async function loadQuota() {
     if(ac) return ac;
     return quotaRowCompare(a,b);
   });
-  const groups=quotaGroups(items);
+  const credentialHealthMode=phase==='credential_health' && !data.full_quota_available && items.some(isCredentialHealthRow);
+  const groups=credentialHealthMode?[]:quotaGroups(items);
   if(quotaPage<1) quotaPage=1;
   const moduleStatus=data.module_status||'disabled';
   const moduleLabel=moduleStatusLabel(moduleStatus);
   setText('quota-state',moduleLabel);
-  setText('quota-detail',data.full_quota_available?t('obs.full_quota'):phase);
-  setText('observability-summary',t('obs.summary',{phase:moduleLabel,quota:groups.length}));
+  setText('quota-detail',data.full_quota_available?t('obs.full_quota'):(credentialHealthMode?t('obs.credential_fallback'):phase));
+  setText('observability-summary',t('obs.summary',{phase:moduleLabel,quota:credentialHealthMode?items.length:groups.length}));
   if(!items.length){
-    const empty = moduleStatus==='disabled'?t('state.quota_disabled'):moduleStatus==='unavailable'?t('state.quota_unavailable'):t('state.no_quota_data');
+    const empty = moduleStatus==='disabled'?t('state.quota_disabled'):moduleStatus==='unavailable'?t('state.quota_unavailable'):moduleStatus==='unsupported'?t('state.quota_unsupported'):t('state.no_quota_data');
     renderQuotaSummary([], empty);
+    return;
+  }
+  if(credentialHealthMode){
+    renderCredentialHealthSummary(items);
     return;
   }
   renderQuotaSummary(groups);
@@ -1148,9 +1221,9 @@ async function loadObservability() {
   setText('side-channel-state',side.enabled?(side.connected?t('obs.connected'):t('obs.disconnected')):t('obs.disabled'));
   setText('side-channel-detail',side.enabled?`${side.merge_mode||'-'} / ${side.last_error||t('obs.no_error')}`:'-');
   setText('credential-state',cred.enabled?t('obs.enabled'):t('obs.disabled'));
-  setText('credential-detail',cred.enabled?t('obs.credential_counts',{unavailable:fmtFull(cred.unavailable_count||0),errors:fmtFull(cred.error_count||0)}):'-');
+  setText('credential-detail',cred.enabled?t('obs.credential_counts',{warnings:fmtFull(cred.warning_count||0),unavailable:fmtFull(cred.unavailable_count||0),errors:fmtFull(cred.error_count||0)}):'-');
   const quotaStatus=quota.enabled?(quota.module_status||(quota.full_quota_available?'available':'partial')):'disabled';
-  const quotaPhase=quota.full_quota_available?t('obs.full_quota'):(quota.phase||'-');
+  const quotaPhase=quota.full_quota_available?t('obs.full_quota'):(quota.credential_fallback?t('obs.credential_fallback'):(quota.phase||'-'));
   setText('quota-state',moduleStatusLabel(quotaStatus));
   setText('quota-detail',quota.enabled?`${quotaPhase} / ${t('obs.stale_errors',{stale:fmtFull(quota.stale_count||0),errors:fmtFull(quota.error_count||0)})}`:'-');
   setText('capture-state',fmtFull(Number(capture.captured_1h||0)));

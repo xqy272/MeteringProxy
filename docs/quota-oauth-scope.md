@@ -76,6 +76,7 @@ Implementation constraints:
 - bounded concurrency
 - cached snapshots, preferably 5-10 minutes
 - no raw quota payload persistence; current implementation stores only normalized current-state rows and bounded diagnostic refresh events
+- credential health may store normalized CPA management diagnostics such as status messages, recent success/failure totals, next retry times, structured error codes, and plan labels; it must not store raw auth files, provider tokens, email addresses, account IDs, or full request timelines
 - no impact on proxy forwarding if quota fails
 
 ## UI Direction

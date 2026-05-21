@@ -287,10 +287,12 @@ func (db *DB) appendSideChannelIssues(result []IssueRow, since time.Time) []Issu
 func (db *DB) appendCredentialIssues(result []IssueRow, since time.Time) []IssueRow {
 	rows, err := db.read.Query(`
 		SELECT
-			CASE status
-				WHEN 'error' THEN 'credential_error'
-				WHEN 'stale' THEN 'credential_stale'
-				WHEN 'disabled' THEN 'credential_disabled'
+			CASE
+				WHEN status = 'warning' AND error_class = 'credential_quota_limited' THEN 'credential_quota_limited'
+				WHEN status = 'warning' THEN 'credential_history_warning'
+				WHEN status = 'error' THEN 'credential_error'
+				WHEN status = 'stale' THEN 'credential_stale'
+				WHEN status = 'disabled' THEN 'credential_disabled'
 				ELSE 'credential_unavailable'
 			END AS class,
 			COUNT(*) AS count,
@@ -298,7 +300,7 @@ func (db *DB) appendCredentialIssues(result []IssueRow, since time.Time) []Issue
 			COALESCE(provider, '') AS endpoint,
 			COALESCE(error_class, '') AS message
 		FROM credential_health
-		WHERE status IN ('unavailable', 'disabled', 'error', 'stale')
+		WHERE status IN ('unavailable', 'disabled', 'error', 'stale', 'warning')
 		GROUP BY class, provider, error_class
 	`)
 	if err != nil {
@@ -465,6 +467,10 @@ func classLabel(class string) string {
 		return "Credential health error"
 	case "credential_stale":
 		return "Credential health stale"
+	case "credential_quota_limited":
+		return "Credential quota signal"
+	case "credential_history_warning":
+		return "Credential history warning"
 	case "usage_conflict":
 		return "Usage conflict"
 	case "side_channel_duplicate":
@@ -489,7 +495,7 @@ func classSeverity(class string) string {
 	case "rate_limited", "upstream_5xx", "context_length", "capture_parse_error", "dropped_event",
 		"response_completed_without_usage", "stream_ended_without_completed", "response_incomplete",
 		"proxy_connection_closed", "credential_unavailable", "credential_stale", "quota_low", "quota_refresh_failed", "quota_stale", "quota_unsupported", "quota_unknown",
-		"side_channel_expired", "side_channel_invalid_payload", "side_channel_unmatched":
+		"credential_quota_limited", "credential_history_warning", "side_channel_expired", "side_channel_invalid_payload", "side_channel_unmatched":
 		return "warning"
 	default:
 		return "info"

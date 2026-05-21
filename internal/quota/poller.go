@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"sync"
 	"time"
 
@@ -103,8 +104,8 @@ func (p *Poller) probeAPICall() {
 		p.mu.Unlock()
 		return
 	}
-	body := bytes.NewReader([]byte(`{"provider":"__metering_probe__","dry_run":true}`))
-	_, statusCode, err := p.client.DoAPICall("POST", "/api-call", body)
+	body := bytes.NewReader([]byte(`{"method":"GET","url":"http://127.0.0.1:0/__metering_probe__"}`))
+	respBody, statusCode, err := p.client.DoAPICall("POST", "/api-call", body)
 	if err != nil {
 		p.mu.Lock()
 		p.apiCallAvail = false
@@ -112,7 +113,8 @@ func (p *Poller) probeAPICall() {
 		return
 	}
 	p.mu.Lock()
-	p.apiCallAvail = statusCode >= 200 && statusCode < 300
+	p.apiCallAvail = statusCode >= 200 && statusCode < 300 ||
+		statusCode == http.StatusBadGateway && bytes.Contains(respBody, []byte("request failed"))
 	p.mu.Unlock()
 }
 
@@ -340,13 +342,8 @@ func (p *Poller) recordUnsupportedProvider(provider, nowStr string, nowUnix int6
 	p.recordRefreshEvent(provider, credHash, "adapter", "error", "unsupported", 0, nowStr, nowUnix)
 }
 
-func adapterForProvider(provider string) (ProviderAdapter, bool) {
-	switch provider {
-	case "claude", "codex", "kimi":
-		return genericAdapter{}, true
-	default:
-		return nil, false
-	}
+func adapterForProvider(_ string) (ProviderAdapter, bool) {
+	return nil, false
 }
 
 func (p *Poller) hashQuotaCredential(provider, material string) string {

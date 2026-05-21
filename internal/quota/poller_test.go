@@ -1,8 +1,10 @@
 package quota
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -109,5 +111,37 @@ func TestProbeAPICallDoesNotTreatCLIProxyAPIMissingMethodAsFullQuotaAvailable(t 
 	p.probeAPICall()
 	if p.APICallAvailable() {
 		t.Fatal("APICallAvailable = true, want false for CPA v7.0.4 missing method response")
+	}
+}
+
+func TestProbeAPICallDetectsCLIProxyAPICurrentContract(t *testing.T) {
+	var requestBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/management/api-call" {
+			http.NotFound(w, r)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		requestBody = string(body)
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"error":"request failed"}`))
+	}))
+	defer server.Close()
+
+	client, err := cliproxy.NewClient(cliproxy.CLIProxyConfig{
+		BaseURL: server.URL + "/v0/management",
+		Key:     "management-key",
+		Timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	p := NewPoller(client, &fakeQuotaStore{}, hash.NewWithSalt("test-salt"), config.QuotaConfig{})
+	p.probeAPICall()
+	if !p.APICallAvailable() {
+		t.Fatal("APICallAvailable = false, want true for accepted api-call request contract")
+	}
+	if !strings.Contains(requestBody, `"method":"GET"`) || !strings.Contains(requestBody, `"url":"http://127.0.0.1:0/__metering_probe__"`) {
+		t.Fatalf("probe request body = %s, want method/url contract", requestBody)
 	}
 }

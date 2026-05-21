@@ -89,25 +89,40 @@ type CLIProxyConfig struct {
 }
 
 type AuthFileEntry struct {
-	ID            string `json:"id"`
-	Provider      string `json:"provider"`
-	AuthType      string `json:"auth_type"`
-	AuthIndex     string `json:"auth_index"`
-	Label         string `json:"label"`
-	Status        string `json:"status"`
-	StatusMessage string `json:"status_message"`
-	SuccessCount  int64  `json:"success_count"`
-	FailedCount   int64  `json:"failed_count"`
-	Available     bool   `json:"available"`
-	Disabled      bool   `json:"disabled"`
-	Unavailable   bool   `json:"unavailable"`
-	Key           string `json:"key"`
-	Source        string `json:"source"`
-	ErrorClass    string `json:"error_class"`
+	ID                 string                    `json:"id"`
+	Provider           string                    `json:"provider"`
+	AuthType           string                    `json:"auth_type"`
+	AuthIndex          string                    `json:"auth_index"`
+	Label              string                    `json:"label"`
+	Status             string                    `json:"status"`
+	StatusMessage      string                    `json:"status_message"`
+	SuccessCount       int64                     `json:"success_count"`
+	FailedCount        int64                     `json:"failed_count"`
+	RecentSuccessCount int64                     `json:"recent_success_count"`
+	RecentFailedCount  int64                     `json:"recent_failed_count"`
+	RecentRequests     []AuthRecentRequestBucket `json:"recent_requests"`
+	Available          bool                      `json:"available"`
+	Disabled           bool                      `json:"disabled"`
+	Unavailable        bool                      `json:"unavailable"`
+	Key                string                    `json:"key"`
+	Source             string                    `json:"source"`
+	Plan               string                    `json:"plan"`
+	NextRetryAfter     string                    `json:"next_retry_after"`
+	NextRetryAfterUnix int64                     `json:"next_retry_after_unix"`
+	ErrorClass         string                    `json:"error_class"`
+	ErrorType          string                    `json:"error_type"`
+	ErrorCode          string                    `json:"error_code"`
+	ErrorMessage       string                    `json:"error_message"`
 }
 
 type AuthFilesResponse struct {
 	AuthFiles []AuthFileEntry `json:"auth_files"`
+}
+
+type AuthRecentRequestBucket struct {
+	Time    string `json:"time"`
+	Success int64  `json:"success"`
+	Failed  int64  `json:"failed"`
 }
 
 func (e *AuthFileEntry) UnmarshalJSON(data []byte) error {
@@ -121,9 +136,11 @@ func (e *AuthFileEntry) UnmarshalJSON(data []byte) error {
 	e.AuthIndex = rawString(raw, "auth_index")
 	e.Label = rawString(raw, "label")
 	e.Status = rawString(raw, "status")
-	e.StatusMessage = rawString(raw, "status_message")
+	e.StatusMessage = firstString(raw, "status_message", "message", "last_error", "last_error_message")
 	e.SuccessCount = firstInt64(raw, "success_count", "success")
 	e.FailedCount = firstInt64(raw, "failed_count", "failed")
+	e.RecentRequests = rawRecentRequests(raw, "recent_requests")
+	e.RecentSuccessCount, e.RecentFailedCount = sumRecentRequests(e.RecentRequests)
 	e.Available = rawBool(raw, "available")
 	e.Disabled = rawBool(raw, "disabled")
 	e.Unavailable = rawBool(raw, "unavailable")
@@ -132,7 +149,32 @@ func (e *AuthFileEntry) UnmarshalJSON(data []byte) error {
 	}
 	e.Key = rawString(raw, "key")
 	e.Source = rawString(raw, "source")
-	e.ErrorClass = rawString(raw, "error_class")
+	e.Plan = firstString(raw, "plan", "plan_type", "planType")
+	if e.Plan == "" {
+		e.Plan = rawNestedString(raw, "id_token", "plan_type", "planType")
+	}
+	e.NextRetryAfter = firstString(raw, "next_retry_after", "nextRetryAfter")
+	e.NextRetryAfterUnix = firstUnixTime(raw, "next_retry_after", "nextRetryAfter")
+	e.ErrorClass = firstString(raw, "error_class", "error_type", "error_code")
+	e.ErrorType = rawString(raw, "error_type")
+	e.ErrorCode = rawString(raw, "error_code")
+	e.ErrorMessage = rawString(raw, "error_message")
+	errorType, errorCode, errorMessage := rawErrorDetails(raw)
+	if e.ErrorType == "" {
+		e.ErrorType = errorType
+	}
+	if e.ErrorCode == "" {
+		e.ErrorCode = errorCode
+	}
+	if e.ErrorMessage == "" {
+		e.ErrorMessage = errorMessage
+	}
+	if e.ErrorClass == "" {
+		e.ErrorClass = firstNonEmpty(errorType, errorCode)
+	}
+	if e.StatusMessage == "" {
+		e.StatusMessage = errorMessage
+	}
 	return nil
 }
 
@@ -245,6 +287,106 @@ func firstString(raw map[string]json.RawMessage, keys ...string) string {
 	for _, key := range keys {
 		if value := rawString(raw, key); value != "" {
 			return value
+		}
+	}
+	return ""
+}
+
+func rawNestedString(raw map[string]json.RawMessage, objectKey string, keys ...string) string {
+	data, ok := raw[objectKey]
+	if !ok || len(data) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return ""
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return ""
+	}
+	return firstString(obj, keys...)
+}
+
+func rawRecentRequests(raw map[string]json.RawMessage, key string) []AuthRecentRequestBucket {
+	data, ok := raw[key]
+	if !ok || len(data) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return nil
+	}
+	var rows []AuthRecentRequestBucket
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return nil
+	}
+	return rows
+}
+
+func sumRecentRequests(rows []AuthRecentRequestBucket) (success, failed int64) {
+	for _, row := range rows {
+		success += row.Success
+		failed += row.Failed
+	}
+	return success, failed
+}
+
+func firstUnixTime(raw map[string]json.RawMessage, keys ...string) int64 {
+	for _, key := range keys {
+		if value := rawUnixTime(raw, key); value != 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func rawUnixTime(raw map[string]json.RawMessage, key string) int64 {
+	data, ok := raw[key]
+	if !ok || len(data) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return 0
+	}
+	var n int64
+	if err := json.Unmarshal(data, &n); err == nil {
+		return n
+	}
+	var f float64
+	if err := json.Unmarshal(data, &f); err == nil {
+		return int64(f)
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return 0
+		}
+		if t, err := time.Parse(time.RFC3339, s); err == nil {
+			return t.Unix()
+		}
+		var parsed json.Number = json.Number(s)
+		n, _ := parsed.Int64()
+		return n
+	}
+	return 0
+}
+
+func rawErrorDetails(raw map[string]json.RawMessage) (errorType, errorCode, errorMessage string) {
+	for _, key := range []string{"error", "last_error"} {
+		data, ok := raw[key]
+		if !ok || len(data) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+			continue
+		}
+		var message string
+		if err := json.Unmarshal(data, &message); err == nil {
+			return "", "", strings.TrimSpace(message)
+		}
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(data, &obj); err != nil {
+			continue
+		}
+		return firstString(obj, "type", "error_type"),
+			firstString(obj, "code", "error_code"),
+			firstString(obj, "message", "error_message", "detail")
+	}
+	return "", "", ""
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
 		}
 	}
 	return ""
