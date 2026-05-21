@@ -154,6 +154,14 @@ func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleKeys(w, r)
 	case strings.HasSuffix(path, "/api/requests"):
 		s.handleRequests(w, r)
+	case strings.HasSuffix(path, "/api/multimodal/summary"):
+		s.handleMultimodalSummary(w, r)
+	case strings.HasSuffix(path, "/api/images/summary"):
+		s.handleImageSummary(w, r)
+	case strings.HasSuffix(path, "/api/images/models"):
+		s.handleImageModels(w, r)
+	case strings.HasSuffix(path, "/api/images/requests"):
+		s.handleImageRequests(w, r)
 	case strings.HasSuffix(path, "/api/errors"):
 		s.handleErrors(w, r)
 	case strings.HasSuffix(path, "/api/health"):
@@ -370,6 +378,150 @@ func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, report)
 }
 
+func (s *Server) handleMultimodalSummary(w http.ResponseWriter, r *http.Request) {
+	since, _ := parseRange(r)
+	rows, err := s.db.MultimodalSummary(since)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	if rows == nil {
+		rows = []db.MultimodalSummaryRow{}
+	}
+	writeJSON(w, rows)
+}
+
+func (s *Server) handleImageSummary(w http.ResponseWriter, r *http.Request) {
+	since, _ := parseRange(r)
+	row, err := s.db.ImageSummary(since)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	models, err := s.db.ImageModels(since)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	totalCost, costKnown, unpricedModels := s.imageModelsCost(models)
+	writeJSON(w, map[string]any{
+		"summary":         row,
+		"cost":            totalCost,
+		"cost_known":      costKnown,
+		"unpriced_models": unpricedModels,
+	})
+}
+
+func (s *Server) handleImageModels(w http.ResponseWriter, r *http.Request) {
+	since, _ := parseRange(r)
+	rows, err := s.db.ImageModels(since)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	type imageModelReport struct {
+		db.ImageModelRow
+		Cost      float64 `json:"cost"`
+		CostKnown bool    `json:"cost_known"`
+	}
+	report := make([]imageModelReport, 0, len(rows))
+	for _, row := range rows {
+		cost, known := s.imageModelCost(row)
+		report = append(report, imageModelReport{
+			ImageModelRow: row,
+			Cost:          cost,
+			CostKnown:     known,
+		})
+	}
+	writeJSON(w, report)
+}
+
+func (s *Server) handleImageRequests(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	since, _ := parseRange(r)
+	rows, err := s.db.ImageRequests(limit, since)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	report := event.RequestsFromDB(rows)
+	if report == nil {
+		report = []event.RequestReport{}
+	}
+	writeJSON(w, report)
+}
+
+func (s *Server) imageModelsCost(rows []db.ImageModelRow) (float64, bool, int64) {
+	total := 0.0
+	known := true
+	var unpriced int64
+	for _, row := range rows {
+		cost, rowKnown := s.imageModelCost(row)
+		if rowKnown {
+			total += cost
+		} else {
+			known = false
+			unpriced++
+		}
+	}
+	return total, known, unpriced
+}
+
+func (s *Server) imageModelCost(row db.ImageModelRow) (float64, bool) {
+	if s.pricing == nil {
+		return 0, false
+	}
+	inputText, cachedText := splitCachedInput(row.InputTextTokens, row.CachedTextTokens)
+	inputImage, cachedImage := splitCachedInput(row.InputImageTokens, row.CachedImageTokens)
+	dimensions := []struct {
+		channel   string
+		direction string
+		amount    int64
+	}{
+		{"text", "input", inputText},
+		{"text", "cached_input", cachedText},
+		{"image", "input", inputImage},
+		{"image", "cached_input", cachedImage},
+		{"mixed", "cached_input", row.CachedMixedTokens},
+		{"image", "output", row.OutputImageTokens},
+	}
+	total := 0.0
+	known := true
+	seenBillable := false
+	for _, d := range dimensions {
+		if d.amount <= 0 {
+			continue
+		}
+		seenBillable = true
+		cost, ok := s.pricing.CostDimension(row.Model, "image", d.channel, "tokens", d.direction, "token", float64(d.amount))
+		if !ok {
+			known = false
+			continue
+		}
+		total += cost
+	}
+	if !seenBillable {
+		return 0, row.RequestCount == 0 || row.MissingUsageCount == 0
+	}
+	return total, known
+}
+
+func splitCachedInput(input, cached int64) (int64, int64) {
+	if cached <= 0 {
+		return input, 0
+	}
+	if input <= 0 {
+		return 0, cached
+	}
+	if cached > input {
+		cached = input
+	}
+	return input - cached, cached
+}
+
 func (s *Server) handleErrors(w http.ResponseWriter, r *http.Request) {
 	since, _ := parseRange(r)
 
@@ -505,6 +657,10 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		},
 		MeteringKinds: []string{
 			event.MeteringLLMTokens,
+			event.MeteringImageTokens,
+			event.MeteringEmbeddingTokens,
+			event.MeteringAudioSeconds,
+			event.MeteringRequestOnly,
 			event.MeteringNone,
 		},
 		CaptureModes: []string{

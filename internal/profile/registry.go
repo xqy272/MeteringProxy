@@ -101,6 +101,75 @@ func (r *Registry) registerBuiltins() {
 			},
 		},
 		{
+			Name:           "openai_images_generations",
+			Method:         http.MethodPost,
+			PathPrefix:     "/v1/images/generations",
+			PathMatcher:    isOpenAIImagesGenerationsPath,
+			CaptureMode:    event.CaptureUsageMetered,
+			MeteringKind:   event.MeteringImageTokens,
+			StreamProtocol: streamproto.OpenAISSE(),
+			NonStreamExtractor: func(body []byte, endpoint string) (*extractor.UsageInfo, error) {
+				return extractor.ExtractImageNonStreaming(body)
+			},
+			StreamExtractor: func(data []byte) (*extractor.UsageInfo, error) {
+				return extractor.ExtractImageUsage(data)
+			},
+		},
+		{
+			Name:           "openai_images_edits",
+			Method:         http.MethodPost,
+			PathPrefix:     "/v1/images/edits",
+			PathMatcher:    isOpenAIImagesEditsPath,
+			CaptureMode:    event.CaptureUsageMetered,
+			MeteringKind:   event.MeteringImageTokens,
+			StreamProtocol: streamproto.OpenAISSE(),
+			NonStreamExtractor: func(body []byte, endpoint string) (*extractor.UsageInfo, error) {
+				return extractor.ExtractImageNonStreaming(body)
+			},
+			StreamExtractor: func(data []byte) (*extractor.UsageInfo, error) {
+				return extractor.ExtractImageUsage(data)
+			},
+		},
+		{
+			Name:           "openai_images_variations",
+			Method:         http.MethodPost,
+			PathPrefix:     "/v1/images/variations",
+			PathMatcher:    isOpenAIImagesVariationsPath,
+			CaptureMode:    event.CaptureRequestOnly,
+			MeteringKind:   event.MeteringRequestOnly,
+			StreamProtocol: streamproto.None(),
+		},
+		{
+			Name:           "openai_embeddings",
+			Method:         http.MethodPost,
+			PathPrefix:     "/v1/embeddings",
+			PathMatcher:    isOpenAIEmbeddingsPath,
+			CaptureMode:    event.CaptureUsageMetered,
+			MeteringKind:   event.MeteringEmbeddingTokens,
+			StreamProtocol: streamproto.None(),
+			NonStreamExtractor: func(body []byte, endpoint string) (*extractor.UsageInfo, error) {
+				return extractor.ExtractEmbeddingNonStreaming(body)
+			},
+		},
+		{
+			Name:           "openai_audio",
+			Method:         http.MethodPost,
+			PathPrefix:     "/v1/audio/{speech|transcriptions|translations}",
+			PathMatcher:    isOpenAIAudioPath,
+			CaptureMode:    event.CaptureRequestOnly,
+			MeteringKind:   event.MeteringRequestOnly,
+			StreamProtocol: streamproto.None(),
+		},
+		{
+			Name:           "openai_videos",
+			Method:         "",
+			PathPrefix:     "/v1/videos",
+			PathMatcher:    isOpenAIVideosPath,
+			CaptureMode:    event.CaptureRequestOnly,
+			MeteringKind:   event.MeteringRequestOnly,
+			StreamProtocol: streamproto.None(),
+		},
+		{
 			Name:           "unknown_passthrough",
 			Method:         "", // matches any method
 			PathPrefix:     "", // matches any path
@@ -152,6 +221,56 @@ func isResponsesPath(path string) bool {
 
 func isAnthropicMessagesPath(path string) bool {
 	return path == "/v1/messages" || matchProviderRoute(path, "v1", "messages")
+}
+
+func isOpenAIImagesGenerationsPath(path string) bool {
+	return path == "/v1/images/generations" ||
+		matchProviderRoute(path, "", "images/generations") ||
+		matchProviderRoute(path, "v1", "images/generations")
+}
+
+func isOpenAIImagesEditsPath(path string) bool {
+	return path == "/v1/images/edits" ||
+		matchProviderRoute(path, "", "images/edits") ||
+		matchProviderRoute(path, "v1", "images/edits")
+}
+
+func isOpenAIImagesVariationsPath(path string) bool {
+	return path == "/v1/images/variations" ||
+		matchProviderRoute(path, "", "images/variations") ||
+		matchProviderRoute(path, "v1", "images/variations")
+}
+
+func isOpenAIEmbeddingsPath(path string) bool {
+	return path == "/v1/embeddings" ||
+		matchProviderRoute(path, "", "embeddings") ||
+		matchProviderRoute(path, "v1", "embeddings")
+}
+
+func isOpenAIAudioPath(path string) bool {
+	switch path {
+	case "/v1/audio/speech", "/v1/audio/transcriptions", "/v1/audio/translations":
+		return true
+	default:
+		return matchProviderRoute(path, "v1", "audio/speech") ||
+			matchProviderRoute(path, "v1", "audio/transcriptions") ||
+			matchProviderRoute(path, "v1", "audio/translations")
+	}
+}
+
+func isOpenAIVideosPath(path string) bool {
+	if path == "/v1/videos" || path == "/v1/videos/edits" ||
+		strings.HasPrefix(path, "/v1/videos/") {
+		return true
+	}
+	return matchProviderRoute(path, "v1", "videos") ||
+		matchProviderRoute(path, "v1", "videos/edits") ||
+		matchProviderRoutePrefix(path, "v1", "videos/")
+}
+
+func matchProviderRoutePrefix(path, version, prefix string) bool {
+	route, ok := providerVersionRoute(path, version)
+	return ok && strings.HasPrefix(route, prefix)
 }
 
 func matchProviderRoute(path, version, suffix string) bool {

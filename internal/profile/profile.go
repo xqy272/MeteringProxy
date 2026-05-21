@@ -48,6 +48,18 @@ func (p *EndpointProfile) DisplayName() string {
 		return "Anthropic Messages"
 	case "gemini_generate_content":
 		return "Gemini Generate Content"
+	case "openai_images_generations":
+		return "Images Generations"
+	case "openai_images_edits":
+		return "Images Edits"
+	case "openai_images_variations":
+		return "Images Variations"
+	case "openai_embeddings":
+		return "Embeddings"
+	case "openai_audio":
+		return "Audio"
+	case "openai_videos":
+		return "Videos"
 	case "unknown_passthrough":
 		return "Unknown (Passthrough)"
 	default:

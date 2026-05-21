@@ -55,6 +55,10 @@ type ReportStore interface {
 	AllCredentialHealth() ([]db.CredentialHealthRow, error)
 	AllQuotaCurrent() ([]db.QuotaCurrentRow, error)
 	SideUsageStatusCounts(since time.Time) (map[string]int64, error)
+	MultimodalSummary(since time.Time) ([]db.MultimodalSummaryRow, error)
+	ImageSummary(since time.Time) (*db.ImageSummaryRow, error)
+	ImageModels(since time.Time) ([]db.ImageModelRow, error)
+	ImageRequests(limit int, since time.Time) ([]db.RequestRow, error)
 }
 
 // HealthWriter is the write-side interface for health metrics.

@@ -419,6 +419,60 @@ func TestNewPricing_EmptyButSafe(t *testing.T) {
 	}
 }
 
+func TestCostDimension_GPTImage2(t *testing.T) {
+	p, err := Load(writePricing(t, `
+multimodal_pricing:
+  gpt-image-2:
+    text:
+      input_per_1m: 5.00
+      cached_input_per_1m: 1.25
+    image:
+      input_per_1m: 8.00
+      cached_input_per_1m: 2.00
+      output_per_1m: 30.00
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	textCost, known := p.CostDimension("gpt-image-2", "image", "text", "tokens", "input", "token", 10)
+	if !known {
+		t.Fatal("text image prompt tokens should be priced")
+	}
+	imageInCost, known := p.CostDimension("gpt-image-2", "image", "image", "tokens", "input", "token", 40)
+	if !known {
+		t.Fatal("input image tokens should be priced")
+	}
+	imageOutCost, known := p.CostDimension("gpt-image-2", "image", "image", "tokens", "output", "token", 50)
+	if !known {
+		t.Fatal("output image tokens should be priced")
+	}
+	expected := 10/1_000_000.0*5.00 + 40/1_000_000.0*8.00 + 50/1_000_000.0*30.00
+	got := textCost + imageInCost + imageOutCost
+	if diff := got - expected; diff < -0.0001 || diff > 0.0001 {
+		t.Fatalf("cost = %.6f, want %.6f", got, expected)
+	}
+}
+
+func TestCostDimension_RealtimeSeconds(t *testing.T) {
+	p, err := Load(writePricing(t, `
+multimodal_pricing:
+  gpt-realtime-translate:
+    audio_seconds:
+      per_second: 0.00057
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	cost, known := p.CostDimension("gpt-realtime-translate", "audio", "audio", "seconds", "input", "second", 60)
+	if !known {
+		t.Fatal("audio seconds should be priced")
+	}
+	expected := 60 * 0.00057
+	if diff := cost - expected; diff < -0.0001 || diff > 0.0001 {
+		t.Fatalf("cost = %.6f, want %.6f", cost, expected)
+	}
+}
+
 func TestCanonicalize(t *testing.T) {
 	tests := []struct {
 		input, want string

@@ -149,6 +149,76 @@ func TestInsertBatch(t *testing.T) {
 	}
 }
 
+func TestMultimodalAndImageReports(t *testing.T) {
+	d := newTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	createdAt := now.Add(-10 * time.Minute).Format(time.RFC3339)
+	if err := d.InsertBatch([]UsageRecord{{
+		CreatedAt:       createdAt,
+		RequestID:       "req-image",
+		Endpoint:        "/v1/images/generations",
+		Method:          "POST",
+		Status:          200,
+		LatencyMs:       120,
+		EndpointProfile: "openai_images_generations",
+		CaptureMode:     "usage_metered",
+		MeteringKind:    "image_tokens",
+		CaptureOutcome:  "captured",
+		UsageSource:     "http_response",
+		ModelRequested:  "gpt-image-2",
+		ModelReturned:   "gpt-image-2",
+		UsageDimensions: []UsageDimensionRecord{
+			{Modality: "image", Channel: "text", Metric: "tokens", Direction: "input", Unit: "token", Amount: 10},
+			{Modality: "image", Channel: "image", Metric: "tokens", Direction: "input", Unit: "token", Amount: 40},
+			{Modality: "image", Channel: "image", Metric: "tokens", Direction: "output", Unit: "token", Amount: 50},
+			{Modality: "image", Channel: "image", Metric: "count", Direction: "output", Unit: "image", Amount: 1},
+		},
+		ImageUsage: &ImageUsageRecord{
+			Operation:      "generation",
+			ModelRequested: "gpt-image-2",
+			ModelReturned:  "gpt-image-2",
+			Size:           "1024x1024",
+			Quality:        "high",
+			OutputFormat:   "png",
+			ImageCount:     1,
+		},
+	}}); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	mm, err := d.MultimodalSummary(now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("MultimodalSummary: %v", err)
+	}
+	if len(mm) != 4 {
+		t.Fatalf("multimodal rows = %+v, want 4", mm)
+	}
+
+	summary, err := d.ImageSummary(now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("ImageSummary: %v", err)
+	}
+	if summary.RequestCount != 1 || summary.ImageCount != 1 || summary.InputTextTokens != 10 || summary.InputImageTokens != 40 || summary.OutputImageTokens != 50 || summary.TotalTokens != 100 {
+		t.Fatalf("image summary = %+v", summary)
+	}
+
+	models, err := d.ImageModels(now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("ImageModels: %v", err)
+	}
+	if len(models) != 1 || models[0].Model != "gpt-image-2" || models[0].Operation != "generation" || models[0].TotalTokens != 100 {
+		t.Fatalf("image models = %+v", models)
+	}
+
+	requests, err := d.ImageRequests(10, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("ImageRequests: %v", err)
+	}
+	if len(requests) != 1 || requests[0].RequestID != "req-image" {
+		t.Fatalf("image requests = %+v", requests)
+	}
+}
+
 func TestInsertBatchRejectsInvalidTimestamp(t *testing.T) {
 	d := newTestDB(t)
 	err := d.InsertBatch([]UsageRecord{{

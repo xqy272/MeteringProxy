@@ -40,3 +40,35 @@ pricing:
     input_per_1m: 3.00
     cached_input_per_1m: 0.025
     output_per_1m: 6.00
+
+multimodal_pricing:
+  # OpenAI multimodal models
+  gpt-image-2:
+    aliases:
+      - gpt-image-2.0
+      - GPT-Image-2.0 (image)
+    text:
+      input_per_1m: 5.00
+      cached_input_per_1m: 1.25
+    image:
+      input_per_1m: 8.00
+      cached_input_per_1m: 2.00
+      output_per_1m: 30.00
+  gpt-realtime-2:
+    text:
+      input_per_1m: 4.00
+      cached_input_per_1m: 0.40
+      output_per_1m: 24.00
+    image:
+      input_per_1m: 5.00
+      cached_input_per_1m: 0.50
+    audio:
+      input_per_1m: 32.00
+      cached_input_per_1m: 0.40
+      output_per_1m: 64.00
+  gpt-realtime-translate:
+    audio_seconds:
+      per_second: 0.00057
+  gpt-realtime-whisper:
+    audio_seconds:
+      per_second: 0.00028

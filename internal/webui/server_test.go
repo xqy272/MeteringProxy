@@ -201,6 +201,60 @@ func TestAPIModelsCostIncludesCacheCreationTokens(t *testing.T) {
 	}
 }
 
+func TestAPIImagesSummary(t *testing.T) {
+	s, database := newTestServer(t, "/metering")
+	s.pricing.Multimodal["gpt-image-2"] = pricing.MultimodalModelPrice{
+		Text:  pricing.ModalityPrice{InputPer1M: 5.00, CachedInputPer1M: 1.25},
+		Image: pricing.ModalityPrice{InputPer1M: 8.00, CachedInputPer1M: 2.00, OutputPer1M: 30.00},
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := database.InsertBatch([]db.UsageRecord{{
+		CreatedAt:       now.Add(-10 * time.Minute).Format(time.RFC3339),
+		RequestID:       "req-image",
+		Endpoint:        "/v1/images/generations",
+		Method:          "POST",
+		Status:          200,
+		LatencyMs:       100,
+		EndpointProfile: "openai_images_generations",
+		CaptureMode:     event.CaptureUsageMetered,
+		MeteringKind:    event.MeteringImageTokens,
+		CaptureOutcome:  event.OutcomeCaptured,
+		ModelReturned:   "gpt-image-2",
+		UsageDimensions: []db.UsageDimensionRecord{
+			{Modality: "image", Channel: "text", Metric: "tokens", Direction: "input", Unit: "token", Amount: 10},
+			{Modality: "image", Channel: "text", Metric: "tokens", Direction: "cached_input", Unit: "token", Amount: 2},
+			{Modality: "image", Channel: "image", Metric: "tokens", Direction: "input", Unit: "token", Amount: 40},
+			{Modality: "image", Channel: "image", Metric: "tokens", Direction: "cached_input", Unit: "token", Amount: 4},
+			{Modality: "image", Channel: "image", Metric: "tokens", Direction: "output", Unit: "token", Amount: 50},
+		},
+		ImageUsage: &db.ImageUsageRecord{Operation: "generation", ModelReturned: "gpt-image-2", ImageCount: 1},
+	}}); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/metering/api/images/summary?range=24h", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("GET /metering/api/images/summary: status %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Summary db.ImageSummaryRow `json:"summary"`
+		Cost    float64            `json:"cost"`
+		Known   bool               `json:"cost_known"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal images summary: %v", err)
+	}
+	if payload.Summary.RequestCount != 1 || payload.Summary.TotalTokens != 100 || !payload.Known || payload.Cost <= 0 {
+		t.Fatalf("payload = %+v", payload)
+	}
+	expected := 8/1_000_000.0*5.00 + 2/1_000_000.0*1.25 + 36/1_000_000.0*8.00 + 4/1_000_000.0*2.00 + 50/1_000_000.0*30.00
+	if diff := payload.Cost - expected; diff < -0.0001 || diff > 0.0001 {
+		t.Fatalf("cost = %.6f, want %.6f", payload.Cost, expected)
+	}
+}
+
 func TestAPIResponsesAreNotCacheable(t *testing.T) {
 	s, _ := newTestServer(t, "/metering")
 	req := httptest.NewRequest("GET", "/metering/api/summary?range=24h", nil)

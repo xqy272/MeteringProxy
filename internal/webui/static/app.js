@@ -273,6 +273,52 @@ async function loadKeys() {
   }).join('');
 }
 
+async function loadImages() {
+  const [summaryResp, modelResp] = await Promise.all([
+    fetchJSON('images/summary?range='+encodeURIComponent(getRange())),
+    fetchJSON('images/models?range='+encodeURIComponent(getRange()))
+  ]);
+  const s = summaryResp && summaryResp.summary ? summaryResp.summary : {};
+  const rows = Array.isArray(modelResp) ? modelResp : [];
+  const totalTokens = Number(s.total_tokens || 0);
+  const missing = Number(s.missing_usage_count || 0);
+  setText('images-summary', t('summary.images', {requests:fmtFull(s.request_count||0), images:fmtFull(s.image_count||0)}));
+  setText('image-count', fmtFull(s.image_count || 0));
+  setText('image-count-detail', t('metric.partial_images', {partials:fmtFull(s.partial_image_count||0), inputs:fmtFull(s.input_image_count||0)}));
+  setText('image-tokens', fmtNum(totalTokens));
+  setText('image-tokens-detail', t('metric.image_token_mix', {
+    text:fmtNum(s.input_text_tokens||0),
+    image:fmtNum(s.input_image_tokens||0),
+    cached:fmtNum(Number(s.cached_text_tokens||0)+Number(s.cached_image_tokens||0)+Number(s.cached_mixed_tokens||0)),
+    output:fmtNum(s.output_image_tokens||0)
+  }));
+  setText('image-cost', summaryResp && summaryResp.cost_known ? fmtCost(summaryResp.cost) : (Number(summaryResp && summaryResp.cost || 0) > 0 ? fmtCost(summaryResp.cost) : '-'));
+  setText('image-cost-detail', summaryResp && summaryResp.cost_known ? t('metric.full_estimate') : t('metric.partial_estimate'));
+  setText('image-capture', missing ? fmtFull(missing) : t('badge.healthy'));
+  setText('image-capture-detail', t('metric.capture_missing_usage', {count:fmtFull(missing)}));
+  const tbody=$('images-models-table');
+  if(!tbody) return;
+  if(!rows.length) {
+    tbody.innerHTML=emptyRow(9,t('state.no_image_data'),t('state.image_hint'));
+    return;
+  }
+  tbody.innerHTML=rows.map(r=>{
+    const missing=Number(r.missing_usage_count||0);
+    const cap=missing?`<span class="badge warn">${esc(t('badge.skipped'))}</span>`:`<span class="badge ok">${esc(t('badge.captured'))}</span>`;
+    return `<tr>
+      <td><div class="model-name" title="${esc(modelName(r.model))}">${esc(modelName(r.model))}</div></td>
+      <td>${esc(r.operation||'-')}</td>
+      <td class="numeric mono">${fmtFull(r.request_count||0)}</td>
+      <td class="numeric mono">${fmtFull(r.image_count||0)}</td>
+      <td class="numeric mono">${fmtNum(r.input_text_tokens||0)}</td>
+      <td class="numeric mono">${fmtNum(r.input_image_tokens||0)}</td>
+      <td class="numeric mono">${fmtNum(r.output_image_tokens||0)}</td>
+      <td class="numeric mono">${r.cost_known?fmtCost(r.cost):'-'}</td>
+      <td>${cap}</td>
+    </tr>`;
+  }).join('');
+}
+
 /* --- Requests ---------------------------------------------- */
 async function loadRequests() {
   const p=new URLSearchParams({limit:'100',range:getRange()});
@@ -848,7 +894,7 @@ async function refresh() {
   setRefreshing(true);
   try {
     const tasks=[]; if(!metadata) tasks.push(['metadata',loadMetadata]);
-    tasks.push(['overview',loadOverview],['issues',loadIssues],['activity',loadActivity],['models',loadModels],['keys',loadKeys],['timeseries',loadTimeseries],['errors',loadErrors],['health',loadHealth],['quota',loadQuota],['observability',loadObservability]);
+    tasks.push(['overview',loadOverview],['issues',loadIssues],['activity',loadActivity],['models',loadModels],['images',loadImages],['keys',loadKeys],['timeseries',loadTimeseries],['errors',loadErrors],['health',loadHealth],['quota',loadQuota],['observability',loadObservability]);
     if(requestsExpanded) tasks.push(['requests',loadRequests]);
     const settled=await Promise.allSettled(tasks.map(([,fn])=>fn()));
     const failures=settled.map((res,i)=>({res,name:tasks[i][0]})).filter(x=>x.res.status==='rejected').map(x=>({name:x.name,error:x.res.reason}));
@@ -862,6 +908,7 @@ async function refresh() {
 function markFailed(failures) {
   const fm=new Map(failures.map(f=>[f.name,f.error]));
   if(fm.has('models')){const mt=$('models-table');if(mt)mt.innerHTML=errorRow(7,fm.get('models').message);const dc=$('model-distribution-chart');if(dc)dc.innerHTML=`<div class="empty-state error-text">${esc(fm.get('models').message)}</div>`;}
+  if(fm.has('images')){const it=$('images-models-table');if(it)it.innerHTML=errorRow(9,fm.get('images').message);setText('images-summary',fm.get('images').message);}
   if(fm.has('keys'))$('keys-table').innerHTML=errorRow(5,fm.get('keys').message);
   if(fm.has('requests'))$('requests-table').innerHTML=errorRow(11,fm.get('requests').message);
   if(fm.has('issues')){$('issues-state').classList.remove('hidden');$('issues-state').innerHTML=`<div class="issues-empty error-text">${esc(fm.get('issues').message)}</div>`;const io=$('issues-overview');if(io)io.innerHTML='';$('issues-list').innerHTML=`<div class="issue-class-placeholder">${esc(t('issues.select_severity_hint'))}</div>`;}

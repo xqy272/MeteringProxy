@@ -60,6 +60,52 @@ type UsageRecord struct {
 	TerminalEvent       string
 	TerminalReason      string
 	SideUsageEventID    int64
+
+	UsageDimensions []UsageDimensionRecord
+	ImageUsage      *ImageUsageRecord
+}
+
+type UsageDimensionRecord struct {
+	RequestUsageID  int64
+	RequestID       string
+	CreatedAt       string
+	CreatedAtUnix   int64
+	EndpointProfile string
+	Provider        string
+	Model           string
+	Modality        string
+	Channel         string
+	Metric          string
+	Direction       string
+	Unit            string
+	Amount          float64
+	UsageSource     string
+	CaptureOutcome  string
+	CaptureReason   string
+	DetailsJSON     string
+}
+
+type ImageUsageRecord struct {
+	RequestUsageID    int64
+	RequestID         string
+	CreatedAt         string
+	CreatedAtUnix     int64
+	Operation         string
+	Provider          string
+	ModelRequested    string
+	ModelReturned     string
+	Size              string
+	Quality           string
+	OutputFormat      string
+	Stream            bool
+	ImageCount        int64
+	PartialImageCount int64
+	InputImageCount   int64
+	HasMask           bool
+	UsageSource       string
+	CaptureOutcome    string
+	CaptureReason     string
+	MetadataJSON      string
 }
 
 type SummaryRow struct {
@@ -309,6 +355,50 @@ type QuotaRefreshEventRow struct {
 	Partial        int64  `json:"partial"`
 }
 
+type MultimodalSummaryRow struct {
+	Modality      string  `json:"modality"`
+	Channel       string  `json:"channel"`
+	Metric        string  `json:"metric"`
+	Direction     string  `json:"direction"`
+	Unit          string  `json:"unit"`
+	Amount        float64 `json:"amount"`
+	RequestCount  int64   `json:"request_count"`
+	UnpricedCount int64   `json:"unpriced_count"`
+}
+
+type ImageSummaryRow struct {
+	RequestCount      int64 `json:"request_count"`
+	FailedCount       int64 `json:"failed_count"`
+	ImageCount        int64 `json:"image_count"`
+	PartialImageCount int64 `json:"partial_image_count"`
+	InputImageCount   int64 `json:"input_image_count"`
+	MissingUsageCount int64 `json:"missing_usage_count"`
+	InputTextTokens   int64 `json:"input_text_tokens"`
+	InputImageTokens  int64 `json:"input_image_tokens"`
+	CachedTextTokens  int64 `json:"cached_text_tokens"`
+	CachedImageTokens int64 `json:"cached_image_tokens"`
+	CachedMixedTokens int64 `json:"cached_mixed_tokens"`
+	OutputImageTokens int64 `json:"output_image_tokens"`
+	TotalTokens       int64 `json:"total_tokens"`
+}
+
+type ImageModelRow struct {
+	Model             string `json:"model"`
+	Operation         string `json:"operation"`
+	RequestCount      int64  `json:"request_count"`
+	FailedCount       int64  `json:"failed_count"`
+	ImageCount        int64  `json:"image_count"`
+	PartialImageCount int64  `json:"partial_image_count"`
+	InputTextTokens   int64  `json:"input_text_tokens"`
+	InputImageTokens  int64  `json:"input_image_tokens"`
+	CachedTextTokens  int64  `json:"cached_text_tokens"`
+	CachedImageTokens int64  `json:"cached_image_tokens"`
+	CachedMixedTokens int64  `json:"cached_mixed_tokens"`
+	OutputImageTokens int64  `json:"output_image_tokens"`
+	TotalTokens       int64  `json:"total_tokens"`
+	MissingUsageCount int64  `json:"missing_usage_count"`
+}
+
 type DB struct {
 	sql  *sql.DB
 	read *sql.DB
@@ -329,7 +419,7 @@ const modelReturnedSourceCompatExpr = `CASE WHEN NULLIF(TRIM(model_returned_sour
 
 const usageSourceCompatExpr = `CASE WHEN NULLIF(TRIM(usage_source), '') IS NOT NULL THEN usage_source WHEN COALESCE(input_tokens, 0) > 0 OR COALESCE(output_tokens, 0) > 0 OR COALESCE(reasoning_tokens, 0) > 0 OR COALESCE(cached_tokens, 0) > 0 OR COALESCE(cache_creation_tokens, 0) > 0 OR COALESCE(total_tokens, 0) > 0 THEN 'http_response' ELSE 'none' END`
 
-const schemaVersion = 7
+const schemaVersion = 8
 const activitySampleLimit = 1000
 
 func Open(path string) (*DB, error) {
@@ -464,6 +554,9 @@ func migrate(sqlDB *sql.DB) error {
 	if err := createTablesV6(sqlDB); err != nil {
 		return err
 	}
+	if err := createMultimodalTables(sqlDB); err != nil {
+		return err
+	}
 	if err := ensureColumns(sqlDB, "side_usage_events", sideUsageEventColumns()); err != nil {
 		return err
 	}
@@ -476,7 +569,7 @@ func migrate(sqlDB *sql.DB) error {
 	if _, err := sqlDB.Exec(`
 			INSERT OR IGNORE INTO schema_migrations (version, name, applied_at)
 			VALUES (?, ?, ?)
-		`, schemaVersion, "v7_cliproxyapi_compatibility_fields", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		`, schemaVersion, "v8_multimodal_usage", time.Now().UTC().Format(time.RFC3339)); err != nil {
 		return err
 	}
 	_, err := sqlDB.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion))
@@ -570,6 +663,60 @@ func createTablesV6(sqlDB *sql.DB) error {
 	return nil
 }
 
+func createMultimodalTables(sqlDB *sql.DB) error {
+	tables := []string{
+		`CREATE TABLE IF NOT EXISTS usage_dimensions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			request_usage_id INTEGER NOT NULL DEFAULT 0,
+			request_id TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			created_at_unix INTEGER NOT NULL DEFAULT 0,
+			endpoint_profile TEXT NOT NULL DEFAULT '',
+			provider TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			modality TEXT NOT NULL DEFAULT '',
+			channel TEXT NOT NULL DEFAULT '',
+			metric TEXT NOT NULL DEFAULT '',
+			direction TEXT NOT NULL DEFAULT '',
+			unit TEXT NOT NULL DEFAULT '',
+			amount REAL NOT NULL DEFAULT 0,
+			usage_source TEXT NOT NULL DEFAULT '',
+			capture_outcome TEXT NOT NULL DEFAULT '',
+			capture_reason TEXT NOT NULL DEFAULT '',
+			details_json TEXT NOT NULL DEFAULT '{}'
+		)`,
+		`CREATE TABLE IF NOT EXISTS image_usage (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			request_usage_id INTEGER NOT NULL DEFAULT 0,
+			request_id TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			created_at_unix INTEGER NOT NULL DEFAULT 0,
+			operation TEXT NOT NULL DEFAULT '',
+			provider TEXT NOT NULL DEFAULT '',
+			model_requested TEXT NOT NULL DEFAULT '',
+			model_returned TEXT NOT NULL DEFAULT '',
+			size TEXT NOT NULL DEFAULT '',
+			quality TEXT NOT NULL DEFAULT '',
+			output_format TEXT NOT NULL DEFAULT '',
+			stream INTEGER NOT NULL DEFAULT 0,
+			image_count INTEGER NOT NULL DEFAULT 0,
+			partial_image_count INTEGER NOT NULL DEFAULT 0,
+			input_image_count INTEGER NOT NULL DEFAULT 0,
+			has_mask INTEGER NOT NULL DEFAULT 0,
+			usage_source TEXT NOT NULL DEFAULT '',
+			capture_outcome TEXT NOT NULL DEFAULT '',
+			capture_reason TEXT NOT NULL DEFAULT '',
+			metadata_json TEXT NOT NULL DEFAULT '{}'
+		)`,
+	}
+	for _, ddl := range tables {
+		if _, err := sqlDB.Exec(ddl); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func createIndexes(sqlDB *sql.DB) error {
 	indexes := []string{
 		`CREATE INDEX IF NOT EXISTS idx_request_usage_created_at ON request_usage(created_at)`,
@@ -595,6 +742,14 @@ func createIndexes(sqlDB *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_quota_current_provider_status ON quota_current(provider, status)`,
 		`CREATE INDEX IF NOT EXISTS idx_quota_refresh_events_provider_checked_at_unix ON quota_refresh_events(provider, checked_at_unix)`,
 		`CREATE INDEX IF NOT EXISTS idx_quota_refresh_events_status_checked_at_unix ON quota_refresh_events(status, checked_at_unix)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_dimensions_created_at_unix ON usage_dimensions(created_at_unix)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_dimensions_request_usage_id ON usage_dimensions(request_usage_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_dimensions_modality_created ON usage_dimensions(modality, created_at_unix)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_dimensions_model_created ON usage_dimensions(model, created_at_unix)`,
+		`CREATE INDEX IF NOT EXISTS idx_image_usage_created_at_unix ON image_usage(created_at_unix)`,
+		`CREATE INDEX IF NOT EXISTS idx_image_usage_request_usage_id ON image_usage(request_usage_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_image_usage_operation_created_at_unix ON image_usage(operation, created_at_unix)`,
+		`CREATE INDEX IF NOT EXISTS idx_image_usage_model_created_at_unix ON image_usage(model_returned, created_at_unix)`,
 	}
 	for _, stmt := range indexes {
 		if _, err := sqlDB.Exec(stmt); err != nil {
@@ -864,6 +1019,31 @@ func (db *DB) InsertBatch(records []UsageRecord) error {
 	}
 	defer stmt.Close()
 
+	dimStmt, err := tx.Prepare(`
+		INSERT INTO usage_dimensions (
+			request_usage_id, request_id, created_at, created_at_unix,
+			endpoint_profile, provider, model, modality, channel, metric, direction, unit, amount,
+			usage_source, capture_outcome, capture_reason, details_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer dimStmt.Close()
+
+	imageStmt, err := tx.Prepare(`
+		INSERT INTO image_usage (
+			request_usage_id, request_id, created_at, created_at_unix,
+			operation, provider, model_requested, model_returned, size, quality, output_format,
+			stream, image_count, partial_image_count, input_image_count, has_mask,
+			usage_source, capture_outcome, capture_reason, metadata_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer imageStmt.Close()
+
 	streamInt := func(s bool) int {
 		if s {
 			return 1
@@ -882,7 +1062,7 @@ func (db *DB) InsertBatch(records []UsageRecord) error {
 		if err != nil {
 			return fmt.Errorf("parse usage timestamp %q: %w", r.CreatedAt, err)
 		}
-		_, err = stmt.Exec(
+		res, err := stmt.Exec(
 			r.CreatedAt, createdAtUnix, r.RequestID, r.Endpoint, r.Method, r.Status, r.LatencyMs, r.TTFBMs, streamInt(r.Stream),
 			r.ClientIPHash, r.APIKeyHash, r.ModelRequested, r.ModelReturned,
 			r.InputTokens, r.OutputTokens, r.ReasoningTokens, r.CachedTokens, r.CacheCreationTokens, r.TotalTokens,
@@ -897,9 +1077,103 @@ func (db *DB) InsertBatch(records []UsageRecord) error {
 		if err != nil {
 			return err
 		}
+		requestUsageID, err := res.LastInsertId()
+		if err != nil {
+			return err
+		}
+		for _, d := range r.UsageDimensions {
+			if d.CreatedAt == "" {
+				d.CreatedAt = r.CreatedAt
+			}
+			if d.CreatedAtUnix <= 0 {
+				d.CreatedAtUnix = createdAtUnix
+			}
+			if d.RequestID == "" {
+				d.RequestID = r.RequestID
+			}
+			if d.RequestUsageID <= 0 {
+				d.RequestUsageID = requestUsageID
+			}
+			if d.EndpointProfile == "" {
+				d.EndpointProfile = r.EndpointProfile
+			}
+			if d.Model == "" {
+				d.Model = firstNonEmpty(r.ModelReturned, r.ModelRequested)
+			}
+			if d.UsageSource == "" {
+				d.UsageSource = r.UsageSource
+			}
+			if d.CaptureOutcome == "" {
+				d.CaptureOutcome = r.CaptureOutcome
+			}
+			if d.CaptureReason == "" {
+				d.CaptureReason = r.CaptureReason
+			}
+			if strings.TrimSpace(d.DetailsJSON) == "" {
+				d.DetailsJSON = "{}"
+			}
+			if _, err := dimStmt.Exec(
+				d.RequestUsageID, d.RequestID, d.CreatedAt, d.CreatedAtUnix,
+				d.EndpointProfile, d.Provider, d.Model, d.Modality, d.Channel, d.Metric, d.Direction, d.Unit, d.Amount,
+				d.UsageSource, d.CaptureOutcome, d.CaptureReason, d.DetailsJSON,
+			); err != nil {
+				return err
+			}
+		}
+		if r.ImageUsage != nil {
+			img := *r.ImageUsage
+			if img.CreatedAt == "" {
+				img.CreatedAt = r.CreatedAt
+			}
+			if img.CreatedAtUnix <= 0 {
+				img.CreatedAtUnix = createdAtUnix
+			}
+			if img.RequestID == "" {
+				img.RequestID = r.RequestID
+			}
+			if img.RequestUsageID <= 0 {
+				img.RequestUsageID = requestUsageID
+			}
+			if img.ModelRequested == "" {
+				img.ModelRequested = r.ModelRequested
+			}
+			if img.ModelReturned == "" {
+				img.ModelReturned = r.ModelReturned
+			}
+			if img.UsageSource == "" {
+				img.UsageSource = r.UsageSource
+			}
+			if img.CaptureOutcome == "" {
+				img.CaptureOutcome = r.CaptureOutcome
+			}
+			if img.CaptureReason == "" {
+				img.CaptureReason = r.CaptureReason
+			}
+			if strings.TrimSpace(img.MetadataJSON) == "" {
+				img.MetadataJSON = "{}"
+			}
+			_, err := imageStmt.Exec(
+				img.RequestUsageID, img.RequestID, img.CreatedAt, img.CreatedAtUnix,
+				img.Operation, img.Provider, img.ModelRequested, img.ModelReturned, img.Size, img.Quality, img.OutputFormat,
+				streamInt(img.Stream), img.ImageCount, img.PartialImageCount, img.InputImageCount, streamInt(img.HasMask),
+				img.UsageSource, img.CaptureOutcome, img.CaptureReason, img.MetadataJSON,
+			)
+			if err != nil {
+				return err
+			}
+		}
 	}
 
 	return tx.Commit()
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (db *DB) InsertHealthMetric(ts string, queueDepth int, dropped, parseErrors, dbErrors, sseLineSkips int64) error {
@@ -1303,6 +1577,224 @@ func (db *DB) Requests(limit int, statusMin, statusMax int, model, endpoint, err
 	args = append(args, limit)
 
 	rows, err := db.read.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []RequestRow
+	for rows.Next() {
+		var r RequestRow
+		if err := rows.Scan(&r.ID, &r.CreatedAt, &r.RequestID, &r.Endpoint, &r.Method, &r.Status, &r.LatencyMs, &r.TTFBMs, &r.Stream, &r.ClientIPHash, &r.APIKeyHash, &r.ModelRequested, &r.ModelReturned, &r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens, &r.CacheCreationTokens, &r.TotalTokens, &r.RequestBytes, &r.ResponseBytes, &r.Error, &r.EndpointProfile, &r.CaptureMode, &r.MeteringKind, &r.CaptureOutcome, &r.CaptureReason, &r.ErrorClass, &r.ErrorType, &r.ErrorCode, &r.ErrorParam, &r.ErrorMessage, &r.ErrorMessageTruncated, &r.ModelReturnedSource, &r.UsageSource, &r.TerminalEvent, &r.TerminalReason, &r.SideUsageEventID, &r.SideUsageMatchStatus); err != nil {
+			return nil, err
+		}
+		if r.ModelReturnedSource == "" && strings.TrimSpace(r.ModelReturned) != "" {
+			r.ModelReturnedSource = "legacy"
+		}
+		if r.UsageSource == "" && hasUsageTokens(r.InputTokens, r.OutputTokens, r.ReasoningTokens, r.CachedTokens, r.CacheCreationTokens, r.TotalTokens) {
+			r.UsageSource = "http_response"
+		}
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}
+
+func (db *DB) MultimodalSummary(since time.Time) ([]MultimodalSummaryRow, error) {
+	rows, err := db.read.Query(`
+		SELECT
+			COALESCE(NULLIF(TRIM(modality), ''), 'unknown'),
+			COALESCE(NULLIF(TRIM(channel), ''), 'unknown'),
+			COALESCE(NULLIF(TRIM(metric), ''), 'unknown'),
+			COALESCE(NULLIF(TRIM(direction), ''), 'unknown'),
+			COALESCE(NULLIF(TRIM(unit), ''), 'unknown'),
+			COALESCE(SUM(amount), 0),
+			COUNT(DISTINCT request_usage_id)
+		FROM usage_dimensions
+		WHERE created_at_unix >= ?
+		GROUP BY 1, 2, 3, 4, 5
+		ORDER BY 1, 2, 3, 4, 5
+	`, since.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []MultimodalSummaryRow
+	for rows.Next() {
+		var r MultimodalSummaryRow
+		if err := rows.Scan(&r.Modality, &r.Channel, &r.Metric, &r.Direction, &r.Unit, &r.Amount, &r.RequestCount); err != nil {
+			return nil, err
+		}
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}
+
+func (db *DB) ImageSummary(since time.Time) (*ImageSummaryRow, error) {
+	row := &ImageSummaryRow{}
+	err := db.read.QueryRow(`
+		SELECT
+			COUNT(*),
+			COUNT(CASE WHEN ru.status >= 400 THEN 1 END),
+			COALESCE(SUM(iu.image_count), 0),
+			COALESCE(SUM(iu.partial_image_count), 0),
+			COALESCE(SUM(iu.input_image_count), 0),
+			COUNT(CASE WHEN ru.capture_mode != 'request_only' AND (
+				ru.capture_outcome != 'captured'
+				OR NOT EXISTS (
+					SELECT 1 FROM usage_dimensions ud
+					WHERE ud.request_usage_id = ru.id
+						AND ud.modality = 'image'
+						AND ud.metric = 'tokens'
+						AND ud.amount > 0
+				)
+			) THEN 1 END)
+		FROM image_usage iu
+		JOIN request_usage ru ON ru.id = iu.request_usage_id
+		WHERE iu.created_at_unix >= ?
+	`, since.Unix()).Scan(
+		&row.RequestCount,
+		&row.FailedCount,
+		&row.ImageCount,
+		&row.PartialImageCount,
+		&row.InputImageCount,
+		&row.MissingUsageCount,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	dimRows, err := db.read.Query(`
+		SELECT channel, direction, CAST(ROUND(COALESCE(SUM(amount), 0)) AS INTEGER)
+		FROM usage_dimensions
+		WHERE created_at_unix >= ?
+			AND modality = 'image'
+			AND metric = 'tokens'
+			AND unit = 'token'
+		GROUP BY channel, direction
+	`, since.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer dimRows.Close()
+	for dimRows.Next() {
+		var channel, direction string
+		var amount int64
+		if err := dimRows.Scan(&channel, &direction, &amount); err != nil {
+			return nil, err
+		}
+		switch {
+		case channel == "text" && direction == "input":
+			row.InputTextTokens += amount
+		case channel == "image" && direction == "input":
+			row.InputImageTokens += amount
+		case channel == "text" && direction == "cached_input":
+			row.CachedTextTokens += amount
+		case channel == "image" && direction == "cached_input":
+			row.CachedImageTokens += amount
+		case channel == "mixed" && direction == "cached_input":
+			row.CachedMixedTokens += amount
+		case channel == "image" && direction == "output":
+			row.OutputImageTokens += amount
+		case channel == "mixed" && direction == "input":
+			row.InputTextTokens += amount
+		}
+		if direction == "input" || direction == "output" {
+			row.TotalTokens += amount
+		}
+	}
+	if err := dimRows.Err(); err != nil {
+		return nil, err
+	}
+	return row, nil
+}
+
+func (db *DB) ImageModels(since time.Time) ([]ImageModelRow, error) {
+	rows, err := db.read.Query(`
+		WITH dim AS (
+			SELECT
+				request_usage_id,
+				CAST(ROUND(COALESCE(SUM(CASE WHEN channel = 'text' AND direction = 'input' AND metric = 'tokens' THEN amount ELSE 0 END), 0)) AS INTEGER) AS input_text_tokens,
+				CAST(ROUND(COALESCE(SUM(CASE WHEN channel = 'image' AND direction = 'input' AND metric = 'tokens' THEN amount ELSE 0 END), 0)) AS INTEGER) AS input_image_tokens,
+				CAST(ROUND(COALESCE(SUM(CASE WHEN channel = 'text' AND direction = 'cached_input' AND metric = 'tokens' THEN amount ELSE 0 END), 0)) AS INTEGER) AS cached_text_tokens,
+				CAST(ROUND(COALESCE(SUM(CASE WHEN channel = 'image' AND direction = 'cached_input' AND metric = 'tokens' THEN amount ELSE 0 END), 0)) AS INTEGER) AS cached_image_tokens,
+				CAST(ROUND(COALESCE(SUM(CASE WHEN channel = 'mixed' AND direction = 'cached_input' AND metric = 'tokens' THEN amount ELSE 0 END), 0)) AS INTEGER) AS cached_mixed_tokens,
+				CAST(ROUND(COALESCE(SUM(CASE WHEN channel = 'image' AND direction = 'output' AND metric = 'tokens' THEN amount ELSE 0 END), 0)) AS INTEGER) AS output_image_tokens,
+				CAST(ROUND(COALESCE(SUM(CASE WHEN metric = 'tokens' AND direction IN ('input', 'output') THEN amount ELSE 0 END), 0)) AS INTEGER) AS total_tokens
+			FROM usage_dimensions
+			WHERE modality = 'image'
+			GROUP BY request_usage_id
+		)
+		SELECT
+			COALESCE(NULLIF(TRIM(iu.model_returned), ''), NULLIF(TRIM(iu.model_requested), ''), 'unidentified'),
+			COALESCE(NULLIF(TRIM(iu.operation), ''), 'unknown'),
+			COUNT(*),
+			COUNT(CASE WHEN ru.status >= 400 THEN 1 END),
+			COALESCE(SUM(iu.image_count), 0),
+			COALESCE(SUM(iu.partial_image_count), 0),
+			COALESCE(SUM(dim.input_text_tokens), 0),
+			COALESCE(SUM(dim.input_image_tokens), 0),
+			COALESCE(SUM(dim.cached_text_tokens), 0),
+			COALESCE(SUM(dim.cached_image_tokens), 0),
+			COALESCE(SUM(dim.cached_mixed_tokens), 0),
+			COALESCE(SUM(dim.output_image_tokens), 0),
+			COALESCE(SUM(dim.total_tokens), 0),
+			COUNT(CASE WHEN ru.capture_mode != 'request_only' AND (
+				ru.capture_outcome != 'captured' OR COALESCE(dim.total_tokens, 0) = 0
+			) THEN 1 END)
+		FROM image_usage iu
+		JOIN request_usage ru ON ru.id = iu.request_usage_id
+		LEFT JOIN dim ON dim.request_usage_id = ru.id
+		WHERE iu.created_at_unix >= ?
+		GROUP BY 1, 2
+		ORDER BY COUNT(*) DESC, 1 ASC, 2 ASC
+	`, since.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []ImageModelRow
+	for rows.Next() {
+		var r ImageModelRow
+		if err := rows.Scan(
+			&r.Model,
+			&r.Operation,
+			&r.RequestCount,
+			&r.FailedCount,
+			&r.ImageCount,
+			&r.PartialImageCount,
+			&r.InputTextTokens,
+			&r.InputImageTokens,
+			&r.CachedTextTokens,
+			&r.CachedImageTokens,
+			&r.CachedMixedTokens,
+			&r.OutputImageTokens,
+			&r.TotalTokens,
+			&r.MissingUsageCount,
+		); err != nil {
+			return nil, err
+		}
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}
+
+func (db *DB) ImageRequests(limit int, since time.Time) ([]RequestRow, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := db.read.Query(`
+		SELECT id, COALESCE(created_at, ''), COALESCE(request_id, ''), COALESCE(endpoint, ''), COALESCE(method, ''), COALESCE(status, 0), COALESCE(latency_ms, 0), COALESCE(ttfb_ms, 0), COALESCE(stream, 0), COALESCE(client_ip_hash, ''), COALESCE(api_key_hash, ''), COALESCE(model_requested, ''), COALESCE(model_returned, ''), COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), COALESCE(reasoning_tokens, 0), COALESCE(cached_tokens, 0), COALESCE(cache_creation_tokens, 0), COALESCE(total_tokens, 0), COALESCE(request_bytes, 0), COALESCE(response_bytes, 0), COALESCE(error, ''), COALESCE(endpoint_profile, ''), COALESCE(capture_mode, ''), COALESCE(metering_kind, ''), COALESCE(capture_outcome, ''), COALESCE(capture_reason, ''), COALESCE(error_class, ''), COALESCE(error_type, ''), COALESCE(error_code, ''), COALESCE(error_param, ''), COALESCE(error_message, ''), COALESCE(error_message_truncated, 0), COALESCE(model_returned_source, ''), COALESCE(usage_source, ''), COALESCE(terminal_event, ''), COALESCE(terminal_reason, ''), COALESCE(side_usage_event_id, 0), COALESCE((SELECT match_status FROM side_usage_events WHERE matched_request_usage_id = request_usage.id ORDER BY CASE WHEN match_status = 'conflict' THEN 0 ELSE 1 END, id DESC LIMIT 1), '')
+		FROM request_usage
+		WHERE created_at_unix >= ?
+			AND EXISTS (
+				SELECT 1 FROM image_usage iu
+				WHERE iu.request_usage_id = request_usage.id
+			)
+		ORDER BY id DESC
+		LIMIT ?
+	`, since.Unix(), limit)
 	if err != nil {
 		return nil, err
 	}

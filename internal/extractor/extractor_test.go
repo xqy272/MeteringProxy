@@ -87,6 +87,24 @@ func TestExtractResponsesUsage_CompletedEvent(t *testing.T) {
 	}
 }
 
+func TestExtractResponsesUsage_ImageGenerationCompletedEvent(t *testing.T) {
+	input := []byte(`data: {"type":"response.completed","response":{"model":"gpt-5.4-mini","output":[{"type":"image_generation_call","status":"completed","result":"private-image-bytes"}],"usage":{"input_tokens":371,"output_tokens":43,"total_tokens":414}}}`)
+
+	u, err := ExtractResponsesUsage(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u == nil {
+		t.Fatal("expected non-nil usage")
+	}
+	if u.ImageCount != 1 || u.Operation != "generation" || u.InputTokens != 371 || u.OutputTokens != 43 {
+		t.Fatalf("responses image usage = %+v", u)
+	}
+	if strings.Contains(u.UsageRawJSON, "private-image-bytes") {
+		t.Fatalf("usage raw JSON leaked image result: %q", u.UsageRawJSON)
+	}
+}
+
 func TestExtractResponsesUsage_NilWhenNotCompleted(t *testing.T) {
 	input := []byte(`data: {"type":"response.output_text.delta","delta":"hello"}`)
 	u, err := ExtractResponsesUsage(input)
@@ -206,6 +224,24 @@ func TestExtractNonStreaming_ResponsesFormat(t *testing.T) {
 	}
 	if u.CachedTokens != 10 {
 		t.Errorf("cached_tokens = %d, want 10", u.CachedTokens)
+	}
+}
+
+func TestExtractNonStreaming_ResponsesImageGenerationSample(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4-mini","output":[{"type":"image_generation_call","result":"` + strings.Repeat("x", 4096) + `"}],"usage":{"input_tokens":371,"output_tokens":43,"total_tokens":414}}`)
+	sample := []byte(string(body[:128]) + "\n" + string(body[len(body)-128:]))
+	u, err := ExtractNonStreaming(sample, "/v1/responses")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u == nil {
+		t.Fatal("expected non-nil usage")
+	}
+	if u.ImageCount != 1 || u.Operation != "generation" || u.InputTokens != 371 || u.OutputTokens != 43 {
+		t.Fatalf("responses image sample = %+v", u)
+	}
+	if strings.Contains(u.UsageRawJSON, "xxx") {
+		t.Fatalf("usage raw JSON leaked sampled image result: %q", u.UsageRawJSON)
 	}
 }
 
@@ -337,6 +373,54 @@ func TestExtractGeminiUsage_StreamingChunk(t *testing.T) {
 	}
 	if u.InputTokens != 50 || u.OutputTokens != 12 || u.TotalTokens != 62 {
 		t.Errorf("usage = %+v, want 50/12/62", u)
+	}
+}
+
+func TestExtractImageNonStreaming(t *testing.T) {
+	body := []byte(`{"created":1713833628,"data":[{"b64_json":"..."}],"usage":{"total_tokens":100,"input_tokens":50,"output_tokens":50,"input_tokens_details":{"text_tokens":10,"image_tokens":40}}}`)
+	u, err := ExtractImageNonStreaming(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u == nil {
+		t.Fatal("expected non-nil usage")
+	}
+	if u.InputTokens != 50 || u.OutputTokens != 50 || u.TotalTokens != 100 {
+		t.Fatalf("tokens = %+v, want 50/50/100", u)
+	}
+	if u.InputTextTokens != 10 || u.InputImageTokens != 40 || u.ImageCount != 1 {
+		t.Fatalf("image details = %+v, want text=10 image=40 count=1", u)
+	}
+}
+
+func TestExtractImageNonStreaming_PrefixTailSample(t *testing.T) {
+	sample := []byte(`{"model":"gpt-image-2","data":[{"b64_json":"` + "\n" + `"}],"usage":{"total_tokens":100,"input_tokens":50,"output_tokens":50,"input_tokens_details":{"text_tokens":10,"image_tokens":40}}}`)
+	u, err := ExtractImageNonStreaming(sample)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u == nil {
+		t.Fatal("expected non-nil usage from sampled response")
+	}
+	if u.Model != "gpt-image-2" || u.InputTextTokens != 10 || u.InputImageTokens != 40 || u.OutputTokens != 50 || u.ImageCount != 1 {
+		t.Fatalf("sample usage = %+v", u)
+	}
+}
+
+func TestExtractImageUsage_StreamingEvents(t *testing.T) {
+	partial, err := ExtractImageUsage([]byte(`data: {"type":"image_generation.partial_image","partial_image_index":0,"b64_json":"..."}`))
+	if err != nil {
+		t.Fatalf("partial image event error: %v", err)
+	}
+	if partial == nil || partial.PartialImageCount != 1 {
+		t.Fatalf("partial usage = %+v, want one partial image", partial)
+	}
+	done, err := ExtractImageUsage([]byte(`data: {"type":"image_generation.completed","b64_json":"...","usage":{"total_tokens":100,"input_tokens":50,"output_tokens":50,"input_tokens_details":{"text_tokens":10,"image_tokens":40}}}`))
+	if err != nil {
+		t.Fatalf("completed image event error: %v", err)
+	}
+	if done == nil || done.ImageCount != 1 || done.InputTextTokens != 10 || done.InputImageTokens != 40 || done.OutputTokens != 50 {
+		t.Fatalf("completed usage = %+v", done)
 	}
 }
 

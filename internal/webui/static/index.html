@@ -103,6 +103,56 @@
     </div>
   </section>
 
+  <!-- Images -->
+  <section id="images" class="card section-gap">
+    <div class="card-head">
+      <div class="card-head-left">
+        <div class="card-title" data-i18n="panel.images">Images</div>
+        <div class="card-desc" id="images-summary">-</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="rh-grid">
+        <div class="rh-card">
+          <div class="rh-label" data-i18n="metric.images">Images</div>
+          <div class="rh-value mono" id="image-count">-</div>
+          <div class="rh-detail" id="image-count-detail">-</div>
+        </div>
+        <div class="rh-card">
+          <div class="rh-label" data-i18n="metric.image_tokens">Image Tokens</div>
+          <div class="rh-value mono" id="image-tokens">-</div>
+          <div class="rh-detail" id="image-tokens-detail">-</div>
+        </div>
+        <div class="rh-card">
+          <div class="rh-label" data-i18n="metric.image_cost">Image Cost</div>
+          <div class="rh-value mono" id="image-cost">-</div>
+          <div class="rh-detail" id="image-cost-detail">-</div>
+        </div>
+        <div class="rh-card">
+          <div class="rh-label" data-i18n="metric.image_capture">Image Capture</div>
+          <div class="rh-value mono" id="image-capture">-</div>
+          <div class="rh-detail" id="image-capture-detail">-</div>
+        </div>
+      </div>
+      <div class="table-wrap" style="margin-top:14px">
+        <table>
+          <thead><tr>
+            <th data-i18n="table.model">Model</th>
+            <th data-i18n="table.operation">Operation</th>
+            <th class="numeric" data-i18n="table.requests">Requests</th>
+            <th class="numeric" data-i18n="table.images">Images</th>
+            <th class="numeric" data-i18n="table.input_text">Text In</th>
+            <th class="numeric" data-i18n="table.input_image">Image In</th>
+            <th class="numeric" data-i18n="table.output_image">Image Out</th>
+            <th class="numeric" data-i18n="table.est_cost">Est. Cost</th>
+            <th data-i18n="table.capture">Capture</th>
+          </tr></thead>
+          <tbody id="images-models-table"><tr><td colspan="9" class="empty-state" data-i18n="state.loading">Loading...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
   <!-- API Keys -->
   <section id="keys" class="card section-gap">
     <div class="card-head">

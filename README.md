@@ -159,6 +159,37 @@ pricing:
     input_per_1m: 0.435
     cached_input_per_1m: 0.003625
     output_per_1m: 0.87
+
+multimodal_pricing:
+  gpt-image-2:
+    aliases:
+      - gpt-image-2.0
+      - GPT-Image-2.0 (image)
+    text:
+      input_per_1m: 5.00
+      cached_input_per_1m: 1.25
+    image:
+      input_per_1m: 8.00
+      cached_input_per_1m: 2.00
+      output_per_1m: 30.00
+  gpt-realtime-2:
+    text:
+      input_per_1m: 4.00
+      cached_input_per_1m: 0.40
+      output_per_1m: 24.00
+    image:
+      input_per_1m: 5.00
+      cached_input_per_1m: 0.50
+    audio:
+      input_per_1m: 32.00
+      cached_input_per_1m: 0.40
+      output_per_1m: 64.00
+  gpt-realtime-translate:
+    audio_seconds:
+      per_second: 0.00057
+  gpt-realtime-whisper:
+    audio_seconds:
+      per_second: 0.00028
 ```
 
 ### 6. 拉取并启动容器
@@ -210,10 +241,20 @@ api.example.com {
         method POST
         path /v1/chat/completions /v1/completions /v1/responses /v1/responses/compact /v1/messages
         path /backend-api/codex/responses /backend-api/codex/responses/compact
+        path /v1/images/generations /v1/images/edits /v1/images/variations
+        path /v1/embeddings
+        path /v1/audio/speech /v1/audio/transcriptions /v1/audio/translations
+        path /v1/videos /v1/videos/* /v1/videos/edits
         path /v1/models/*:generateContent /v1/models/*:streamGenerateContent
         path /v1beta/models/*:generateContent /v1beta/models/*:streamGenerateContent
         path /api/provider/*/chat/completions /api/provider/*/completions /api/provider/*/responses
+        path /api/provider/*/images/generations /api/provider/*/images/edits /api/provider/*/images/variations
+        path /api/provider/*/embeddings
         path /api/provider/*/v1/chat/completions /api/provider/*/v1/completions /api/provider/*/v1/responses /api/provider/*/v1/messages
+        path /api/provider/*/v1/images/generations /api/provider/*/v1/images/edits /api/provider/*/v1/images/variations
+        path /api/provider/*/v1/embeddings
+        path /api/provider/*/v1/audio/speech /api/provider/*/v1/audio/transcriptions /api/provider/*/v1/audio/translations
+        path /api/provider/*/v1/videos /api/provider/*/v1/videos/* /api/provider/*/v1/videos/edits
         path /api/provider/*/v1/models/*:generateContent /api/provider/*/v1/models/*:streamGenerateContent
         path /api/provider/*/v1beta/models/*:generateContent /api/provider/*/v1beta/models/*:streamGenerateContent
     }
@@ -416,6 +457,10 @@ chmod 600 /opt/ai-gateway/metering/usage.sqlite
 | `GET /metering/api/models?range=...` | 按模型维度聚合 |
 | `GET /metering/api/keys?range=...` | 按 API Key 维度聚合 |
 | `GET /metering/api/requests?range=...&limit=100&status=...&model=&endpoint=` | 最近请求明细 |
+| `GET /metering/api/multimodal/summary?range=...` | 多模态用量维度汇总 |
+| `GET /metering/api/images/summary?range=...` | 图片请求、图片数、token 与成本汇总 |
+| `GET /metering/api/images/models?range=...` | 图片按模型与操作聚合 |
+| `GET /metering/api/images/requests?range=...&limit=100` | 最近图片请求明细 |
 | `GET /metering/api/errors?range=...&nonzero=true` | 非零错误 bucket |
 | `GET /metering/api/quota` | 凭证健康与 quota 状态 |
 | `POST /metering/api/quota/refresh` | 触发后台 quota/凭证状态刷新 |

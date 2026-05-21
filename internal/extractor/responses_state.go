@@ -30,6 +30,8 @@ type ResponsesStreamState struct {
 	errorParam     string
 	usageSeen      bool
 	usage          *UsageInfo
+	imageCount     int64
+	partialImages  int64
 
 	terminalEvent  string
 	terminalReason string
@@ -45,9 +47,10 @@ func NewResponsesStreamState() *ResponsesStreamState {
 type ResponsesSSEEvent struct {
 	Type     string `json:"type"`
 	Response *struct {
-		Model             string          `json:"model"`
-		Status            string          `json:"status"`
-		Usage             json.RawMessage `json:"usage"`
+		Model             string                `json:"model"`
+		Status            string                `json:"status"`
+		Usage             json.RawMessage       `json:"usage"`
+		Output            []responsesOutputItem `json:"output"`
 		IncompleteDetails *struct {
 			Reason string `json:"reason"`
 		} `json:"incomplete_details"`
@@ -80,6 +83,9 @@ func (s *ResponsesStreamState) ProcessSSEEvent(data []byte) {
 	s.lastEventType = evt.Type
 
 	switch evt.Type {
+	case "response.image_generation_call.partial_image":
+		s.partialImages++
+
 	case "response.created":
 		s.seenCreated = true
 		if evt.Response != nil && evt.Response.Model != "" {
@@ -94,6 +100,9 @@ func (s *ResponsesStreamState) ProcessSSEEvent(data []byte) {
 			}
 			if len(evt.Response.Usage) > 0 {
 				s.completedUsage = evt.Response.Usage
+			}
+			if count := countResponsesImageOutputs(evt.Response.Output); count > 0 {
+				s.imageCount = count
 			}
 		}
 
@@ -142,6 +151,14 @@ func (s *ResponsesStreamState) Result() StreamFinalResult {
 	if s.completedUsage != nil && len(s.completedUsage) > 0 {
 		info, err := parseResponsesUsageFromCompleted(s.completedModel, s.completedUsage)
 		if err == nil && info != nil && (info.InputTokens > 0 || info.OutputTokens > 0 || info.TotalTokens > 0) {
+			if s.imageCount > 0 {
+				info.ImageCount = s.imageCount
+				info.Operation = "generation"
+			}
+			if s.partialImages > 0 {
+				info.PartialImageCount = s.partialImages
+				info.Operation = "generation"
+			}
 			s.usageSeen = true
 			s.usage = info
 		}
@@ -174,6 +191,20 @@ func (s *ResponsesStreamState) Result() StreamFinalResult {
 
 	if s.seenCompleted {
 		modelReturned := bestModelStr(s.completedModel, s.createdModel, "", "", "")
+		if s.imageCount > 0 || s.partialImages > 0 {
+			return StreamFinalResult{
+				Usage: &UsageInfo{
+					Model:             modelReturned,
+					ImageCount:        s.imageCount,
+					PartialImageCount: s.partialImages,
+					Operation:         "generation",
+				},
+				ModelReturned:       modelReturned,
+				ModelReturnedSource: "response_completed",
+				TerminalEvent:       "response.completed",
+				CaptureOutcome:      "captured",
+			}
+		}
 		return StreamFinalResult{
 			ModelReturned:       modelReturned,
 			ModelReturnedSource: "response_completed",

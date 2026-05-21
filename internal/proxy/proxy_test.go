@@ -1290,7 +1290,131 @@ func TestCaptureOutcome_Skipped_StreamWithoutUsage(t *testing.T) {
 	}
 }
 
-func TestUsageRawJSON_NotStoredInEvent(t *testing.T) {
+func TestImageGenerationUsageIsCaptured(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"created":1713833628,"data":[{"b64_json":"..."}],"usage":{"total_tokens":100,"input_tokens":50,"output_tokens":50,"input_tokens_details":{"text_tokens":10,"image_tokens":40}}}`))
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
+
+	req := httptest.NewRequest("POST", "/v1/images/generations", strings.NewReader(`{"model":"gpt-image-2","prompt":"private prompt","size":"1024x1024","quality":"high","output_format":"png"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	ev := lastEvent(rw)
+	if ev.EndpointProfile != "openai_images_generations" || ev.MeteringKind != event.MeteringImageTokens {
+		t.Fatalf("event profile/kind = %s/%s", ev.EndpointProfile, ev.MeteringKind)
+	}
+	if ev.InputTokens != 50 || ev.OutputTokens != 50 || ev.TotalTokens != 100 {
+		t.Fatalf("tokens = %d/%d/%d, want 50/50/100", ev.InputTokens, ev.OutputTokens, ev.TotalTokens)
+	}
+	if len(ev.UsageDimensions) != 4 {
+		t.Fatalf("usage dimensions = %+v, want text input/image input/image output/count", ev.UsageDimensions)
+	}
+	if ev.ImageUsage == nil {
+		t.Fatal("image usage was not attached")
+	}
+	if ev.ImageUsage.Size != "1024x1024" || ev.ImageUsage.Quality != "high" || ev.ImageUsage.OutputFormat != "png" || ev.ImageUsage.ImageCount != 1 {
+		t.Fatalf("image usage = %+v", ev.ImageUsage)
+	}
+	if strings.Contains(ev.UsageRawJSON, "private prompt") {
+		t.Fatalf("usage raw JSON leaked request prompt: %q", ev.UsageRawJSON)
+	}
+}
+
+func TestImageEditMultipartMetadataIsCaptured(t *testing.T) {
+	body := strings.Join([]string{
+		"--x",
+		`Content-Disposition: form-data; name="model"`,
+		"",
+		"gpt-image-2",
+		"--x",
+		`Content-Disposition: form-data; name="image"; filename="source.png"`,
+		"Content-Type: image/png",
+		"",
+		"PNGDATA",
+		"--x",
+		`Content-Disposition: form-data; name="mask"; filename="mask.png"`,
+		"Content-Type: image/png",
+		"",
+		"MASKDATA",
+		"--x",
+		`Content-Disposition: form-data; name="size"`,
+		"",
+		"1024x1024",
+		"--x--",
+		"",
+	}, "\r\n")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"created":1713833628,"data":[{"b64_json":"..."}],"usage":{"total_tokens":100,"input_tokens":50,"output_tokens":50,"input_tokens_details":{"text_tokens":10,"image_tokens":40}}}`))
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
+
+	req := httptest.NewRequest("POST", "/v1/images/edits", strings.NewReader(body))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary=x")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	ev := lastEvent(rw)
+	if ev.ModelRequested != "gpt-image-2" {
+		t.Fatalf("model_requested = %q, want gpt-image-2", ev.ModelRequested)
+	}
+	if ev.ImageUsage == nil || ev.ImageUsage.Operation != "edit" || ev.ImageUsage.InputImageCount != 1 || !ev.ImageUsage.HasMask || ev.ImageUsage.Size != "1024x1024" {
+		t.Fatalf("image usage = %+v", ev.ImageUsage)
+	}
+}
+
+func TestResponsesImageGenerationUsageIsCaptured(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"model":"gpt-5.4-mini","output":[{"type":"image_generation_call","status":"completed","result":"private-image-bytes"}],"usage":{"input_tokens":371,"output_tokens":43,"total_tokens":414}}`))
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
+
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"model":"gpt-5.4-mini","tools":[{"type":"image_generation"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	ev := lastEvent(rw)
+	if ev.EndpointProfile != "responses" || ev.MeteringKind != event.MeteringLLMTokens {
+		t.Fatalf("event profile/kind = %s/%s", ev.EndpointProfile, ev.MeteringKind)
+	}
+	if ev.ImageUsage == nil || ev.ImageUsage.Operation != "generation" || ev.ImageUsage.ImageCount != 1 {
+		t.Fatalf("image usage = %+v", ev.ImageUsage)
+	}
+	var foundImageCount bool
+	for _, d := range ev.UsageDimensions {
+		if d.Modality == "image" && d.Metric == "count" && d.Direction == "output" && d.Amount == 1 {
+			foundImageCount = true
+		}
+	}
+	if !foundImageCount {
+		t.Fatalf("usage dimensions = %+v, want image output count", ev.UsageDimensions)
+	}
+	if strings.Contains(ev.UsageRawJSON, "private-image-bytes") {
+		t.Fatalf("usage raw JSON leaked image result: %q", ev.UsageRawJSON)
+	}
+}
+
+func TestUsageRawJSON_StoresOnlyTruncatedUsageObject(t *testing.T) {
 	largeUsage := `{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"debug":"` + strings.Repeat("x", 6000) + `"}`
 	upstreamResp := `{"model":"gpt-4o","usage":` + largeUsage + `}`
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1313,11 +1437,14 @@ func TestUsageRawJSON_NotStoredInEvent(t *testing.T) {
 	if ev.InputTokens != 10 || ev.OutputTokens != 5 || ev.TotalTokens != 15 {
 		t.Fatalf("tokens = %d/%d/%d, want 10/5/15", ev.InputTokens, ev.OutputTokens, ev.TotalTokens)
 	}
-	if ev.UsageRawTruncated {
-		t.Fatal("UsageRawTruncated = true, want false")
+	if !ev.UsageRawTruncated {
+		t.Fatal("UsageRawTruncated = false, want true for oversized usage object")
 	}
-	if ev.UsageRawJSON != "" {
-		t.Fatalf("UsageRawJSON = %.80q, want empty", ev.UsageRawJSON)
+	if ev.UsageRawJSON == "" || len(ev.UsageRawJSON) > 4096 {
+		t.Fatalf("UsageRawJSON length = %d, want non-empty truncated usage JSON", len(ev.UsageRawJSON))
+	}
+	if strings.Contains(ev.UsageRawJSON, `"model"`) {
+		t.Fatalf("UsageRawJSON = %.80q, want usage object only", ev.UsageRawJSON)
 	}
 }
 

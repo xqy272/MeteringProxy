@@ -45,6 +45,15 @@ type Proxy struct {
 	correlationHeader string
 }
 
+type requestUsageMetadata struct {
+	Size            string
+	Quality         string
+	OutputFormat    string
+	Stream          bool
+	InputImageCount int64
+	HasMask         bool
+}
+
 func New(upstream string, hasher *hash.Hasher, rw RecordWriter, maxSample int64, reqMeta config.RequestMetadataConfig) *Proxy {
 	p := &Proxy{
 		upstream:  upstream,
@@ -53,11 +62,11 @@ func New(upstream string, hasher *hash.Hasher, rw RecordWriter, maxSample int64,
 		maxSample: maxSample,
 		registry:  profile.NewRegistry(),
 		transport: &http.Transport{
-			MaxIdleConns:          100,
-			MaxIdleConnsPerHost:   20,
-			IdleConnTimeout:       90 * time.Second,
-			DisableCompression:    true,
-			TLSHandshakeTimeout:   10 * time.Second,
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 20,
+			IdleConnTimeout:     90 * time.Second,
+			DisableCompression:  true,
+			TLSHandshakeTimeout: 10 * time.Second,
 		},
 		reqMeta:           reqMeta,
 		correlationMode:   "passive",
@@ -164,10 +173,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		streamFromJSON(streamProbePrefix) ||
 		isSSEMediaType(r.Header.Get("Accept")) ||
 		streamFromPath(r.URL.Path)
+	requestMeta := extractRequestUsageMetadata(prof, r.Header.Get("Content-Type"), bodyPrefix, requestSuggestsStream)
 
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, p.upstream+r.URL.RequestURI(), r.Body)
 	if err != nil {
-		p.writeError(w, start, 0, prof, endpoint, r.Method, clientIPHash, apiKeyHash, modelRequested, cr.bytesRead, 502, err)
+		p.writeError(w, start, 0, prof, endpoint, r.Method, clientIPHash, apiKeyHash, modelRequested, requestMeta, cr.bytesRead, 502, err)
 		return
 	}
 	upstreamReq.ContentLength = r.ContentLength
@@ -184,7 +194,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	resp, err := p.transport.RoundTrip(upstreamReq)
 	ttfb := time.Since(start)
 	if err != nil {
-		p.writeError(w, start, ttfb, prof, endpoint, r.Method, clientIPHash, apiKeyHash, modelRequested, cr.bytesRead, 502, err)
+		p.writeError(w, start, ttfb, prof, endpoint, r.Method, clientIPHash, apiKeyHash, modelRequested, requestMeta, cr.bytesRead, 502, err)
 		return
 	}
 	defer resp.Body.Close()
@@ -206,9 +216,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(status)
 
 	if isStream {
-		p.handleStream(w, r, resp, start, ttfb, prof, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested, cr, status)
+		p.handleStream(w, r, resp, start, ttfb, prof, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested, requestMeta, cr, status)
 	} else {
-		p.handleNonStream(w, r, resp, start, ttfb, prof, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested, cr, status)
+		p.handleNonStream(w, r, resp, start, ttfb, prof, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested, requestMeta, cr, status)
 	}
 }
 
@@ -319,7 +329,7 @@ func (r *replayReader) Close() error {
 // ---------- streaming path ----------
 
 func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.Response, start time.Time, ttfb time.Duration,
-	prof *profile.EndpointProfile, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested string, cr *countingReader, status int) {
+	prof *profile.EndpointProfile, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested string, requestMeta requestUsageMetadata, cr *countingReader, status int) {
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -331,7 +341,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 		captureOutcome := event.OutcomeSkipped
 		captureReason := event.ReasonUsageNotPresent
 		p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, true,
-			clientIPHash, apiKeyHash, modelRequested, nil, cr.bytesRead, written, errStr,
+			clientIPHash, apiKeyHash, modelRequested, requestMeta, nil, cr.bytesRead, written, errStr,
 			captureOutcome, captureReason, nil, "", "", "", "")
 		return
 	}
@@ -435,7 +445,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 			result := p.finalizeStreamUsage(lastUsage, responsesState, prof, sseParseErrs)
 			reportParseErrors()
 			p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, true,
-				clientIPHash, apiKeyHash, modelRequested, result.usage, cr.bytesRead, totalBytes, errStr,
+				clientIPHash, apiKeyHash, modelRequested, requestMeta, result.usage, cr.bytesRead, totalBytes, errStr,
 				result.captureOutcome, result.captureReason, streamErrInfo(result), result.modelReturned, result.modelReturnedSource, result.terminalEvent, result.terminalReason)
 			return
 		default:
@@ -450,7 +460,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 				result := p.finalizeStreamUsage(lastUsage, responsesState, prof, sseParseErrs)
 				reportParseErrors()
 				p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, true,
-					clientIPHash, apiKeyHash, modelRequested, result.usage, cr.bytesRead, totalBytes, safeOperationalError(werr),
+					clientIPHash, apiKeyHash, modelRequested, requestMeta, result.usage, cr.bytesRead, totalBytes, safeOperationalError(werr),
 					result.captureOutcome, result.captureReason, streamErrInfo(result), result.modelReturned, result.modelReturnedSource, result.terminalEvent, result.terminalReason)
 				return
 			}
@@ -506,7 +516,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 			result := p.finalizeStreamUsage(lastUsage, responsesState, prof, sseParseErrs)
 			reportParseErrors()
 			p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, true,
-				clientIPHash, apiKeyHash, modelRequested, result.usage, cr.bytesRead, totalBytes, errStr,
+				clientIPHash, apiKeyHash, modelRequested, requestMeta, result.usage, cr.bytesRead, totalBytes, errStr,
 				result.captureOutcome, result.captureReason, streamErrInfo(result), result.modelReturned, result.modelReturnedSource, result.terminalEvent, result.terminalReason)
 			return
 		}
@@ -758,26 +768,104 @@ func (lb *limitedBuffer) Bytes() []byte {
 	return lb.buf
 }
 
-func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, resp *http.Response, start time.Time, ttfb time.Duration,
-	prof *profile.EndpointProfile, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested string, cr *countingReader, status int) {
+type prefixTailBuffer struct {
+	prefix []byte
+	tail   []byte
+	max    int
+	total  int
+}
 
-	lb := &limitedBuffer{max: int(p.maxSample)}
-	reader := io.TeeReader(resp.Body, lb)
+func (b *prefixTailBuffer) Write(p []byte) (int, error) {
+	origLen := len(p)
+	if b.max <= 0 {
+		return origLen, nil
+	}
+	b.total += len(p)
+	half := b.max / 2
+	if half <= 0 {
+		half = b.max
+	}
+	if len(b.prefix) < half {
+		need := half - len(b.prefix)
+		if need > len(p) {
+			need = len(p)
+		}
+		b.prefix = append(b.prefix, p[:need]...)
+	}
+	b.tail = append(b.tail, p...)
+	if len(b.tail) > half {
+		b.tail = append([]byte(nil), b.tail[len(b.tail)-half:]...)
+	}
+	return origLen, nil
+}
+
+func (b *prefixTailBuffer) Bytes() []byte {
+	if len(b.tail) == 0 {
+		return b.prefix
+	}
+	if b.total <= len(b.prefix) {
+		return b.prefix
+	}
+	if b.total <= b.max && len(b.prefix)+len(b.tail) >= b.total {
+		overlap := len(b.prefix) + len(b.tail) - b.total
+		if overlap < 0 {
+			overlap = 0
+		}
+		if overlap > len(b.tail) {
+			overlap = len(b.tail)
+		}
+		out := make([]byte, 0, b.total)
+		out = append(out, b.prefix...)
+		out = append(out, b.tail[overlap:]...)
+		return out
+	}
+	out := make([]byte, 0, len(b.prefix)+len(b.tail)+1)
+	out = append(out, b.prefix...)
+	out = append(out, '\n')
+	out = append(out, b.tail...)
+	return out
+}
+
+func (b *prefixTailBuffer) Overflow() bool {
+	return b.total > b.max
+}
+
+func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, resp *http.Response, start time.Time, ttfb time.Duration,
+	prof *profile.EndpointProfile, endpoint, requestID, clientIPHash, apiKeyHash, modelRequested string, requestMeta requestUsageMetadata, cr *countingReader, status int) {
+
+	var sampler interface {
+		io.Writer
+		Bytes() []byte
+	}
+	var overflow func() bool
+	if usesPrefixTailSampling(prof) {
+		pt := &prefixTailBuffer{max: int(p.maxSample)}
+		sampler = pt
+		overflow = pt.Overflow
+	} else {
+		lb := &limitedBuffer{max: int(p.maxSample)}
+		sampler = lb
+		overflow = func() bool { return lb.overflow }
+	}
+	reader := io.TeeReader(resp.Body, sampler)
 	written, copyErr := io.Copy(w, reader)
 
 	var usage *extractor.UsageInfo
 	captureOutcome := event.OutcomeCaptured
 	captureReason := ""
 
-	sample := lb.Bytes()
-	if len(sample) > 0 {
+	sample := sampler.Bytes()
+	if prof != nil && prof.CaptureMode == event.CaptureRequestOnly {
+		captureOutcome = event.OutcomeCaptured
+		captureReason = event.ReasonRequestOnlyProfile
+	} else if len(sample) > 0 {
 		if prof != nil && prof.NonStreamExtractor != nil {
 			u, err := prof.NonStreamExtractor(sample, endpoint)
 			if err != nil {
-				if !lb.overflow {
+				if !overflow() {
 					p.writer.IncrParseErrors()
 				}
-				if lb.overflow {
+				if overflow() {
 					captureReason = event.ReasonSampleLimitExceeded
 				} else {
 					captureReason = event.ReasonParseError
@@ -789,7 +877,10 @@ func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, resp *ht
 		}
 	}
 	if usage == nil {
-		if captureOutcome == event.OutcomeCaptured && captureReason == "" {
+		if prof != nil && prof.CaptureMode == event.CaptureRequestOnly {
+			captureOutcome = event.OutcomeCaptured
+			captureReason = event.ReasonRequestOnlyProfile
+		} else if captureOutcome == event.OutcomeCaptured && captureReason == "" {
 			captureReason = event.ReasonUsageNotPresent
 			captureOutcome = event.OutcomeSkipped
 		} else if captureReason == event.ReasonSampleLimitExceeded {
@@ -819,7 +910,7 @@ func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, resp *ht
 	}
 
 	p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, false,
-		clientIPHash, apiKeyHash, modelRequested, usage, cr.bytesRead, written, errStr,
+		clientIPHash, apiKeyHash, modelRequested, requestMeta, usage, cr.bytesRead, written, errStr,
 		captureOutcome, captureReason, errInfo, modelReturned, modelReturnedSource, terminalEvent, "")
 }
 
@@ -880,7 +971,10 @@ func (p *Proxy) finalizeStreamUsage(lastUsage *extractor.UsageInfo, responsesSta
 
 	captureOutcome := event.OutcomeCaptured
 	captureReason := ""
-	if lastUsage == nil {
+	if prof != nil && prof.CaptureMode == event.CaptureRequestOnly {
+		captureOutcome = event.OutcomeCaptured
+		captureReason = event.ReasonRequestOnlyProfile
+	} else if lastUsage == nil {
 		captureOutcome = event.OutcomeSkipped
 		captureReason = event.ReasonUsageNotPresent
 	}
@@ -911,7 +1005,7 @@ func (p *Proxy) finalizeStreamUsage(lastUsage *extractor.UsageInfo, responsesSta
 // ---------- recording ----------
 
 func (p *Proxy) recordUsage(start time.Time, ttfb time.Duration, prof *profile.EndpointProfile, endpoint, method, requestID string, status int, stream bool,
-	clientIPHash, apiKeyHash, modelRequested string, usage *extractor.UsageInfo,
+	clientIPHash, apiKeyHash, modelRequested string, requestMeta requestUsageMetadata, usage *extractor.UsageInfo,
 	requestBytes, responseBytes int64, errStr string,
 	captureOutcome, captureReason string, errInfo *extractor.ErrorInfo,
 	modelReturned, modelReturnedSource, terminalEvent, terminalReason string) {
@@ -988,11 +1082,150 @@ func (p *Proxy) recordUsage(start time.Time, ttfb time.Duration, prof *profile.E
 			ev.ModelReturnedSource = event.SourceUsage
 		}
 		ev.UsageSource = event.UsageSourceHTTPResponse
+		if usage.UsageRawJSON != "" {
+			ev.UsageRawJSON, ev.UsageRawTruncated = truncateUsageRawJSON(usage.UsageRawJSON)
+		}
 	}
+	ev.UsageDimensions = buildUsageDimensions(prof, ev, usage)
+	ev.ImageUsage = buildImageUsage(prof, ev, requestMeta, usage)
 
 	if !p.writer.Enqueue(writer.StatsEvent{Event: ev}) {
 		log.Printf("usage event dropped: request_id=%q endpoint=%q reason=%s", ev.ID, ev.Path, event.ReasonWriterQueueFull)
 	}
+}
+
+func buildUsageDimensions(prof *profile.EndpointProfile, ev event.Event, usage *extractor.UsageInfo) []event.UsageDimension {
+	profileName := ev.EndpointProfile
+	meteringKind := ev.MeteringKind
+	model := firstNonEmptyString(ev.ModelReturned, ev.ModelRequested)
+	add := func(rows []event.UsageDimension, modality, channel, metric, direction, unit string, amount float64) []event.UsageDimension {
+		if amount == 0 {
+			return rows
+		}
+		return append(rows, event.UsageDimension{
+			EndpointProfile: profileName,
+			Model:           model,
+			Modality:        modality,
+			Channel:         channel,
+			Metric:          metric,
+			Direction:       direction,
+			Unit:            unit,
+			Amount:          amount,
+			UsageSource:     ev.UsageSource,
+			CaptureOutcome:  ev.CaptureOutcome,
+			CaptureReason:   ev.CaptureReason,
+			DetailsJSON:     "{}",
+		})
+	}
+
+	var rows []event.UsageDimension
+	if prof != nil && prof.CaptureMode == event.CaptureRequestOnly {
+		modality := "request"
+		switch {
+		case strings.Contains(profileName, "audio"):
+			modality = "audio"
+		case strings.Contains(profileName, "video"):
+			modality = "video"
+		case strings.Contains(profileName, "image"):
+			modality = "image"
+		}
+		rows = add(rows, modality, "none", "request", "none", "request", 1)
+		return rows
+	}
+	if usage == nil {
+		return rows
+	}
+
+	switch meteringKind {
+	case event.MeteringImageTokens:
+		rows = add(rows, "image", "text", "tokens", "input", "token", float64(usage.InputTextTokens))
+		rows = add(rows, "image", "image", "tokens", "input", "token", float64(usage.InputImageTokens))
+		rows = add(rows, "image", "text", "tokens", "cached_input", "token", float64(usage.CachedTextTokens))
+		rows = add(rows, "image", "image", "tokens", "cached_input", "token", float64(usage.CachedImageTokens))
+		if usage.CachedTextTokens == 0 && usage.CachedImageTokens == 0 {
+			rows = add(rows, "image", "mixed", "tokens", "cached_input", "token", float64(usage.CachedTokens))
+		}
+		if usage.InputTextTokens == 0 && usage.InputImageTokens == 0 {
+			rows = add(rows, "image", "mixed", "tokens", "input", "token", float64(usage.InputTokens))
+		}
+		rows = add(rows, "image", "image", "tokens", "output", "token", float64(usage.OutputTokens))
+		rows = add(rows, "image", "image", "count", "output", "image", float64(usage.ImageCount))
+		rows = add(rows, "image", "image", "count", "partial", "image", float64(usage.PartialImageCount))
+	case event.MeteringEmbeddingTokens:
+		rows = add(rows, "embedding", "text", "tokens", "input", "token", float64(usage.InputTokens))
+	default:
+		rows = add(rows, "text", "text", "tokens", "input", "token", float64(usage.InputTokens))
+		rows = add(rows, "text", "text", "tokens", "cached_input", "token", float64(usage.CachedTokens))
+		rows = add(rows, "text", "text", "tokens", "cache_creation", "token", float64(usage.CacheCreationTokens))
+		rows = add(rows, "text", "text", "tokens", "output", "token", float64(usage.OutputTokens))
+		rows = add(rows, "text", "text", "tokens", "reasoning", "token", float64(usage.ReasoningTokens))
+	}
+	if meteringKind != event.MeteringImageTokens {
+		rows = add(rows, "image", "image", "count", "output", "image", float64(usage.ImageCount))
+		rows = add(rows, "image", "image", "count", "partial", "image", float64(usage.PartialImageCount))
+	}
+	return rows
+}
+
+func buildImageUsage(prof *profile.EndpointProfile, ev event.Event, requestMeta requestUsageMetadata, usage *extractor.UsageInfo) *event.ImageUsage {
+	if !shouldRecordImageUsage(prof, usage) {
+		return nil
+	}
+	operation := "generation"
+	if usage != nil && usage.Operation != "" {
+		operation = usage.Operation
+	} else if prof != nil {
+		switch prof.Name {
+		case "openai_images_edits":
+			operation = "edit"
+		case "openai_images_variations":
+			operation = "variation"
+		}
+	}
+	img := &event.ImageUsage{
+		Operation:       operation,
+		ModelRequested:  ev.ModelRequested,
+		ModelReturned:   ev.ModelReturned,
+		Size:            requestMeta.Size,
+		Quality:         requestMeta.Quality,
+		OutputFormat:    requestMeta.OutputFormat,
+		Stream:          ev.Stream || requestMeta.Stream,
+		InputImageCount: requestMeta.InputImageCount,
+		HasMask:         requestMeta.HasMask,
+		UsageSource:     ev.UsageSource,
+		CaptureOutcome:  ev.CaptureOutcome,
+		CaptureReason:   ev.CaptureReason,
+		MetadataJSON:    "{}",
+	}
+	if usage != nil {
+		img.ImageCount = usage.ImageCount
+		img.PartialImageCount = usage.PartialImageCount
+		if usage.InputImageCount != 0 {
+			img.InputImageCount = usage.InputImageCount
+		}
+		if usage.Size != "" {
+			img.Size = usage.Size
+		}
+		if usage.Quality != "" {
+			img.Quality = usage.Quality
+		}
+		if usage.OutputFormat != "" {
+			img.OutputFormat = usage.OutputFormat
+		}
+		if usage.HasMask {
+			img.HasMask = true
+		}
+	}
+	return img
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func truncateUsageRawJSON(raw string) (string, bool) {
@@ -1010,7 +1243,7 @@ func truncateUsageRawJSON(raw string) (string, bool) {
 	return raw[:end], true
 }
 
-func (p *Proxy) writeError(w http.ResponseWriter, start time.Time, ttfb time.Duration, prof *profile.EndpointProfile, endpoint, method, clientIPHash, apiKeyHash, modelRequested string, requestBytes int64, status int, err error) {
+func (p *Proxy) writeError(w http.ResponseWriter, start time.Time, ttfb time.Duration, prof *profile.EndpointProfile, endpoint, method, clientIPHash, apiKeyHash, modelRequested string, requestMeta requestUsageMetadata, requestBytes int64, status int, err error) {
 	if status == 0 {
 		status = http.StatusBadGateway
 	}
@@ -1025,7 +1258,7 @@ func (p *Proxy) writeError(w http.ResponseWriter, start time.Time, ttfb time.Dur
 	}
 
 	p.recordUsage(start, ttfb, prof, endpoint, method, "", status, false,
-		clientIPHash, apiKeyHash, modelRequested, nil, requestBytes, 0, safeOperationalError(err),
+		clientIPHash, apiKeyHash, modelRequested, requestMeta, nil, requestBytes, 0, safeOperationalError(err),
 		captureOutcome, event.ReasonUpstreamError, errInfo, "", "", "", "")
 }
 
@@ -1091,7 +1324,87 @@ func extractModel(body []byte) string {
 	if model, ok := topLevelJSONString(body, "model"); ok {
 		return model
 	}
+	if model := extractMultipartScalarField(body, "model"); model != "" {
+		return model
+	}
 	return ""
+}
+
+func extractRequestUsageMetadata(prof *profile.EndpointProfile, contentType string, body []byte, stream bool) requestUsageMetadata {
+	meta := requestUsageMetadata{Stream: stream}
+	if !isImageProfile(prof) || len(body) == 0 {
+		return meta
+	}
+	if isJSONMediaType(contentType) || bytes.HasPrefix(bytes.TrimSpace(body), []byte("{")) {
+		if value, ok := topLevelJSONString(body, "size"); ok {
+			meta.Size = value
+		}
+		if value, ok := topLevelJSONString(body, "quality"); ok {
+			meta.Quality = value
+		}
+		if value, ok := topLevelJSONString(body, "output_format"); ok {
+			meta.OutputFormat = value
+		}
+		if value, ok := topLevelJSONBool(body, "stream"); ok {
+			meta.Stream = value
+		}
+		if n, ok := topLevelJSONArrayLen(body, "images"); ok {
+			meta.InputImageCount = int64(n)
+		} else if n, ok := topLevelJSONArrayLen(body, "image"); ok {
+			meta.InputImageCount = int64(n)
+		} else if _, ok := topLevelJSONString(body, "image"); ok {
+			meta.InputImageCount = 1
+		}
+		meta.HasMask = topLevelJSONFieldPresent(body, "mask") || topLevelJSONFieldPresent(body, "input_image_mask")
+		return meta
+	}
+	meta.Size = extractMultipartScalarField(body, "size")
+	meta.Quality = extractMultipartScalarField(body, "quality")
+	meta.OutputFormat = extractMultipartScalarField(body, "output_format")
+	meta.InputImageCount = int64(countMultipartField(body, "image") + countMultipartField(body, "image[]"))
+	meta.HasMask = countMultipartField(body, "mask") > 0
+	return meta
+}
+
+func isJSONMediaType(headerValue string) bool {
+	mediatype, _, err := mime.ParseMediaType(headerValue)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(mediatype, "application/json") || strings.HasSuffix(strings.ToLower(mediatype), "+json")
+}
+
+func extractMultipartScalarField(body []byte, name string) string {
+	pattern := []byte(`name="` + name + `"`)
+	idx := bytes.Index(body, pattern)
+	if idx < 0 {
+		return ""
+	}
+	headerEnd := bytes.Index(body[idx:], []byte("\r\n\r\n"))
+	lineBreakLen := 4
+	if headerEnd < 0 {
+		headerEnd = bytes.Index(body[idx:], []byte("\n\n"))
+		lineBreakLen = 2
+	}
+	if headerEnd < 0 {
+		return ""
+	}
+	valueStart := idx + headerEnd + lineBreakLen
+	valueEnd := len(body)
+	if marker := bytes.Index(body[valueStart:], []byte("\r\n--")); marker >= 0 {
+		valueEnd = valueStart + marker
+	} else if marker := bytes.Index(body[valueStart:], []byte("\n--")); marker >= 0 {
+		valueEnd = valueStart + marker
+	}
+	value := strings.TrimSpace(string(body[valueStart:valueEnd]))
+	if len(value) > 128 || strings.ContainsRune(value, '\x00') {
+		return ""
+	}
+	return value
+}
+
+func countMultipartField(body []byte, name string) int {
+	return bytes.Count(body, []byte(`name="`+name+`"`))
 }
 
 func extractModelFromPath(path string) string {
@@ -1116,6 +1429,25 @@ func modelFromUsage(usage *extractor.UsageInfo) string {
 		return ""
 	}
 	return usage.Model
+}
+
+func isImageProfile(prof *profile.EndpointProfile) bool {
+	if prof == nil {
+		return false
+	}
+	return strings.HasPrefix(prof.Name, "openai_images_")
+}
+
+func usesPrefixTailSampling(prof *profile.EndpointProfile) bool {
+	return isImageProfile(prof) || (prof != nil && prof.Name == "responses")
+}
+
+func shouldRecordImageUsage(prof *profile.EndpointProfile, usage *extractor.UsageInfo) bool {
+	if isImageProfile(prof) {
+		return true
+	}
+	return prof != nil && prof.Name == "responses" && usage != nil &&
+		(usage.ImageCount > 0 || usage.PartialImageCount > 0)
 }
 
 func mergeUsageInfo(current, next *extractor.UsageInfo) *extractor.UsageInfo {
@@ -1159,6 +1491,42 @@ func mergeUsageInfo(current, next *extractor.UsageInfo) *extractor.UsageInfo {
 	}
 	if next.UsageRawJSON != "" {
 		merged.UsageRawJSON = next.UsageRawJSON
+	}
+	if next.InputTextTokens != 0 {
+		merged.InputTextTokens = next.InputTextTokens
+	}
+	if next.InputImageTokens != 0 {
+		merged.InputImageTokens = next.InputImageTokens
+	}
+	if next.CachedTextTokens != 0 {
+		merged.CachedTextTokens = next.CachedTextTokens
+	}
+	if next.CachedImageTokens != 0 {
+		merged.CachedImageTokens = next.CachedImageTokens
+	}
+	if next.ImageCount != 0 {
+		merged.ImageCount = next.ImageCount
+	}
+	if next.PartialImageCount != 0 {
+		merged.PartialImageCount += next.PartialImageCount
+	}
+	if next.InputImageCount != 0 {
+		merged.InputImageCount = next.InputImageCount
+	}
+	if next.Operation != "" {
+		merged.Operation = next.Operation
+	}
+	if next.Size != "" {
+		merged.Size = next.Size
+	}
+	if next.Quality != "" {
+		merged.Quality = next.Quality
+	}
+	if next.OutputFormat != "" {
+		merged.OutputFormat = next.OutputFormat
+	}
+	if next.HasMask {
+		merged.HasMask = true
 	}
 	return &merged
 }
@@ -1339,6 +1707,50 @@ func topLevelJSONBool(body []byte, key string) (bool, bool) {
 		return false, true
 	default:
 		return false, false
+	}
+}
+
+func topLevelJSONFieldPresent(body []byte, key string) bool {
+	_, ok := findTopLevelJSONValue(body, key)
+	return ok
+}
+
+func topLevelJSONArrayLen(body []byte, key string) (int, bool) {
+	valueStart, ok := findTopLevelJSONValue(body, key)
+	if !ok {
+		return 0, false
+	}
+	i := skipJSONWhitespace(body, valueStart)
+	if i >= len(body) || body[i] != '[' {
+		return 0, false
+	}
+	i++
+	count := 0
+	for {
+		i = skipJSONWhitespace(body, i)
+		if i >= len(body) {
+			return 0, false
+		}
+		if body[i] == ']' {
+			return count, true
+		}
+		next, ok := skipJSONValueBytes(body, i)
+		if !ok {
+			return 0, false
+		}
+		count++
+		i = skipJSONWhitespace(body, next)
+		if i >= len(body) {
+			return 0, false
+		}
+		if body[i] == ',' {
+			i++
+			continue
+		}
+		if body[i] == ']' {
+			return count, true
+		}
+		return 0, false
 	}
 }
 

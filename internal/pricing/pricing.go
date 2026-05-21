@@ -9,9 +9,11 @@ import (
 )
 
 type Pricing struct {
-	Models map[string]ModelPrice `yaml:"pricing"`
+	Models     map[string]ModelPrice           `yaml:"pricing"`
+	Multimodal map[string]MultimodalModelPrice `yaml:"multimodal_pricing"`
 	// aliasIndex maps alias names to their canonical model key.
-	aliasIndex map[string]string
+	aliasIndex           map[string]string
+	multimodalAliasIndex map[string]string
 }
 
 type ModelPrice struct {
@@ -23,11 +25,31 @@ type ModelPrice struct {
 	Aliases            []string `yaml:"aliases"`
 }
 
+type MultimodalModelPrice struct {
+	Text         ModalityPrice `yaml:"text"`
+	Image        ModalityPrice `yaml:"image"`
+	Audio        ModalityPrice `yaml:"audio"`
+	AudioSeconds ModalityPrice `yaml:"audio_seconds"`
+	Aliases      []string      `yaml:"aliases"`
+}
+
+type ModalityPrice struct {
+	InputPer1M       float64 `yaml:"input_per_1m"`
+	CachedInputPer1M float64 `yaml:"cached_input_per_1m"`
+	OutputPer1M      float64 `yaml:"output_per_1m"`
+	ReasoningPer1M   float64 `yaml:"reasoning_per_1m"`
+	PerSecond        float64 `yaml:"per_second"`
+	InputPerSecond   float64 `yaml:"input_per_second"`
+	OutputPerSecond  float64 `yaml:"output_per_second"`
+}
+
 // NewPricing returns an empty Pricing with initialized index.
 func NewPricing() *Pricing {
 	return &Pricing{
-		Models:     make(map[string]ModelPrice),
-		aliasIndex: make(map[string]string),
+		Models:               make(map[string]ModelPrice),
+		Multimodal:           make(map[string]MultimodalModelPrice),
+		aliasIndex:           make(map[string]string),
+		multimodalAliasIndex: make(map[string]string),
 	}
 }
 
@@ -43,6 +65,9 @@ func Load(path string) (*Pricing, error) {
 	if p.Models == nil {
 		p.Models = make(map[string]ModelPrice)
 	}
+	if p.Multimodal == nil {
+		p.Multimodal = make(map[string]MultimodalModelPrice)
+	}
 	p.buildAliasIndex()
 	return p, nil
 }
@@ -54,6 +79,15 @@ func (p *Pricing) buildAliasIndex() {
 			alias = strings.TrimSpace(alias)
 			if alias != "" {
 				p.aliasIndex[alias] = name
+			}
+		}
+	}
+	p.multimodalAliasIndex = make(map[string]string)
+	for name, mp := range p.Multimodal {
+		for _, alias := range mp.Aliases {
+			alias = strings.TrimSpace(alias)
+			if alias != "" {
+				p.multimodalAliasIndex[alias] = name
 			}
 		}
 	}
@@ -79,6 +113,46 @@ func (p *Pricing) CostWithCacheCreation(model string, inputTokens, outputTokens,
 	return computeCost(mp, inputTokens, outputTokens, reasoningTokens, cachedTokens, cacheCreationTokens), true
 }
 
+func (p *Pricing) CostDimension(model, modality, channel, metric, direction, unit string, amount float64) (float64, bool) {
+	if amount <= 0 {
+		return 0, true
+	}
+	mp, ok := p.lookupMultimodal(model)
+	if !ok {
+		return 0, false
+	}
+	if metric == "tokens" && unit == "token" {
+		price, ok := modalityTokenPrice(mp, modality, channel)
+		if !ok {
+			return 0, false
+		}
+		rate, ok := tokenDirectionRate(price, direction)
+		if !ok || rate <= 0 {
+			return 0, false
+		}
+		return amount / 1_000_000.0 * rate, true
+	}
+	if metric == "seconds" && unit == "second" {
+		price := mp.AudioSeconds
+		rate := price.PerSecond
+		switch direction {
+		case "input":
+			if price.InputPerSecond > 0 {
+				rate = price.InputPerSecond
+			}
+		case "output":
+			if price.OutputPerSecond > 0 {
+				rate = price.OutputPerSecond
+			}
+		}
+		if rate <= 0 {
+			return 0, false
+		}
+		return amount * rate, true
+	}
+	return 0, false
+}
+
 func (p *Pricing) lookup(model string) (ModelPrice, bool) {
 	// 1. Exact match.
 	if mp, ok := p.Models[model]; ok {
@@ -101,6 +175,58 @@ func (p *Pricing) lookup(model string) (ModelPrice, bool) {
 	}
 
 	return ModelPrice{}, false
+}
+
+func (p *Pricing) lookupMultimodal(model string) (MultimodalModelPrice, bool) {
+	if mp, ok := p.Multimodal[model]; ok {
+		return mp, true
+	}
+	if canonical, ok := p.multimodalAliasIndex[model]; ok {
+		if mp, ok := p.Multimodal[canonical]; ok {
+			return mp, true
+		}
+	}
+	canonical := canonicalize(model)
+	if canonical != model {
+		if mp, ok := p.Multimodal[canonical]; ok {
+			return mp, true
+		}
+	}
+	return MultimodalModelPrice{}, false
+}
+
+func modalityTokenPrice(mp MultimodalModelPrice, modality, channel string) (ModalityPrice, bool) {
+	switch channel {
+	case "text":
+		return mp.Text, true
+	case "image":
+		return mp.Image, true
+	case "audio":
+		return mp.Audio, true
+	}
+	switch modality {
+	case "text":
+		return mp.Text, true
+	case "image":
+		return mp.Image, true
+	case "audio":
+		return mp.Audio, true
+	}
+	return ModalityPrice{}, false
+}
+
+func tokenDirectionRate(price ModalityPrice, direction string) (float64, bool) {
+	switch direction {
+	case "input":
+		return price.InputPer1M, true
+	case "cached_input":
+		return price.CachedInputPer1M, true
+	case "output":
+		return price.OutputPer1M, true
+	case "reasoning":
+		return price.ReasoningPer1M, true
+	}
+	return 0, false
 }
 
 // canonicalize strips provider-specific version suffixes from model names.

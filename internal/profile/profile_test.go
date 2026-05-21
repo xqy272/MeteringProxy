@@ -171,12 +171,43 @@ func TestRegistry_UnknownPassthrough(t *testing.T) {
 	}
 
 	// POST to unknown path should also match passthrough
-	p, err = r.Match(http.MethodPost, "/v1/embeddings")
+	p, err = r.Match(http.MethodPost, "/v1/not-a-real-endpoint")
 	if err != nil {
 		t.Fatalf("Match: %v", err)
 	}
 	if p.Name != "unknown_passthrough" {
 		t.Errorf("unexpected profile: %s", p.Name)
+	}
+}
+
+func TestRegistry_MultimodalAndEmbeddingProfiles(t *testing.T) {
+	r := NewRegistry()
+	tests := []struct {
+		method       string
+		path         string
+		name         string
+		captureMode  string
+		meteringKind string
+	}{
+		{http.MethodPost, "/v1/images/generations", "openai_images_generations", event.CaptureUsageMetered, event.MeteringImageTokens},
+		{http.MethodPost, "/api/provider/openai/images/generations", "openai_images_generations", event.CaptureUsageMetered, event.MeteringImageTokens},
+		{http.MethodPost, "/api/provider/openai/v1/images/generations", "openai_images_generations", event.CaptureUsageMetered, event.MeteringImageTokens},
+		{http.MethodPost, "/v1/images/edits", "openai_images_edits", event.CaptureUsageMetered, event.MeteringImageTokens},
+		{http.MethodPost, "/v1/images/variations", "openai_images_variations", event.CaptureRequestOnly, event.MeteringRequestOnly},
+		{http.MethodPost, "/v1/embeddings", "openai_embeddings", event.CaptureUsageMetered, event.MeteringEmbeddingTokens},
+		{http.MethodPost, "/api/provider/openai/embeddings", "openai_embeddings", event.CaptureUsageMetered, event.MeteringEmbeddingTokens},
+		{http.MethodPost, "/v1/audio/transcriptions", "openai_audio", event.CaptureRequestOnly, event.MeteringRequestOnly},
+		{http.MethodGet, "/v1/videos/vid_123", "openai_videos", event.CaptureRequestOnly, event.MeteringRequestOnly},
+	}
+	for _, tc := range tests {
+		p, err := r.Match(tc.method, tc.path)
+		if err != nil {
+			t.Fatalf("Match(%s %s): %v", tc.method, tc.path, err)
+		}
+		if p.Name != tc.name || p.CaptureMode != tc.captureMode || p.MeteringKind != tc.meteringKind {
+			t.Fatalf("Match(%s %s) = %s/%s/%s, want %s/%s/%s",
+				tc.method, tc.path, p.Name, p.CaptureMode, p.MeteringKind, tc.name, tc.captureMode, tc.meteringKind)
+		}
 	}
 }
 
@@ -330,12 +361,12 @@ func TestRegistry_ExtractorBinding_GeminiGenerateContent(t *testing.T) {
 func TestRegistry_Profiles(t *testing.T) {
 	r := NewRegistry()
 	all := r.Profiles()
-	if len(all) != 6 {
-		t.Errorf("expected 6 profiles, got %d", len(all))
+	if len(all) != 12 {
+		t.Errorf("expected 12 profiles, got %d", len(all))
 	}
 	metered := r.MeteredProfiles()
-	if len(metered) != 5 {
-		t.Errorf("expected 5 metered profiles, got %d", len(metered))
+	if len(metered) != 11 {
+		t.Errorf("expected 11 metered profiles, got %d", len(metered))
 	}
 }
 
@@ -349,6 +380,12 @@ func TestEndpointProfile_DisplayName(t *testing.T) {
 		{"responses", "Responses API"},
 		{"anthropic_messages", "Anthropic Messages"},
 		{"gemini_generate_content", "Gemini Generate Content"},
+		{"openai_images_generations", "Images Generations"},
+		{"openai_images_edits", "Images Edits"},
+		{"openai_images_variations", "Images Variations"},
+		{"openai_embeddings", "Embeddings"},
+		{"openai_audio", "Audio"},
+		{"openai_videos", "Videos"},
 		{"unknown_passthrough", "Unknown (Passthrough)"},
 		{"custom", "custom"},
 	}
