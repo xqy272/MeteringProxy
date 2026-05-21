@@ -86,9 +86,12 @@ func TestUnsupportedProviderWritesUnsupportedQuotaRow(t *testing.T) {
 	if row.AdapterStatus != "unsupported" || row.QuotaSupported != 0 || row.Status != "unsupported" {
 		t.Fatalf("row = %#v", row)
 	}
+	if len(store.events) != 1 || store.events[0].ErrorClass != "quota_unsupported" {
+		t.Fatalf("events = %#v, want quota_unsupported refresh diagnostic", store.events)
+	}
 }
 
-func TestProbeAPICallDoesNotTreatCLIProxyAPIMissingMethodAsFullQuotaAvailable(t *testing.T) {
+func TestProbeAPICallTreatsCLIProxyAPIBadRequestAsReachable(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/management/api-call" {
 			http.NotFound(w, r)
@@ -109,8 +112,12 @@ func TestProbeAPICallDoesNotTreatCLIProxyAPIMissingMethodAsFullQuotaAvailable(t 
 	}
 	p := NewPoller(client, &fakeQuotaStore{}, hash.NewWithSalt("test-salt"), config.QuotaConfig{})
 	p.probeAPICall()
-	if p.APICallAvailable() {
-		t.Fatal("APICallAvailable = true, want false for CPA v7.0.4 missing method response")
+	if !p.APICallAvailable() {
+		t.Fatal("APICallAvailable = false, want true for reachable CPA api-call endpoint")
+	}
+	_, status, class, endpoint := p.probeSnapshot()
+	if status != http.StatusBadRequest || class != "api_call_bad_request" || endpoint != "/api-call" {
+		t.Fatalf("probe = status:%d class:%q endpoint:%q, want 400/api_call_bad_request//api-call", status, class, endpoint)
 	}
 }
 
@@ -141,7 +148,31 @@ func TestProbeAPICallDetectsCLIProxyAPICurrentContract(t *testing.T) {
 	if !p.APICallAvailable() {
 		t.Fatal("APICallAvailable = false, want true for accepted api-call request contract")
 	}
+	_, status, class, _ := p.probeSnapshot()
+	if status != http.StatusBadGateway || class != "api_call_probe_reachable" {
+		t.Fatalf("probe = status:%d class:%q, want 502/api_call_probe_reachable", status, class)
+	}
 	if !strings.Contains(requestBody, `"method":"GET"`) || !strings.Contains(requestBody, `"url":"http://127.0.0.1:0/__metering_probe__"`) {
 		t.Fatalf("probe request body = %s, want method/url contract", requestBody)
+	}
+}
+
+func TestRecordRefreshEventPersistsProbeDiagnostics(t *testing.T) {
+	store := &fakeQuotaStore{}
+	p := NewPoller(nil, store, hash.NewWithSalt("test-salt"), config.QuotaConfig{})
+	p.mu.Lock()
+	p.apiCallAvail = true
+	p.probeStatus = http.StatusBadRequest
+	p.probeClass = "api_call_bad_request"
+	p.probeEndpoint = "/api-call"
+	p.mu.Unlock()
+
+	p.recordRefreshEvent("codex", "", "adapter", "error", "unsupported", 12, "2026-05-05T00:00:00Z", 1777939200)
+	if len(store.events) != 1 {
+		t.Fatalf("events = %d, want 1", len(store.events))
+	}
+	got := store.events[0]
+	if got.ProbeHTTPStatus != http.StatusBadRequest || got.ProbeErrorClass != "api_call_bad_request" || got.APICallReachable != 1 {
+		t.Fatalf("event probe fields = %#v", got)
 	}
 }

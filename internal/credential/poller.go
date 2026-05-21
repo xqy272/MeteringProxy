@@ -112,12 +112,15 @@ func (p *Poller) poll() {
 			labelHash = p.hash("credential_label:" + af.Label)
 		}
 		status := normalizeCredentialStatus(af)
+		displayLabel, identityHint := credentialIdentityLabels(af)
 
 		row := db.CredentialHealthRow{
 			Provider:           af.Provider,
 			CredentialHash:     credHash,
 			AuthIndexHash:      authIndexHash,
 			LabelHash:          labelHash,
+			DisplayLabel:       displayLabel,
+			IdentityHint:       identityHint,
 			Status:             status,
 			StatusMessage:      af.StatusMessage,
 			Plan:               af.Plan,
@@ -297,11 +300,60 @@ func containsAuthFailureSignal(text string) bool {
 
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
-		if value != "" {
-			return value
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
 		}
 	}
 	return ""
+}
+
+func credentialIdentityLabels(af cliproxy.AuthFileEntry) (displayLabel, identityHint string) {
+	displayLabel = safeCredentialDisplay(firstNonEmpty(af.Label, af.DisplayName, af.Name, af.Email))
+	if email := safeEmail(af.Email); email != "" {
+		identityHint = email
+	} else if email := safeEmail(af.Name); email != "" {
+		identityHint = email
+	} else {
+		identityHint = safeCredentialDisplay(firstNonEmpty(af.DisplayName, af.Name, af.Label))
+	}
+	if identityHint == displayLabel {
+		identityHint = ""
+	}
+	return displayLabel, identityHint
+}
+
+func safeEmail(value string) string {
+	value = safeCredentialDisplay(value)
+	if value == "" || !strings.Contains(value, "@") {
+		return ""
+	}
+	return value
+}
+
+func safeCredentialDisplay(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	lower := strings.ToLower(value)
+	for _, needle := range []string{"bearer ", "sk-", "sess-", "oauth", "token", "api_key", "apikey", "authorization"} {
+		if strings.Contains(lower, needle) {
+			return ""
+		}
+	}
+	value = strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 {
+			return -1
+		}
+		return r
+	}, value)
+	if len(value) > 160 {
+		runes := []rune(value)
+		if len(runes) > 160 {
+			value = string(runes[:160])
+		}
+	}
+	return value
 }
 
 func (p *Poller) Snapshot() ([]db.CredentialHealthRow, time.Time) {

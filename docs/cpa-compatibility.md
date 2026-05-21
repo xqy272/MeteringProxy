@@ -81,7 +81,7 @@ pass through MeteringProxy as `unknown_passthrough`.
 | `GET /v0/management/auth-files` | supported | Supports CPA `{files:[...]}` and legacy `{auth_files:[...]}`; runtime fields such as `status_message`, explicit `available`, `next_retry_after`, `recent_requests`, future `quota` cooldown hints, and Codex `id_token.plan_type` are normalized without storing raw tokens or account identifiers |
 | `GET /v0/management/usage-queue?count=N` | supported | Requires CPA `usage-statistics-enabled: true`; v7.1.17+ may include `response_headers`, which MeteringProxy ignores safely |
 | RESP `AUTH` + `LPOP`/`RPOP` | legacy only | Available in v7.0.4-v7.0.9; v7.1.17+ returns `ERR RESP AUTH disabled; use mTLS`. Configure `usage_queue.transport` as `auto` or `http` for new CPA releases |
-| `POST /v0/management/api-call` | endpoint detected only | CPA v7.0.4-v7.1.19 requires `method` and absolute `url`; it is not treated as a full quota API |
+| `POST /v0/management/api-call` | endpoint detected only | CPA v7.0.4-v7.1.19 requires `method` and absolute `url`; 400 responses to a probe prove the endpoint is reachable but are not treated as full quota support |
 
 ## Quota Support
 
@@ -115,10 +115,12 @@ Supported today:
   `quota_refresh_events`; credential and quota current-state issues remain
   visible even when their last check happened outside the selected request
   range.
-- `/metering/api/quota` includes bounded recent quota refresh diagnostics, and
-  `/metering/api/observability` exposes the latest quota event and last quota
-  refresh error so operators can distinguish unavailable `/api-call`,
-  unsupported adapters, and provider-level failures.
+- `/metering/api/quota/diagnostics` includes bounded recent quota refresh
+  diagnostics, probe HTTP status, and API call reachability. `/metering/api/quota`
+  includes a compact diagnostic sample, and `/metering/api/observability`
+  exposes the latest quota event and last quota refresh error so operators can
+  distinguish bad probe contracts, unavailable `/api-call`, unsupported
+  adapters, and provider-level failures.
 
 Not supported today:
 

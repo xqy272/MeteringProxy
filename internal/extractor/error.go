@@ -109,11 +109,52 @@ func extractErrorInfoFromJSON(sample []byte, status int) (*ErrorInfo, error) {
 }
 
 func classifyError(status int, errType, errCode, message string) string {
-	if status == 401 || status == 403 {
+	combined := strings.ToLower(errType + " " + errCode + " " + message)
+	switch status {
+	case 400:
+		if isContextLengthError(combined) {
+			return "context_length"
+		}
+		if containsAny(combined, "model_not_found", "model not found", "unknown model", "invalid model") {
+			return "invalid_model"
+		}
+		return "invalid_request"
+	case 401:
+		if containsAny(combined, "invalid_api_key", "invalid api key", "incorrect api key") {
+			return "auth_invalid_key"
+		}
+		if containsAny(combined, "expired", "revoked") {
+			return "auth_expired"
+		}
 		return "auth_failed"
+	case 402:
+		return "billing_required"
+	case 403:
+		if containsAny(combined, "scope", "permission", "not allowed", "forbidden", "access denied") {
+			return "permission_denied"
+		}
+		if containsAny(combined, "expired", "revoked") {
+			return "auth_expired"
+		}
+		return "permission_denied"
+	case 404:
+		if containsAny(combined, "model") {
+			return "invalid_model"
+		}
+		return "not_found"
+	case 408:
+		return "request_timeout"
+	case 409:
+		return "conflict"
+	case 413:
+		return "request_too_large"
+	case 422:
+		if isContextLengthError(combined) {
+			return "context_length"
+		}
+		return "validation_error"
 	}
 	if status == 429 {
-		combined := strings.ToLower(errType + " " + errCode + " " + message)
 		if containsAny(combined, "quota", "insufficient", "balance", "credit", "resource_exhausted", "exhausted") {
 			return "quota_exhausted"
 		}
@@ -122,17 +163,51 @@ func classifyError(status int, errType, errCode, message string) string {
 		}
 		return "rate_limited"
 	}
-	if status == 400 {
-		combined := strings.ToLower(errType + " " + errCode + " " + message)
-		if isContextLengthError(combined) {
-			return "context_length"
-		}
-		return "invalid_request"
-	}
 	if status >= 500 {
-		return "upstream_5xx"
+		return classifyUpstream5xx(status, combined)
 	}
 	return "unknown"
+}
+
+func classifyUpstream5xx(status int, combined string) string {
+	if containsAny(combined, "timeout", "timed out", "deadline exceeded", "gateway timeout") {
+		return "upstream_timeout"
+	}
+	if containsAny(combined, "connection refused", "connect refused", "refused") {
+		return "upstream_connection_refused"
+	}
+	if containsAny(combined, "connection reset", "reset by peer") {
+		return "upstream_connection_reset"
+	}
+	if containsAny(combined, "dns", "no such host", "name resolution") {
+		return "upstream_dns_error"
+	}
+	if containsAny(combined, "no route", "network unreachable") {
+		return "upstream_network_unreachable"
+	}
+	if containsAny(combined, "tls", "certificate", "x509") {
+		return "upstream_tls_error"
+	}
+	if containsAny(combined, "overloaded", "overload", "capacity") {
+		return "upstream_overloaded"
+	}
+	if containsAny(combined, "temporarily unavailable", "service unavailable", "unavailable") {
+		return "upstream_unavailable"
+	}
+	switch status {
+	case 500:
+		return "upstream_internal_error"
+	case 501:
+		return "upstream_not_implemented"
+	case 502:
+		return "upstream_bad_gateway"
+	case 503:
+		return "upstream_unavailable"
+	case 504:
+		return "upstream_timeout"
+	default:
+		return "upstream_5xx"
+	}
 }
 
 func rawJSONScalarString(raw json.RawMessage) string {

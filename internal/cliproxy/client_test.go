@@ -78,6 +78,9 @@ func TestFetchAuthFilesDecodesCLIProxyAPIv704FilesResponse(t *testing.T) {
 	if entry.ID != "codex-1" || entry.Provider != "codex" || entry.AuthType != "codex" || entry.AuthIndex != "12" {
 		t.Fatalf("entry identity = %#v", entry)
 	}
+	if entry.Name != "codex@example.com" || entry.Label != "Codex Primary" {
+		t.Fatalf("entry display fields = %#v", entry)
+	}
 	if entry.SuccessCount != 7 || entry.FailedCount != 2 || !entry.Available {
 		t.Fatalf("entry counters/status = %#v", entry)
 	}

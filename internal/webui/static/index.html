@@ -23,10 +23,6 @@
       <option value="zh">中文</option>
     </select>
     <select id="range-select" class="ctrl-select" aria-label="Range" data-i18n-aria="action.range"></select>
-    <select id="layout-select" class="ctrl-select" aria-label="Layout" data-i18n-aria="action.layout">
-      <option value="tabs" data-i18n="layout.mode.tabs">Tabs</option>
-      <option value="classic" data-i18n="layout.mode.classic">Classic</option>
-    </select>
     <label class="ctrl-toggle"><input type="checkbox" id="auto-refresh"> <span data-i18n="action.auto_refresh">Auto</span></label>
     <button class="ctrl-btn primary" id="refresh-btn" type="button" data-i18n="action.refresh">Refresh</button>
     <button class="theme-btn" id="theme-toggle" type="button" aria-label="Toggle theme" data-i18n-aria="action.toggle_theme" data-i18n-title="action.toggle_theme">
@@ -131,6 +127,36 @@
         <div class="diag-tile"><div class="dt-name" data-i18n="obs.capture">Capture</div><div class="dt-val mono" id="capture-state">-</div><div class="dt-unit" id="capture-state-detail">-</div></div>
       </div>
       <div id="quota-window-summary" class="quota-window-grid"></div>
+    </div>
+  </section>
+
+  <!-- Quota Diagnostics -->
+  <section id="quota-diagnostics" class="card section-gap" data-layout-panel="quota-diagnostics">
+    <div class="card-head">
+      <div class="card-head-left">
+        <div class="card-title" data-i18n="panel.quota_diagnostics">Quota & Credential Diagnostics</div>
+        <div class="card-desc" id="quota-diagnostics-summary">-</div>
+      </div>
+      <button class="ctrl-btn" id="quota-refresh-diagnostics" type="button" data-i18n="action.refresh_quota">Refresh quota</button>
+    </div>
+    <div class="card-body">
+      <div class="quota-diag-grid" id="quota-diagnostics-cards"></div>
+      <div class="table-wrap quota-diag-table">
+        <table>
+          <thead><tr>
+            <th data-i18n="table.time">Time</th>
+            <th data-i18n="table.provider">Provider</th>
+            <th data-i18n="quota_diag.phase">Phase</th>
+            <th data-i18n="table.status">Status</th>
+            <th data-i18n="quota_diag.adapter_status">Adapter</th>
+            <th class="numeric" data-i18n="quota_diag.http_status">HTTP</th>
+            <th data-i18n="quota_diag.probe">Probe</th>
+            <th data-i18n="quota_diag.error">Error</th>
+            <th class="numeric" data-i18n="quota_diag.duration">Duration</th>
+          </tr></thead>
+          <tbody id="quota-diagnostics-table"><tr><td colspan="9" class="empty-state" data-i18n="state.loading">Loading...</td></tr></tbody>
+        </table>
+      </div>
     </div>
   </section>
 

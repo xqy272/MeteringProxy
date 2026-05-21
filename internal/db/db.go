@@ -311,6 +311,8 @@ type CredentialHealthRow struct {
 	CredentialHash     string `json:"credential_hash"`
 	AuthIndexHash      string `json:"auth_index_hash"`
 	LabelHash          string `json:"label_hash"`
+	DisplayLabel       string `json:"display_label"`
+	IdentityHint       string `json:"identity_hint"`
 	Status             string `json:"status"`
 	StatusMessage      string `json:"status_message"`
 	Plan               string `json:"plan"`
@@ -352,18 +354,24 @@ type QuotaCurrentRow struct {
 }
 
 type QuotaRefreshEventRow struct {
-	ID             int64  `json:"id"`
-	CheckedAt      string `json:"checked_at"`
-	CheckedAtUnix  int64  `json:"checked_at_unix"`
-	Provider       string `json:"provider"`
-	CredentialHash string `json:"credential_hash"`
-	Phase          string `json:"phase"`
-	Status         string `json:"status"`
-	AdapterStatus  string `json:"adapter_status"`
-	DurationMs     int64  `json:"duration_ms"`
-	ErrorClass     string `json:"error_class"`
-	ErrorMessage   string `json:"error_message"`
-	Partial        int64  `json:"partial"`
+	ID                int64  `json:"id"`
+	CheckedAt         string `json:"checked_at"`
+	CheckedAtUnix     int64  `json:"checked_at_unix"`
+	Provider          string `json:"provider"`
+	CredentialHash    string `json:"credential_hash"`
+	Phase             string `json:"phase"`
+	Status            string `json:"status"`
+	AdapterStatus     string `json:"adapter_status"`
+	DurationMs        int64  `json:"duration_ms"`
+	ErrorClass        string `json:"error_class"`
+	ErrorMessage      string `json:"error_message"`
+	Partial           int64  `json:"partial"`
+	ProbeHTTPStatus   int    `json:"probe_http_status"`
+	ProbeEndpoint     string `json:"probe_endpoint"`
+	ProbeErrorClass   string `json:"probe_error_class"`
+	APICallReachable  int64  `json:"api_call_reachable"`
+	ProviderSupported int64  `json:"provider_supported"`
+	DetailsJSON       string `json:"details_json"`
 }
 
 type MultimodalSummaryRow struct {
@@ -568,6 +576,9 @@ func migrate(sqlDB *sql.DB) error {
 	if err := ensureColumns(sqlDB, "credential_health", credentialHealthColumns()); err != nil {
 		return err
 	}
+	if err := ensureColumns(sqlDB, "quota_refresh_events", quotaRefreshEventColumns()); err != nil {
+		return err
+	}
 	if err := createMultimodalTables(sqlDB); err != nil {
 		return err
 	}
@@ -623,6 +634,8 @@ func createTablesV6(sqlDB *sql.DB) error {
 			credential_hash TEXT NOT NULL DEFAULT '',
 			auth_index_hash TEXT NOT NULL DEFAULT '',
 			label_hash TEXT NOT NULL DEFAULT '',
+			display_label TEXT NOT NULL DEFAULT '',
+			identity_hint TEXT NOT NULL DEFAULT '',
 			status TEXT NOT NULL DEFAULT '',
 			status_message TEXT NOT NULL DEFAULT '',
 			plan TEXT NOT NULL DEFAULT '',
@@ -675,7 +688,13 @@ func createTablesV6(sqlDB *sql.DB) error {
 			duration_ms INTEGER NOT NULL DEFAULT 0,
 			error_class TEXT NOT NULL DEFAULT '',
 			error_message TEXT NOT NULL DEFAULT '',
-			partial INTEGER NOT NULL DEFAULT 0
+			partial INTEGER NOT NULL DEFAULT 0,
+			probe_http_status INTEGER NOT NULL DEFAULT 0,
+			probe_endpoint TEXT NOT NULL DEFAULT '',
+			probe_error_class TEXT NOT NULL DEFAULT '',
+			api_call_reachable INTEGER NOT NULL DEFAULT 0,
+			provider_supported INTEGER NOT NULL DEFAULT 0,
+			details_json TEXT NOT NULL DEFAULT '{}'
 		)`,
 	}
 	for _, ddl := range tables {
@@ -855,6 +874,8 @@ func sideUsageEventColumns() []columnSpec {
 
 func credentialHealthColumns() []columnSpec {
 	return []columnSpec{
+		{"display_label", "display_label TEXT NOT NULL DEFAULT ''"},
+		{"identity_hint", "identity_hint TEXT NOT NULL DEFAULT ''"},
 		{"status_message", "status_message TEXT NOT NULL DEFAULT ''"},
 		{"plan", "plan TEXT NOT NULL DEFAULT ''"},
 		{"recent_success_count", "recent_success_count INTEGER NOT NULL DEFAULT 0"},
@@ -864,6 +885,17 @@ func credentialHealthColumns() []columnSpec {
 		{"error_type", "error_type TEXT NOT NULL DEFAULT ''"},
 		{"error_code", "error_code TEXT NOT NULL DEFAULT ''"},
 		{"error_message", "error_message TEXT NOT NULL DEFAULT ''"},
+	}
+}
+
+func quotaRefreshEventColumns() []columnSpec {
+	return []columnSpec{
+		{"probe_http_status", "probe_http_status INTEGER NOT NULL DEFAULT 0"},
+		{"probe_endpoint", "probe_endpoint TEXT NOT NULL DEFAULT ''"},
+		{"probe_error_class", "probe_error_class TEXT NOT NULL DEFAULT ''"},
+		{"api_call_reachable", "api_call_reachable INTEGER NOT NULL DEFAULT 0"},
+		{"provider_supported", "provider_supported INTEGER NOT NULL DEFAULT 0"},
+		{"details_json", "details_json TEXT NOT NULL DEFAULT '{}'"},
 	}
 }
 
@@ -2036,13 +2068,15 @@ func (db *DB) InsertSideUsageEvent(e SideUsageEvent) (int64, error) {
 
 func (db *DB) UpsertCredentialHealth(row *CredentialHealthRow) error {
 	_, err := db.sql.Exec(`
-		INSERT INTO credential_health (provider, credential_hash, auth_index_hash, label_hash, status, status_message, plan,
+		INSERT INTO credential_health (provider, credential_hash, auth_index_hash, label_hash, display_label, identity_hint, status, status_message, plan,
 			success_count, failed_count, recent_success_count, recent_failed_count, next_retry_after, next_retry_after_unix,
 			checked_at, checked_at_unix, error_class, error_type, error_code, error_message)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(provider, credential_hash) DO UPDATE SET
 			auth_index_hash = excluded.auth_index_hash,
 			label_hash = excluded.label_hash,
+			display_label = excluded.display_label,
+			identity_hint = excluded.identity_hint,
 			status = excluded.status,
 			status_message = excluded.status_message,
 			plan = excluded.plan,
@@ -2058,15 +2092,15 @@ func (db *DB) UpsertCredentialHealth(row *CredentialHealthRow) error {
 			error_type = excluded.error_type,
 			error_code = excluded.error_code,
 			error_message = excluded.error_message
-	`, row.Provider, row.CredentialHash, row.AuthIndexHash, row.LabelHash, row.Status,
-		row.StatusMessage, row.Plan, row.SuccessCount, row.FailedCount, row.RecentSuccessCount, row.RecentFailedCount,
+	`, row.Provider, row.CredentialHash, row.AuthIndexHash, row.LabelHash, row.DisplayLabel,
+		row.IdentityHint, row.Status, row.StatusMessage, row.Plan, row.SuccessCount, row.FailedCount, row.RecentSuccessCount, row.RecentFailedCount,
 		row.NextRetryAfter, row.NextRetryAfterUnix, row.CheckedAt, row.CheckedAtUnix,
 		row.ErrorClass, row.ErrorType, row.ErrorCode, row.ErrorMessage)
 	return err
 }
 
 func (db *DB) AllCredentialHealth() ([]CredentialHealthRow, error) {
-	rows, err := db.read.Query(`SELECT provider, credential_hash, auth_index_hash, label_hash, status, status_message, plan,
+	rows, err := db.read.Query(`SELECT provider, credential_hash, auth_index_hash, label_hash, display_label, identity_hint, status, status_message, plan,
 		success_count, failed_count, recent_success_count, recent_failed_count, next_retry_after, next_retry_after_unix,
 		checked_at, checked_at_unix, error_class, error_type, error_code, error_message
 		FROM credential_health ORDER BY provider, credential_hash`)
@@ -2077,7 +2111,7 @@ func (db *DB) AllCredentialHealth() ([]CredentialHealthRow, error) {
 	var result []CredentialHealthRow
 	for rows.Next() {
 		var r CredentialHealthRow
-		if err := rows.Scan(&r.Provider, &r.CredentialHash, &r.AuthIndexHash, &r.LabelHash, &r.Status, &r.StatusMessage, &r.Plan,
+		if err := rows.Scan(&r.Provider, &r.CredentialHash, &r.AuthIndexHash, &r.LabelHash, &r.DisplayLabel, &r.IdentityHint, &r.Status, &r.StatusMessage, &r.Plan,
 			&r.SuccessCount, &r.FailedCount, &r.RecentSuccessCount, &r.RecentFailedCount, &r.NextRetryAfter, &r.NextRetryAfterUnix,
 			&r.CheckedAt, &r.CheckedAtUnix, &r.ErrorClass, &r.ErrorType, &r.ErrorCode, &r.ErrorMessage); err != nil {
 			return nil, err
@@ -2138,9 +2172,11 @@ func (db *DB) AllQuotaCurrent() ([]QuotaCurrentRow, error) {
 
 func (db *DB) InsertQuotaRefreshEvent(row *QuotaRefreshEventRow) error {
 	_, err := db.sql.Exec(`
-		INSERT INTO quota_refresh_events (checked_at, checked_at_unix, provider, credential_hash, phase, status, adapter_status, duration_ms, error_class, error_message, partial)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, row.CheckedAt, row.CheckedAtUnix, row.Provider, row.CredentialHash, row.Phase, row.Status, row.AdapterStatus, row.DurationMs, row.ErrorClass, row.ErrorMessage, row.Partial)
+		INSERT INTO quota_refresh_events (checked_at, checked_at_unix, provider, credential_hash, phase, status, adapter_status, duration_ms,
+			error_class, error_message, partial, probe_http_status, probe_endpoint, probe_error_class, api_call_reachable, provider_supported, details_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, row.CheckedAt, row.CheckedAtUnix, row.Provider, row.CredentialHash, row.Phase, row.Status, row.AdapterStatus, row.DurationMs,
+		row.ErrorClass, row.ErrorMessage, row.Partial, row.ProbeHTTPStatus, row.ProbeEndpoint, row.ProbeErrorClass, row.APICallReachable, row.ProviderSupported, defaultDetailsJSON(row.DetailsJSON))
 	return err
 }
 
@@ -2149,7 +2185,8 @@ func (db *DB) RecentQuotaRefreshEvents(since time.Time, limit int) ([]QuotaRefre
 		limit = 20
 	}
 	rows, err := db.read.Query(`
-		SELECT id, checked_at, checked_at_unix, provider, credential_hash, phase, status, adapter_status, duration_ms, error_class, error_message, partial
+		SELECT id, checked_at, checked_at_unix, provider, credential_hash, phase, status, adapter_status, duration_ms, error_class, error_message, partial,
+			probe_http_status, probe_endpoint, probe_error_class, api_call_reachable, provider_supported, details_json
 		FROM quota_refresh_events
 		WHERE checked_at_unix >= ?
 		ORDER BY checked_at_unix DESC, id DESC
@@ -2162,12 +2199,22 @@ func (db *DB) RecentQuotaRefreshEvents(since time.Time, limit int) ([]QuotaRefre
 	result := []QuotaRefreshEventRow{}
 	for rows.Next() {
 		var r QuotaRefreshEventRow
-		if err := rows.Scan(&r.ID, &r.CheckedAt, &r.CheckedAtUnix, &r.Provider, &r.CredentialHash, &r.Phase, &r.Status, &r.AdapterStatus, &r.DurationMs, &r.ErrorClass, &r.ErrorMessage, &r.Partial); err != nil {
+		if err := rows.Scan(&r.ID, &r.CheckedAt, &r.CheckedAtUnix, &r.Provider, &r.CredentialHash, &r.Phase, &r.Status, &r.AdapterStatus, &r.DurationMs, &r.ErrorClass, &r.ErrorMessage, &r.Partial,
+			&r.ProbeHTTPStatus, &r.ProbeEndpoint, &r.ProbeErrorClass, &r.APICallReachable, &r.ProviderSupported, &r.DetailsJSON); err != nil {
 			return nil, err
 		}
+		r.DetailsJSON = defaultDetailsJSON(r.DetailsJSON)
 		result = append(result, r)
 	}
 	return result, rows.Err()
+}
+
+func defaultDetailsJSON(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "{}"
+	}
+	return value
 }
 
 func (db *DB) DeleteStaleSideUsageEvents(cutoff time.Time) error {

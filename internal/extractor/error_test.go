@@ -16,16 +16,25 @@ func TestClassifyError(t *testing.T) {
 		want    string
 	}{
 		{"auth 401", 401, "", "", "", "auth_failed"},
-		{"auth 403", 403, "", "", "", "auth_failed"},
+		{"invalid key 401", 401, "", "invalid_api_key", "", "auth_invalid_key"},
+		{"auth expired 401", 401, "", "", "token expired", "auth_expired"},
+		{"permission 403", 403, "", "", "", "permission_denied"},
+		{"billing 402", 402, "", "", "", "billing_required"},
+		{"not found 404", 404, "", "", "", "not_found"},
+		{"request too large 413", 413, "", "", "", "request_too_large"},
 		{"quota 429", 429, "", "", "insufficient_quota", "quota_exhausted"},
 		{"rate 429", 429, "rate_limit", "", "", "rate_limited"},
 		{"rate 429 default", 429, "", "", "", "rate_limited"},
 		{"context_length 400", 400, "", "", "context_length_exceeded", "context_length"},
 		{"context word only 400", 400, "", "", "Invalid context provided", "invalid_request"},
 		{"context window 400", 400, "", "", "This model's context window was exceeded", "context_length"},
+		{"invalid_model 400", 400, "", "model_not_found", "", "invalid_model"},
 		{"invalid_request 400", 400, "", "invalid_api_key", "", "invalid_request"},
-		{"upstream 500", 500, "", "", "", "upstream_5xx"},
-		{"upstream 502", 502, "", "", "", "upstream_5xx"},
+		{"upstream 500", 500, "", "", "", "upstream_internal_error"},
+		{"upstream 502", 502, "", "", "", "upstream_bad_gateway"},
+		{"upstream refused 502", 502, "", "", "connection refused", "upstream_connection_refused"},
+		{"upstream dns 502", 502, "", "", "no such host", "upstream_dns_error"},
+		{"upstream timeout 504", 504, "", "", "", "upstream_timeout"},
 		{"unknown 418", 418, "", "", "", "unknown"},
 	}
 
@@ -122,8 +131,8 @@ func TestExtractErrorInfo_Upstream5xx(t *testing.T) {
 	if info == nil {
 		t.Fatal("expected non-nil ErrorInfo")
 	}
-	if info.Class != "upstream_5xx" {
-		t.Errorf("class = %q, want upstream_5xx", info.Class)
+	if info.Class != "upstream_internal_error" {
+		t.Errorf("class = %q, want upstream_internal_error", info.Class)
 	}
 }
 

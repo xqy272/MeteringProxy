@@ -6,19 +6,18 @@ const BASE = apiBaseMeta && apiBaseMeta.content ? apiBaseMeta.content : '/meteri
 const LANG_KEY = 'mp-lang';
 const THEME_KEY = 'mp-theme';
 const USAGE_MODE_KEY = 'mp-usage-mode';
-const LAYOUT_MODE_KEY = 'mp-layout-mode';
 const LAYOUT_TAB_KEY = 'mp-layout-tab';
 const I18N = window.METERING_I18N || {};
 const QUOTA_PAGE_SIZE = 8;
 const layoutTabs = [
   { key: 'overview', label: 'layout.tab.overview' },
   { key: 'credentials', label: 'layout.tab.credentials' },
+  { key: 'quota-diagnostics', label: 'layout.tab.quota_diagnostics' },
   { key: 'requests', label: 'layout.tab.requests' },
   { key: 'images', label: 'layout.tab.images' },
   { key: 'keys', label: 'layout.tab.keys' },
   { key: 'diagnostics', label: 'layout.tab.diagnostics' }
 ];
-// Rollback contract: classic mode keeps the original long page; tabs only hide existing panels.
 
 let metadata = null;
 let currentModels = [];
@@ -29,7 +28,6 @@ let requestsExpanded = false;
 let currentLang = detectLang();
 let currentTheme = detectTheme();
 let currentUsageMode = detectUsageMode();
-let currentLayoutMode = detectLayoutMode();
 let currentLayoutTab = detectLayoutTab();
 let lastTSRows = [];
 let lastTSBucket = '';
@@ -39,6 +37,7 @@ let latestHealth = null;
 let latestActivity = null;
 let latestQuota = null;
 let latestObservability = null;
+let latestQuotaDiagnostics = null;
 let selectedIssueSeverity = '';
 let currentIssueClassFilter = '';
 let statusHideTimer = null;
@@ -67,15 +66,6 @@ function detectTheme() {
 function detectUsageMode() {
   try { const s = localStorage.getItem(USAGE_MODE_KEY); if (s === 'cost' || s === 'tokens' || s === 'requests') return s; } catch (_) {}
   return 'cost';
-}
-function detectLayoutMode() {
-  try {
-    const qp = new URLSearchParams(window.location.search).get('layout');
-    if (qp === 'tabs' || qp === 'classic') return qp;
-    const s = localStorage.getItem(LAYOUT_MODE_KEY);
-    if (s === 'tabs' || s === 'classic') return s;
-  } catch (_) {}
-  return 'tabs';
 }
 function detectLayoutTab() {
   try {
@@ -132,20 +122,10 @@ function applyI18N() {
   document.querySelectorAll('[data-i18n-title]').forEach(el => { el.setAttribute('title', t(el.dataset.i18nTitle)); });
   const s = $('language-select'); if (s) s.value = currentLang;
   const zh = document.querySelector('#language-select option[value="zh"]'); if (zh) zh.textContent = '中文';
-  const ls = $('layout-select'); if (ls) ls.value = currentLayoutMode;
   renderLayoutTabs();
   updateToggleLabels();
 }
 
-function applyLayoutMode(mode) {
-  currentLayoutMode = mode === 'classic' ? 'classic' : 'tabs';
-  document.documentElement.setAttribute('data-layout', currentLayoutMode);
-  try { localStorage.setItem(LAYOUT_MODE_KEY, currentLayoutMode); } catch (_) {}
-  const select = $('layout-select'); if(select) select.value = currentLayoutMode;
-  renderLayoutTabs();
-  updateLayoutPanels();
-  requestAnimationFrame(rerenderCharts);
-}
 function renderLayoutTabs() {
   const nav = $('layout-tabs');
   if(!nav) return;
@@ -165,7 +145,7 @@ function setLayoutTab(tab) {
 }
 function updateLayoutPanels() {
   document.querySelectorAll('[data-layout-panel]').forEach(panel => {
-    const hidden=currentLayoutMode === 'tabs' && panel.dataset.layoutPanel !== currentLayoutTab;
+    const hidden=panel.dataset.layoutPanel !== currentLayoutTab;
     panel.classList.toggle('layout-panel-hidden', hidden);
     panel.setAttribute('aria-hidden', hidden ? 'true' : 'false');
   });
@@ -188,7 +168,7 @@ function quotaCredentialLabel(value) {
 function modelName(m) { return !m||m==='unknown'||m==='unidentified' ? t('model.unidentified') : m; }
 function statusBadgeClass(status) {
   status=String(status||'').toLowerCase();
-  if(['ok','ready','available','connected','healthy'].includes(status)) return 'ok';
+  if(['ok','ready','available','connected','healthy','success'].includes(status)) return 'ok';
   if(['warning','low','stale','unknown','unsupported','partial'].includes(status)) return 'warn';
   if(['error','exhausted','unavailable','disabled','disconnected'].includes(status)) return 'err';
   return 'neutral';
@@ -342,10 +322,15 @@ function isCredentialHealthRow(row) {
 function credentialIdentity(row) {
   return (row&&row.credential_hash)||(row&&row.auth_index_hash)||(row&&row.label_hash)||'';
 }
+function credentialDisplayName(row) {
+  return (row&&row.display_label)||(row&&row.identity_hint)||(row&&row.provider)||'-';
+}
 function credentialHealthCardHTML(row) {
   const status=(row&&row.status)||'-';
   const qClass=quotaStatusClass(status);
   const credential=credentialIdentity(row);
+  const displayName=credentialDisplayName(row);
+  const identityHint=row&&row.identity_hint&&row.identity_hint!==displayName?row.identity_hint:'';
   const detail=row&&(row.status_message||row.error_message||row.error_code||row.error_type)||'';
   const title=[row&&row.error_class,detail,row&&row.checked_at&&fmtTime(row.checked_at)].filter(Boolean).join(' / ');
   const plan=row&&row.plan?`<span>${esc(row.plan)}</span>`:'';
@@ -359,8 +344,8 @@ function credentialHealthCardHTML(row) {
   return `<div class="quota-account credential-card ${qClass}">
     <div class="quota-account-head">
       <div>
-        <div class="quota-account-title">${esc((row&&row.provider)||'-')}</div>
-        <div class="quota-account-sub"><code class="quota-credential" title="${esc(credential)}">${esc(quotaCredentialLabel(credential))}</code>${plan}</div>
+        <div class="quota-account-title" title="${esc(displayName)}">${esc(displayName)}</div>
+        <div class="quota-account-sub"><span>${esc((row&&row.provider)||'-')}</span>${identityHint?`<span title="${esc(identityHint)}">${esc(identityHint)}</span>`:''}${plan}</div>
       </div>
       <span class="badge ${statusBadgeClass(status)}" title="${esc(title)}">${esc(status)}</span>
     </div>
@@ -369,6 +354,7 @@ function credentialHealthCardHTML(row) {
       <div><span>${esc(t('credential.failed'))}</span><strong class="mono">${esc(fmtFull(row&&row.failed_count||0))}</strong></div>
     </div>
     <div class="credential-lines">${recent}${retry}${authHash}${labelHash}</div>
+    <div class="credential-line credential-primary-hash"><span>${esc(t('credential.credential_hash'))}</span><code title="${esc(credential)}">${esc(quotaCredentialLabel(credential))}</code></div>
     <div class="quota-window-foot">${esc(t('credential.checked_at',{time:fmtShort(row&&row.checked_at)}))}</div>
     ${err}
   </div>`;
@@ -1240,14 +1226,76 @@ async function loadObservability() {
   setText('capture-state-detail',t('obs.capture_counts',{skipped:fmtFull(capture.skipped_1h||0),failed:fmtFull(capture.failed_1h||0)}));
 }
 
+async function loadQuotaDiagnostics() {
+  const data=await fetchJSON('quota/diagnostics?limit=50');
+  latestQuotaDiagnostics=data;
+  renderQuotaDiagnostics(data);
+}
+
+function renderQuotaDiagnostics(data) {
+  const summary=$('quota-diagnostics-summary');
+  const cards=$('quota-diagnostics-cards');
+  const table=$('quota-diagnostics-table');
+  if(!summary || !cards || !table) return;
+  const cred=data&&data.credentials||{};
+  const quota=data&&data.quota||{};
+  const events=Array.isArray(data&&data.events)?data.events:[];
+  const apiState=data&&data.quota_enabled?(data.api_call_available?t('quota_diag.api_reachable'):t('quota_diag.api_unreachable')):t('obs.disabled');
+  summary.textContent=[
+    apiState,
+    t('quota_diag.credentials_summary',{count:fmtFull(cred.total||0),warning:fmtFull(cred.warning||0),errors:fmtFull((cred.errors||0)+(cred.unavailable||0)+(cred.disabled||0))}),
+    t('quota_diag.events_summary',{count:fmtFull(events.length)})
+  ].join(' / ');
+  cards.innerHTML=[
+    quotaDiagnosticCard(t('quota_diag.api_call'),apiState,data&&data.checked_at?fmtShort(data.checked_at):'-',data&&data.api_call_available?'ok':'warn'),
+    quotaDiagnosticCard(t('quota_diag.credentials'),fmtFull(cred.total||0),t('quota_diag.credentials_detail',{ready:fmtFull(cred.ready||0),warning:fmtFull(cred.warning||0),errors:fmtFull((cred.errors||0)+(cred.unavailable||0)+(cred.disabled||0))}),Number((cred.errors||0)+(cred.unavailable||0)+(cred.disabled||0))>0?'warn':'ok'),
+    quotaDiagnosticCard(t('quota_diag.quota_rows'),fmtFull(quota.total||0),t('quota_diag.quota_detail',{supported:fmtFull(quota.supported||0),unsupported:fmtFull(quota.unsupported||0),stale:fmtFull(quota.stale||0)}),Number((quota.unsupported||0)+(quota.stale||0)+(quota.errors||0))>0?'warn':'ok'),
+    quotaDiagnosticCard(t('quota_diag.last_event'),events[0]?quotaDiagnosticEventLabel(events[0]):'-',events[0]?fmtShort(events[0].checked_at):'-',events[0]&&events[0].status==='error'?'err':'ok')
+  ].join('');
+  if(!events.length){
+    table.innerHTML=`<tr><td colspan="9" class="empty-state">${esc(t('quota_diag.no_events'))}</td></tr>`;
+    return;
+  }
+  table.innerHTML=events.map(row=>{
+    const err=row.error_class||row.adapter_status||row.probe_error_class||'';
+    return `<tr>
+      <td class="mono">${esc(fmtShort(row.checked_at))}</td>
+      <td>${esc(row.provider||'-')}</td>
+      <td>${esc(row.phase||'-')}</td>
+      <td><span class="badge ${statusBadgeClass(row.status)}">${esc(row.status||'-')}</span></td>
+      <td>${esc(row.adapter_status||'-')}</td>
+      <td class="numeric mono">${esc(row.probe_http_status?String(row.probe_http_status):'-')}</td>
+      <td>${esc(row.probe_error_class||'-')}</td>
+      <td>${esc(err||'-')}</td>
+      <td class="numeric mono">${esc(row.duration_ms?String(row.duration_ms):'-')}</td>
+    </tr>`;
+  }).join('');
+}
+
+function quotaDiagnosticCard(label, value, detail, cls) {
+  return `<div class="quota-diag-card ${cls||'neutral'}">
+    <div class="rh-label">${esc(label)}</div>
+    <div class="rh-value mono">${esc(value)}</div>
+    <div class="rh-detail">${esc(detail||'-')}</div>
+  </div>`;
+}
+
+function quotaDiagnosticEventLabel(row) {
+  if(!row) return '-';
+  return [row.provider,row.phase,row.status].filter(Boolean).join(' / ')||'-';
+}
+
 async function refreshQuotaNow() {
   const btn=$('quota-refresh');
+  const diagBtn=$('quota-refresh-diagnostics');
   if(btn) btn.disabled=true;
+  if(diagBtn) diagBtn.disabled=true;
   try {
     await fetchJSON('quota/refresh',{method:'POST'});
-    await Promise.allSettled([loadQuota(),loadObservability()]);
+    await Promise.allSettled([loadQuota(),loadObservability(),loadQuotaDiagnostics()]);
   } finally {
     if(btn) btn.disabled=false;
+    if(diagBtn) diagBtn.disabled=false;
   }
 }
 
@@ -1271,7 +1319,7 @@ async function refresh() {
   setRefreshing(true);
   try {
     const tasks=[]; if(!metadata) tasks.push(['metadata',loadMetadata]);
-    tasks.push(['overview',loadOverview],['issues',loadIssues],['activity',loadActivity],['models',loadModels],['images',loadImages],['keys',loadKeys],['timeseries',loadTimeseries],['errors',loadErrors],['health',loadHealth],['quota',loadQuota],['observability',loadObservability]);
+    tasks.push(['overview',loadOverview],['issues',loadIssues],['activity',loadActivity],['models',loadModels],['images',loadImages],['keys',loadKeys],['timeseries',loadTimeseries],['errors',loadErrors],['health',loadHealth],['quota',loadQuota],['quotaDiagnostics',loadQuotaDiagnostics],['observability',loadObservability]);
     if(requestsExpanded) tasks.push(['requests',loadRequests]);
     const settled=await Promise.allSettled(tasks.map(([,fn])=>fn()));
     const failures=settled.map((res,i)=>({res,name:tasks[i][0]})).filter(x=>x.res.status==='rejected').map(x=>({name:x.name,error:x.res.reason}));
@@ -1291,6 +1339,7 @@ function markFailed(failures) {
   if(fm.has('issues')){$('issues-state').classList.remove('hidden');$('issues-state').innerHTML=`<div class="issues-empty error-text">${esc(fm.get('issues').message)}</div>`;const io=$('issues-overview');if(io)io.innerHTML='';$('issues-list').innerHTML=`<div class="issue-class-placeholder">${esc(t('issues.select_severity_hint'))}</div>`;}
   if(fm.has('timeseries')){const el=$('usage-trend-chart');if(el)el.innerHTML=`<div class="empty-state error-text">${esc(fm.get('timeseries').message)}</div>`;}
   if(fm.has('quota'))renderQuotaSummary([],fm.get('quota').message);
+  if(fm.has('quotaDiagnostics'))setText('quota-diagnostics-summary',fm.get('quotaDiagnostics').message);
   if(fm.has('observability'))setText('observability-summary',fm.get('observability').message);
 }
 
@@ -1356,13 +1405,13 @@ function rerenderCharts(){renderUsagePanel();}
 document.addEventListener('DOMContentLoaded', async ()=>{
   applyTheme(currentTheme);
   applyI18N(); applyMeta();
-  applyLayoutMode(currentLayoutMode);
+  updateLayoutPanels();
   setStatus('live',t('status.ready'),t('status.waiting'));
   setLastRefresh(null);
   $('language-select').addEventListener('change',e=>setLang(e.target.value));
-  const layoutSelect=$('layout-select'); if(layoutSelect) layoutSelect.addEventListener('change',e=>applyLayoutMode(e.target.value));
   $('refresh-btn').addEventListener('click',refresh);
   const qr=$('quota-refresh'); if(qr)qr.addEventListener('click',refreshQuotaNow);
+  const qrd=$('quota-refresh-diagnostics'); if(qrd)qrd.addEventListener('click',refreshQuotaNow);
   $('range-select').addEventListener('change',()=>{resetIssueSelection();refresh();});
   $('filter-status').addEventListener('change',()=>{currentIssueClassFilter='';reloadReqFilter();});
   $('filter-model').addEventListener('change',()=>{currentIssueClassFilter='';reloadReqFilter();});

@@ -413,12 +413,54 @@ func classLabel(class string) string {
 		return "Rate limited"
 	case "auth_failed":
 		return "Auth failed"
+	case "auth_invalid_key":
+		return "Invalid API key"
+	case "auth_expired":
+		return "Auth expired"
+	case "billing_required":
+		return "Billing required"
+	case "permission_denied":
+		return "Permission denied"
 	case "invalid_request":
 		return "Invalid request"
+	case "invalid_model":
+		return "Invalid model"
 	case "context_length":
 		return "Context length exceeded"
 	case "upstream_5xx":
 		return "Upstream 5xx error"
+	case "upstream_internal_error":
+		return "Upstream internal error"
+	case "upstream_not_implemented":
+		return "Upstream not implemented"
+	case "upstream_bad_gateway":
+		return "Upstream bad gateway"
+	case "upstream_unavailable":
+		return "Upstream unavailable"
+	case "upstream_timeout":
+		return "Upstream timeout"
+	case "upstream_connection_refused":
+		return "Upstream connection refused"
+	case "upstream_connection_reset":
+		return "Upstream connection reset"
+	case "upstream_dns_error":
+		return "Upstream DNS error"
+	case "upstream_network_unreachable":
+		return "Upstream network unreachable"
+	case "upstream_tls_error":
+		return "Upstream TLS error"
+	case "upstream_overloaded":
+		return "Upstream overloaded"
+	case "not_found":
+		return "Not found"
+	case "request_timeout":
+		return "Request timeout"
+	case "conflict":
+		return "Conflict"
+	case "request_too_large":
+		return "Request too large"
+	case "validation_error":
+		return "Validation error"
 	case "proxy_upstream_error":
 		return "Proxy upstream error"
 	case "proxy_connection_refused":
@@ -488,11 +530,16 @@ func classLabel(class string) string {
 
 func classSeverity(class string) string {
 	switch class {
-	case "auth_failed", "quota_exhausted", "proxy_upstream_error", "proxy_connection_refused", "proxy_connection_reset",
+	case "auth_failed", "auth_invalid_key", "auth_expired", "billing_required", "permission_denied", "quota_exhausted",
+		"proxy_upstream_error", "proxy_connection_refused", "proxy_connection_reset",
 		"proxy_timeout", "proxy_dns_error", "proxy_network_unreachable", "proxy_tls_error", "db_write_error",
 		"response_error_event", "credential_error", "credential_disabled", "usage_conflict":
 		return "error"
-	case "rate_limited", "upstream_5xx", "context_length", "capture_parse_error", "dropped_event",
+	case "rate_limited", "upstream_5xx", "upstream_internal_error", "upstream_not_implemented", "upstream_bad_gateway",
+		"upstream_unavailable", "upstream_timeout", "upstream_connection_refused", "upstream_connection_reset",
+		"upstream_dns_error", "upstream_network_unreachable", "upstream_tls_error", "upstream_overloaded",
+		"context_length", "invalid_request", "invalid_model", "not_found", "conflict", "validation_error",
+		"request_timeout", "request_too_large", "capture_parse_error", "dropped_event",
 		"response_completed_without_usage", "stream_ended_without_completed", "response_incomplete",
 		"proxy_connection_closed", "credential_unavailable", "credential_stale", "quota_low", "quota_refresh_failed", "quota_stale", "quota_unsupported", "quota_unknown",
 		"credential_quota_limited", "credential_history_warning", "side_channel_expired", "side_channel_invalid_payload", "side_channel_unmatched":

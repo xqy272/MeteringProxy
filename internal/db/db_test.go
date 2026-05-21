@@ -549,6 +549,8 @@ func TestCredentialHealthPersistsRuntimeDiagnostics(t *testing.T) {
 		CredentialHash:     "cred-runtime",
 		AuthIndexHash:      "auth-index",
 		LabelHash:          "label",
+		DisplayLabel:       "Codex Plus",
+		IdentityHint:       "codex@example.com",
 		Status:             "warning",
 		StatusMessage:      "quota exhausted",
 		Plan:               "plus",
@@ -579,6 +581,9 @@ func TestCredentialHealthPersistsRuntimeDiagnostics(t *testing.T) {
 	if row.Plan != "plus" || row.StatusMessage != "quota exhausted" || row.RecentSuccessCount != 3 || row.RecentFailedCount != 1 {
 		t.Fatalf("runtime fields = %+v", row)
 	}
+	if row.DisplayLabel != "Codex Plus" || row.IdentityHint != "codex@example.com" {
+		t.Fatalf("identity fields = %+v", row)
+	}
 	if row.NextRetryAfterUnix != 1779386400 || row.ErrorType != "server_error" || row.ErrorCode != "bad_gateway" || row.ErrorMessage != "upstream failed" {
 		t.Fatalf("diagnostic fields = %+v", row)
 	}
@@ -588,14 +593,19 @@ func TestIssuesIncludeQuotaRefreshFailures(t *testing.T) {
 	d := newTestDB(t)
 	now := time.Now().UTC().Truncate(time.Second)
 	if err := d.InsertQuotaRefreshEvent(&QuotaRefreshEventRow{
-		CheckedAt:     now.Format(time.RFC3339),
-		CheckedAtUnix: now.Unix(),
-		Provider:      "kimi",
-		Phase:         "probe",
-		Status:        "error",
-		AdapterStatus: "api_call_unavailable",
-		ErrorClass:    "api_call_unavailable",
-		DurationMs:    12,
+		CheckedAt:        now.Format(time.RFC3339),
+		CheckedAtUnix:    now.Unix(),
+		Provider:         "kimi",
+		Phase:            "probe",
+		Status:           "error",
+		AdapterStatus:    "api_call_unavailable",
+		ErrorClass:       "api_call_unavailable",
+		DurationMs:       12,
+		ProbeHTTPStatus:  400,
+		ProbeEndpoint:    "/api-call",
+		ProbeErrorClass:  "api_call_bad_request",
+		APICallReachable: 1,
+		DetailsJSON:      `{"probe_status":"api_call_bad_request"}`,
 	}); err != nil {
 		t.Fatalf("InsertQuotaRefreshEvent: %v", err)
 	}
@@ -612,7 +622,8 @@ func TestIssuesIncludeQuotaRefreshFailures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RecentQuotaRefreshEvents: %v", err)
 	}
-	if len(events) != 1 || events[0].Provider != "kimi" || events[0].AdapterStatus != "api_call_unavailable" {
+	if len(events) != 1 || events[0].Provider != "kimi" || events[0].AdapterStatus != "api_call_unavailable" ||
+		events[0].ProbeHTTPStatus != 400 || events[0].ProbeErrorClass != "api_call_bad_request" || events[0].APICallReachable != 1 {
 		t.Fatalf("events = %+v, want latest quota refresh diagnostic", events)
 	}
 }

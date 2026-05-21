@@ -168,6 +168,8 @@ func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleHealth(w, r)
 	case strings.HasSuffix(path, "/api/metadata"):
 		s.handleMetadata(w, r)
+	case strings.HasSuffix(path, "/api/quota/diagnostics"):
+		s.handleQuotaDiagnostics(w, r)
 	case strings.HasSuffix(path, "/api/quota"):
 		s.handleQuota(w, r)
 	case strings.HasSuffix(path, "/api/quota/refresh"):
@@ -213,6 +215,13 @@ func parseRange(r *http.Request) (time.Time, string) {
 func writeJSON(w http.ResponseWriter, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
+}
+
+func formatRFC3339OrEmpty(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.Format(time.RFC3339)
 }
 
 func setNoStore(w http.ResponseWriter) {
@@ -813,7 +822,7 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
 			"full_quota_available": apiCallAvail && supportedRows > 0,
 			"module_status":        moduleStatus,
 			"stale":                unhealthyRows > 0,
-			"checked_at":           checkedAt.Format(time.RFC3339),
+			"checked_at":           formatRFC3339OrEmpty(checkedAt),
 			"providers":            providers,
 			"items":                quotaRows,
 			"diagnostics":          diagnostics,
@@ -867,7 +876,7 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
 			"phase":                "credential_health",
 			"full_quota_available": false,
 			"module_status":        moduleStatus,
-			"checked_at":           credTime.Format(time.RFC3339),
+			"checked_at":           formatRFC3339OrEmpty(credTime),
 			"providers":            providers,
 			"items":                credRows,
 			"diagnostics":          diagnostics,
@@ -908,6 +917,40 @@ func (s *Server) handleQuotaRefresh(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleQuotaDiagnostics(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	credRows := []db.CredentialHealthRow{}
+	credTime := time.Time{}
+	if s.credPoller != nil {
+		credRows, credTime = s.credPoller.Snapshot()
+	}
+	quotaRows := []db.QuotaCurrentRow{}
+	quotaTime := time.Time{}
+	apiCallAvailable := false
+	if s.quotaPoller != nil {
+		quotaRows, quotaTime, apiCallAvailable = s.quotaPoller.Snapshot()
+	}
+	events := s.recentQuotaDiagnostics(limit)
+	checkedAt := quotaTime
+	if checkedAt.IsZero() {
+		checkedAt = credTime
+	}
+	writeJSON(w, map[string]any{
+		"status":                    "ok",
+		"enabled":                   s.credPoller != nil || s.quotaPoller != nil,
+		"credential_health_enabled": s.credPoller != nil,
+		"quota_enabled":             s.quotaPoller != nil,
+		"api_call_available":        apiCallAvailable,
+		"checked_at":                formatRFC3339OrEmpty(checkedAt),
+		"credentials":               credentialDiagnosticsSummary(credRows),
+		"quota":                     quotaDiagnosticsSummary(quotaRows),
+		"events":                    events,
+	})
+}
+
 func (s *Server) handleObservability(w http.ResponseWriter, r *http.Request) {
 	credRows := []db.CredentialHealthRow{}
 	credTime := time.Time{}
@@ -943,8 +986,8 @@ func (s *Server) handleObservability(w http.ResponseWriter, r *http.Request) {
 			"enabled":          true,
 			"connected":        connected,
 			"merge_mode":       s.correlationMode,
-			"last_event_at":    lastAt.Format(time.RFC3339),
-			"last_received_at": lastAt.Format(time.RFC3339),
+			"last_event_at":    formatRFC3339OrEmpty(lastAt),
+			"last_received_at": formatRFC3339OrEmpty(lastAt),
 			"last_error":       lastErr,
 			"matched_1h":       counts["matched"],
 			"unmatched_1h":     counts["unmatched"],
@@ -990,7 +1033,7 @@ func (s *Server) handleObservability(w http.ResponseWriter, r *http.Request) {
 		}
 		resp["credential_health"] = map[string]any{
 			"enabled":           true,
-			"last_checked_at":   credTime.Format(time.RFC3339),
+			"last_checked_at":   formatRFC3339OrEmpty(credTime),
 			"warning_count":     warningCount,
 			"unavailable_count": unavailableCount,
 			"error_count":       errorCount,
@@ -1052,7 +1095,7 @@ func (s *Server) handleObservability(w http.ResponseWriter, r *http.Request) {
 			"full_quota_available": apiCallAvail && supportedRows > 0,
 			"credential_fallback":  credentialFallback,
 			"module_status":        moduleStatus,
-			"last_checked_at":      checkedAt.Format(time.RFC3339),
+			"last_checked_at":      formatRFC3339OrEmpty(checkedAt),
 			"stale_count":          staleCount,
 			"error_count":          errorCount,
 			"latest_event":         latestQuotaDiagnostic(quotaDiagnostics),
@@ -1083,14 +1126,122 @@ func latestQuotaDiagnostic(rows []db.QuotaRefreshEventRow) map[string]any {
 	}
 	row := rows[0]
 	return map[string]any{
-		"checked_at":     row.CheckedAt,
-		"provider":       row.Provider,
-		"phase":          row.Phase,
-		"status":         row.Status,
-		"adapter_status": row.AdapterStatus,
-		"error_class":    row.ErrorClass,
-		"duration_ms":    row.DurationMs,
+		"checked_at":         row.CheckedAt,
+		"provider":           row.Provider,
+		"phase":              row.Phase,
+		"status":             row.Status,
+		"adapter_status":     row.AdapterStatus,
+		"error_class":        row.ErrorClass,
+		"duration_ms":        row.DurationMs,
+		"probe_http_status":  row.ProbeHTTPStatus,
+		"probe_error_class":  row.ProbeErrorClass,
+		"api_call_reachable": row.APICallReachable > 0,
 	}
+}
+
+func credentialDiagnosticsSummary(rows []db.CredentialHealthRow) map[string]any {
+	providers := map[string]map[string]any{}
+	total := len(rows)
+	ready, warning, unavailable, disabled, errors := 0, 0, 0, 0, 0
+	for _, row := range rows {
+		p := providers[row.Provider]
+		if p == nil {
+			p = map[string]any{
+				"provider":          row.Provider,
+				"credential_count":  0,
+				"ready_count":       0,
+				"warning_count":     0,
+				"unavailable_count": 0,
+				"disabled_count":    0,
+				"error_count":       0,
+			}
+			providers[row.Provider] = p
+		}
+		p["credential_count"] = p["credential_count"].(int) + 1
+		switch row.Status {
+		case "ready":
+			ready++
+			p["ready_count"] = p["ready_count"].(int) + 1
+		case "warning":
+			warning++
+			p["warning_count"] = p["warning_count"].(int) + 1
+		case "unavailable":
+			unavailable++
+			p["unavailable_count"] = p["unavailable_count"].(int) + 1
+		case "disabled":
+			disabled++
+			p["disabled_count"] = p["disabled_count"].(int) + 1
+		case "error":
+			errors++
+			p["error_count"] = p["error_count"].(int) + 1
+		}
+	}
+	return map[string]any{
+		"total":              total,
+		"ready":              ready,
+		"warning":            warning,
+		"unavailable":        unavailable,
+		"disabled":           disabled,
+		"errors":             errors,
+		"provider_summaries": sortedSummaryMaps(providers),
+	}
+}
+
+func quotaDiagnosticsSummary(rows []db.QuotaCurrentRow) map[string]any {
+	providers := map[string]map[string]any{}
+	supported, unsupported, stale, errors := 0, 0, 0, 0
+	for _, row := range rows {
+		p := providers[row.Provider]
+		if p == nil {
+			p = map[string]any{
+				"provider":         row.Provider,
+				"quota_rows":       0,
+				"supported_rows":   0,
+				"unsupported_rows": 0,
+				"stale_rows":       0,
+				"error_rows":       0,
+			}
+			providers[row.Provider] = p
+		}
+		p["quota_rows"] = p["quota_rows"].(int) + 1
+		if row.QuotaSupported > 0 {
+			supported++
+			p["supported_rows"] = p["supported_rows"].(int) + 1
+		}
+		if row.Status == "unsupported" {
+			unsupported++
+			p["unsupported_rows"] = p["unsupported_rows"].(int) + 1
+		}
+		if row.Status == "stale" {
+			stale++
+			p["stale_rows"] = p["stale_rows"].(int) + 1
+		}
+		if row.Status == "error" {
+			errors++
+			p["error_rows"] = p["error_rows"].(int) + 1
+		}
+	}
+	return map[string]any{
+		"total":              len(rows),
+		"supported":          supported,
+		"unsupported":        unsupported,
+		"stale":              stale,
+		"errors":             errors,
+		"provider_summaries": sortedSummaryMaps(providers),
+	}
+}
+
+func sortedSummaryMaps(values map[string]map[string]any) []map[string]any {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]map[string]any, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, values[key])
+	}
+	return out
 }
 
 func latestQuotaDiagnosticError(rows []db.QuotaRefreshEventRow) string {

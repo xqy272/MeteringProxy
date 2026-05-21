@@ -77,7 +77,7 @@ func TestPollNormalizesCLIProxyAPIv704AuthFiles(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"files":[{"id":"codex-1","auth_index":"12","type":"codex","provider":"codex","label":"Codex Primary","status":"active","disabled":false,"unavailable":false,"success":9,"failed":1}]}`))
+		w.Write([]byte(`{"files":[{"id":"codex-1","auth_index":"12","type":"codex","provider":"codex","label":"Codex Primary","name":"codex@example.com","status":"active","disabled":false,"unavailable":false,"success":9,"failed":1}]}`))
 	}))
 	defer server.Close()
 
@@ -109,6 +109,9 @@ func TestPollNormalizesCLIProxyAPIv704AuthFiles(t *testing.T) {
 	}
 	if row.SuccessCount != 9 || row.FailedCount != 1 {
 		t.Fatalf("counts = %d/%d", row.SuccessCount, row.FailedCount)
+	}
+	if row.DisplayLabel != "Codex Primary" || row.IdentityHint != "codex@example.com" {
+		t.Fatalf("identity = %q/%q, want label plus email hint", row.DisplayLabel, row.IdentityHint)
 	}
 }
 

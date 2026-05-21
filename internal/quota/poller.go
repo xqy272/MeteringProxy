@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,17 +30,20 @@ type quotaParseResult struct {
 type genericAdapter struct{}
 
 type Poller struct {
-	client       *cliproxy.Client
-	database     store.QuotaStore
-	hasher       *hash.Hasher
-	cfg          config.QuotaConfig
-	mu           sync.RWMutex
-	cache        []db.QuotaCurrentRow
-	lastAt       time.Time
-	apiCallAvail bool
-	stopCh       chan struct{}
-	doneCh       chan struct{}
-	refreshCh    chan struct{}
+	client        *cliproxy.Client
+	database      store.QuotaStore
+	hasher        *hash.Hasher
+	cfg           config.QuotaConfig
+	mu            sync.RWMutex
+	cache         []db.QuotaCurrentRow
+	lastAt        time.Time
+	apiCallAvail  bool
+	probeStatus   int
+	probeClass    string
+	probeEndpoint string
+	stopCh        chan struct{}
+	doneCh        chan struct{}
+	refreshCh     chan struct{}
 }
 
 func NewPoller(client *cliproxy.Client, database store.QuotaStore, hasher *hash.Hasher, cfg config.QuotaConfig) *Poller {
@@ -98,23 +102,28 @@ func (p *Poller) cleanup() {
 }
 
 func (p *Poller) probeAPICall() {
+	const endpoint = "/api-call"
 	if p.client == nil {
 		p.mu.Lock()
 		p.apiCallAvail = false
+		p.probeStatus = 0
+		p.probeClass = "api_call_disabled"
+		p.probeEndpoint = endpoint
 		p.mu.Unlock()
 		return
 	}
 	body := bytes.NewReader([]byte(`{"method":"GET","url":"http://127.0.0.1:0/__metering_probe__"}`))
-	respBody, statusCode, err := p.client.DoAPICall("POST", "/api-call", body)
+	respBody, statusCode, err := p.client.DoAPICall("POST", endpoint, body)
+	class := classifyAPICallProbe(statusCode, respBody, err)
+	available := apiCallProbeReachable(statusCode, respBody, err)
 	if err != nil {
-		p.mu.Lock()
-		p.apiCallAvail = false
-		p.mu.Unlock()
-		return
+		log.Printf("quota api-call probe error: %v", err)
 	}
 	p.mu.Lock()
-	p.apiCallAvail = statusCode >= 200 && statusCode < 300 ||
-		statusCode == http.StatusBadGateway && bytes.Contains(respBody, []byte("request failed"))
+	p.apiCallAvail = available
+	p.probeStatus = statusCode
+	p.probeClass = class
+	p.probeEndpoint = endpoint
 	p.mu.Unlock()
 }
 
@@ -124,6 +133,99 @@ func (p *Poller) APICallAvailable() bool {
 	return p.apiCallAvail
 }
 
+func (p *Poller) probeSnapshot() (bool, int, string, string) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.apiCallAvail, p.probeStatus, p.probeClass, p.probeEndpoint
+}
+
+func apiCallProbeReachable(statusCode int, body []byte, err error) bool {
+	if err != nil {
+		return false
+	}
+	if statusCode >= 200 && statusCode < 300 {
+		return true
+	}
+	// CPA commonly returns 400 for a syntactically valid endpoint with an
+	// unsupported probe body. That proves the management route exists, but not
+	// that full quota snapshots are available.
+	if statusCode == http.StatusBadRequest {
+		return true
+	}
+	if statusCode == http.StatusBadGateway && bytes.Contains(bytes.ToLower(body), []byte("request failed")) {
+		return true
+	}
+	return false
+}
+
+func classifyAPICallProbe(statusCode int, body []byte, err error) string {
+	if err != nil {
+		return "api_call_transport_error"
+	}
+	switch statusCode {
+	case 0:
+		return "api_call_no_response"
+	case http.StatusOK, http.StatusCreated, http.StatusAccepted, http.StatusNoContent:
+		return "api_call_ok"
+	case http.StatusBadRequest:
+		return "api_call_bad_request"
+	case http.StatusUnauthorized:
+		return "api_call_unauthorized"
+	case http.StatusForbidden:
+		return "api_call_forbidden"
+	case http.StatusNotFound, http.StatusMethodNotAllowed:
+		return "api_call_not_found"
+	case http.StatusBadGateway:
+		if bytes.Contains(bytes.ToLower(body), []byte("request failed")) {
+			return "api_call_probe_reachable"
+		}
+		return "api_call_bad_gateway"
+	case http.StatusServiceUnavailable:
+		return "api_call_unavailable"
+	case http.StatusGatewayTimeout:
+		return "api_call_timeout"
+	}
+	if statusCode >= 500 {
+		return "api_call_server_error"
+	}
+	if statusCode >= 400 {
+		return "api_call_client_error"
+	}
+	return "api_call_unexpected_status"
+}
+
+func classifyProviderAPICallStatus(statusCode int, body []byte) string {
+	text := strings.ToLower(string(bytes.TrimSpace(body)))
+	switch statusCode {
+	case http.StatusBadRequest:
+		if strings.Contains(text, "missing method") || strings.Contains(text, "missing url") {
+			return "api_call_contract_error"
+		}
+		return "provider_bad_request"
+	case http.StatusUnauthorized:
+		return "provider_unauthorized"
+	case http.StatusForbidden:
+		return "provider_forbidden"
+	case http.StatusNotFound:
+		return "provider_not_found"
+	case http.StatusTooManyRequests:
+		return "provider_rate_limited"
+	case http.StatusBadGateway:
+		return "provider_bad_gateway"
+	case http.StatusServiceUnavailable:
+		return "provider_unavailable"
+	case http.StatusGatewayTimeout:
+		return "provider_timeout"
+	}
+	if statusCode >= 500 {
+		return "provider_server_error"
+	}
+	if statusCode >= 400 {
+		return "provider_client_error"
+	}
+	return "provider_error"
+}
+
 func (p *Poller) poll() {
 	if !p.cfg.Enabled {
 		return
@@ -131,10 +233,14 @@ func (p *Poller) poll() {
 	now := time.Now().UTC()
 	nowStr := now.Format(time.RFC3339)
 	nowUnix := now.Unix()
-	if !p.APICallAvailable() {
+	apiCallAvailable, _, probeClass, _ := p.probeSnapshot()
+	if !apiCallAvailable {
+		if probeClass == "" {
+			probeClass = "api_call_unavailable"
+		}
 		for _, provider := range p.cfg.Providers {
-			p.recordRefreshEvent(provider, "", "probe", "error", "api_call_unavailable", 0, nowStr, nowUnix)
-			p.markProviderStale(provider, "api_call_unavailable", nowStr, nowUnix)
+			p.recordRefreshEvent(provider, "", "probe", "error", probeClass, 0, nowStr, nowUnix)
+			p.markProviderStale(provider, probeClass, nowStr, nowUnix)
 		}
 		p.refreshDBState()
 		return
@@ -184,13 +290,14 @@ func (p *Poller) pollProvider(provider, nowStr string, nowUnix int64) {
 	durationMs := time.Since(startTime).Milliseconds()
 	if err != nil {
 		log.Printf("quota poll: error for %s: %v", provider, err)
-		p.recordRefreshEvent(provider, "", "api_call", "error", "api_call_unavailable", durationMs, nowStr, nowUnix)
-		p.markProviderStale(provider, "api_call_unavailable", nowStr, nowUnix)
+		p.recordRefreshEvent(provider, "", "api_call", "error", "api_call_transport_error", durationMs, nowStr, nowUnix)
+		p.markProviderStale(provider, "api_call_transport_error", nowStr, nowUnix)
 		return
 	}
 	if statusCode != 200 {
-		p.recordRefreshEvent(provider, "", "api_call", "error", "provider_error", durationMs, nowStr, nowUnix)
-		p.markProviderStale(provider, "provider_error", nowStr, nowUnix)
+		class := classifyProviderAPICallStatus(statusCode, respBody)
+		p.recordRefreshEvent(provider, "", "api_call", "error", class, durationMs, nowStr, nowUnix)
+		p.markProviderStale(provider, class, nowStr, nowUnix)
 		return
 	}
 	result, err := adapter.ParseResponse(p, provider, respBody, nowStr, nowUnix)
@@ -377,17 +484,40 @@ func (p *Poller) recordRefreshEvent(provider, credHash, phase, status, adapterSt
 		if errorClass == "" {
 			errorClass = "quota_refresh_failed"
 		}
+		if errorClass == "unsupported" {
+			errorClass = "quota_unsupported"
+		}
 	}
+	apiCallReachable, probeHTTPStatus, probeClass, probeEndpoint := p.probeSnapshot()
+	providerSupported := int64(0)
+	if status == "success" || adapterStatus == "available" {
+		providerSupported = 1
+	}
+	reachable := int64(0)
+	if apiCallReachable {
+		reachable = 1
+	}
+	details, _ := json.Marshal(map[string]any{
+		"api_call_reachable": apiCallReachable,
+		"probe_status":       probeClass,
+		"event":              adapterStatus,
+	})
 	row := &db.QuotaRefreshEventRow{
-		CheckedAt:      nowStr,
-		CheckedAtUnix:  nowUnix,
-		Provider:       provider,
-		CredentialHash: credHash,
-		Phase:          phase,
-		Status:         status,
-		AdapterStatus:  adapterStatus,
-		DurationMs:     durationMs,
-		ErrorClass:     errorClass,
+		CheckedAt:         nowStr,
+		CheckedAtUnix:     nowUnix,
+		Provider:          provider,
+		CredentialHash:    credHash,
+		Phase:             phase,
+		Status:            status,
+		AdapterStatus:     adapterStatus,
+		DurationMs:        durationMs,
+		ErrorClass:        errorClass,
+		ProbeHTTPStatus:   probeHTTPStatus,
+		ProbeEndpoint:     probeEndpoint,
+		ProbeErrorClass:   probeClass,
+		APICallReachable:  reachable,
+		ProviderSupported: providerSupported,
+		DetailsJSON:       string(details),
 	}
 	if err := p.database.InsertQuotaRefreshEvent(row); err != nil {
 		log.Printf("quota refresh event insert error: %v", err)

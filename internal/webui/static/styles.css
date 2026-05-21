@@ -336,9 +336,6 @@ img { display: block; }
   backdrop-filter: blur(16px);
   overflow-x: auto;
 }
-[data-layout="classic"] .layout-tabs {
-  display: none;
-}
 .layout-tab {
   flex: 0 0 auto;
   height: 34px;
@@ -367,6 +364,30 @@ img { display: block; }
 .layout-panel-hidden {
   display: none !important;
 }
+
+.quota-diag-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.quota-diag-card {
+  padding: 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface-inset) 58%, var(--surface));
+  box-shadow: var(--shadow-xs);
+}
+.quota-diag-card.ok { border-color: color-mix(in srgb, var(--green) 20%, var(--border-subtle)); }
+.quota-diag-card.warn { border-color: color-mix(in srgb, var(--amber) 28%, var(--border-subtle)); }
+.quota-diag-card.err { border-color: color-mix(in srgb, var(--red) 30%, var(--border-subtle)); }
+.quota-diag-card .rh-value {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.quota-diag-table table { min-width: 980px; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes pulse {
@@ -1379,6 +1400,7 @@ code {
   .grid-2 { grid-template-columns: 1fr; }
   .request-summary-grid { grid-template-columns: 1fr; }
   .rh-grid { grid-template-columns: repeat(4, 1fr); }
+  .quota-diag-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .usage-content-grid { grid-template-columns: 1fr; }
   .distribution-section {
     margin-top: 8px;
@@ -1413,6 +1435,7 @@ code {
 @media (max-width: 480px) {
   .metrics-grid { grid-template-columns: 1fr; }
   .rh-grid, .diag-grid { grid-template-columns: 1fr; }
+  .quota-diag-grid { grid-template-columns: 1fr; }
   #images .rh-grid { grid-template-columns: 1fr; }
   .issue-summary-strip { grid-template-columns: 1fr 1fr 1fr; }
   .issue-filter-grid { grid-template-columns: 1fr; }

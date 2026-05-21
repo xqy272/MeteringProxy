@@ -94,6 +94,9 @@ type AuthFileEntry struct {
 	AuthType             string                    `json:"auth_type"`
 	AuthIndex            string                    `json:"auth_index"`
 	Label                string                    `json:"label"`
+	Name                 string                    `json:"name"`
+	DisplayName          string                    `json:"display_name"`
+	Email                string                    `json:"email"`
 	Status               string                    `json:"status"`
 	StatusMessage        string                    `json:"status_message"`
 	SuccessCount         int64                     `json:"success_count"`
@@ -140,6 +143,16 @@ func (e *AuthFileEntry) UnmarshalJSON(data []byte) error {
 	e.AuthType = firstString(raw, "auth_type", "type")
 	e.AuthIndex = rawString(raw, "auth_index")
 	e.Label = rawString(raw, "label")
+	e.Name = firstString(raw, "name", "username")
+	e.DisplayName = firstString(raw, "display_name", "displayName")
+	e.Email = firstString(raw, "email", "account_email", "user_email")
+	if e.Email == "" {
+		e.Email = firstNonEmpty(
+			rawNestedString(raw, "account", "email", "account_email", "user_email"),
+			rawNestedString(raw, "profile", "email", "account_email", "user_email"),
+			rawNestedString(raw, "id_token", "email", "account_email", "user_email"),
+		)
+	}
 	e.Status = rawString(raw, "status")
 	e.StatusMessage = firstString(raw, "status_message", "message", "last_error", "last_error_message")
 	e.SuccessCount = firstInt64(raw, "success_count", "success")

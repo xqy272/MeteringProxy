@@ -598,6 +598,80 @@ func TestAPIQuotaIncludesRefreshDiagnostics(t *testing.T) {
 	}
 }
 
+func TestAPIQuotaDiagnosticsEndpoint(t *testing.T) {
+	s, database := newTestServer(t, "/metering")
+	now := time.Now().UTC().Truncate(time.Second)
+	s.SetCredPoller(&fakeCredPoller{
+		lastAt: now,
+		rows: []db.CredentialHealthRow{{
+			Provider:       "codex",
+			CredentialHash: "cred",
+			DisplayLabel:   "Codex Primary",
+			IdentityHint:   "codex@example.com",
+			Status:         "warning",
+			CheckedAt:      now.Format(time.RFC3339),
+			CheckedAtUnix:  now.Unix(),
+			ErrorClass:     "credential_history_warning",
+		}},
+	})
+	s.SetQuotaPoller(&fakeQuotaPoller{lastAt: now, apiAvailable: true})
+	if err := database.InsertQuotaRefreshEvent(&db.QuotaRefreshEventRow{
+		CheckedAt:        now.Format(time.RFC3339),
+		CheckedAtUnix:    now.Unix(),
+		Provider:         "codex",
+		Phase:            "adapter",
+		Status:           "error",
+		AdapterStatus:    "unsupported",
+		ErrorClass:       "quota_unsupported",
+		ProbeHTTPStatus:  400,
+		ProbeEndpoint:    "/api-call",
+		ProbeErrorClass:  "api_call_bad_request",
+		APICallReachable: 1,
+	}); err != nil {
+		t.Fatalf("InsertQuotaRefreshEvent: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/metering/api/quota/diagnostics", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("GET /metering/api/quota/diagnostics: status %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal diagnostics: %v", err)
+	}
+	if payload["api_call_available"] != true || payload["credential_health_enabled"] != true || payload["quota_enabled"] != true {
+		t.Fatalf("diagnostics flags = %+v", payload)
+	}
+	credentials := payload["credentials"].(map[string]any)
+	if credentials["total"].(float64) != 1 || credentials["warning"].(float64) != 1 {
+		t.Fatalf("credential summary = %+v", credentials)
+	}
+	events := payload["events"].([]any)
+	if len(events) != 1 || events[0].(map[string]any)["probe_error_class"] != "api_call_bad_request" {
+		t.Fatalf("events = %+v, want probe diagnostics", events)
+	}
+}
+
+func TestAPIQuotaDiagnosticsDoesNotExposeZeroTime(t *testing.T) {
+	s, _ := newTestServer(t, "/metering")
+
+	req := httptest.NewRequest("GET", "/metering/api/quota/diagnostics", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("GET /metering/api/quota/diagnostics: status %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal diagnostics: %v", err)
+	}
+	if payload["checked_at"] != "" {
+		t.Fatalf("checked_at = %q, want empty before any poller check", payload["checked_at"])
+	}
+}
+
 func TestAPIObservabilityReportsCredentialHealthFallback(t *testing.T) {
 	s, _ := newTestServer(t, "/metering")
 	now := time.Now().UTC().Truncate(time.Second)
