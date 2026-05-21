@@ -7,7 +7,7 @@
 <meta name="api-base" content="__METERING_API_BASE__">
 <link rel="icon" href="__METERING_BASE__/mark.svg" type="image/svg+xml">
 <link rel="stylesheet" href="__METERING_BASE__/styles.css">
-<script>!function(){try{var t=localStorage.getItem('mp-theme'),l=t==='light'||(!t&&window.matchMedia&&!window.matchMedia('(prefers-color-scheme:dark)').matches);document.documentElement.setAttribute('data-theme',l?'light':'dark')}catch(e){document.documentElement.setAttribute('data-theme','dark')}}()</script>
+<script>!function(){try{var t=localStorage.getItem('mp-theme');document.documentElement.setAttribute('data-theme',t==='dark'?'dark':'light')}catch(e){document.documentElement.setAttribute('data-theme','light')}}()</script>
 </head>
 <body>
 
@@ -23,6 +23,10 @@
       <option value="zh">中文</option>
     </select>
     <select id="range-select" class="ctrl-select" aria-label="Range" data-i18n-aria="action.range"></select>
+    <select id="layout-select" class="ctrl-select" aria-label="Layout" data-i18n-aria="action.layout">
+      <option value="tabs" data-i18n="layout.mode.tabs">Tabs</option>
+      <option value="classic" data-i18n="layout.mode.classic">Classic</option>
+    </select>
     <label class="ctrl-toggle"><input type="checkbox" id="auto-refresh"> <span data-i18n="action.auto_refresh">Auto</span></label>
     <button class="ctrl-btn primary" id="refresh-btn" type="button" data-i18n="action.refresh">Refresh</button>
     <button class="theme-btn" id="theme-toggle" type="button" aria-label="Toggle theme" data-i18n-aria="action.toggle_theme" data-i18n-title="action.toggle_theme">
@@ -42,69 +46,96 @@
     <span class="status-time" id="last-refresh"></span>
   </div>
 
-  <!-- Metrics -->
-  <section id="overview" class="metrics-grid">
-    <div class="metric-card">
-      <div class="mc-label" data-i18n="metric.estimated_cost">Estimated Cost</div>
-      <div class="mc-value mono mc-green" id="total-cost">-</div>
-      <div class="mc-sub" id="cost-sub">-</div>
+  <nav class="layout-tabs" id="layout-tabs" role="tablist" aria-label="Dashboard sections" data-i18n-aria="layout.tabs_aria"></nav>
+
+  <!-- Overview -->
+  <section id="overview" class="overview-home" data-layout-panel="overview">
+    <div class="metrics-grid">
+      <div class="metric-card">
+        <div class="mc-label" data-i18n="metric.estimated_cost">Estimated Cost</div>
+        <div class="mc-value mono mc-green" id="total-cost">-</div>
+        <div class="mc-sub" id="cost-sub">-</div>
+      </div>
+      <div class="metric-card">
+        <div class="mc-label" data-i18n="metric.requests">Requests</div>
+        <div class="mc-value mono mc-accent" id="total-requests">-</div>
+        <div class="mc-sub" id="requests-sub">-</div>
+      </div>
+      <div class="metric-card">
+        <div class="mc-label" data-i18n="metric.tokens">Tokens</div>
+        <div class="mc-value mono" id="total-tokens">-</div>
+        <div class="mc-sub" id="tokens-sub">-</div>
+      </div>
+      <div class="metric-card">
+        <div class="mc-label" data-i18n="metric.p95_latency">P95 Latency</div>
+        <div class="mc-value mono mc-cyan" id="p95-latency">-</div>
+        <div class="mc-sub" id="latency-sub">-</div>
+      </div>
     </div>
-    <div class="metric-card">
-      <div class="mc-label" data-i18n="metric.requests">Requests</div>
-      <div class="mc-value mono mc-accent" id="total-requests">-</div>
-      <div class="mc-sub" id="requests-sub">-</div>
-    </div>
-    <div class="metric-card">
-      <div class="mc-label" data-i18n="metric.tokens">Tokens</div>
-      <div class="mc-value mono" id="total-tokens">-</div>
-      <div class="mc-sub" id="tokens-sub">-</div>
-    </div>
-    <div class="metric-card">
-      <div class="mc-label" data-i18n="metric.p95_latency">P95 Latency</div>
-      <div class="mc-value mono mc-cyan" id="p95-latency">-</div>
-      <div class="mc-sub" id="latency-sub">-</div>
-    </div>
+
+    <section id="usage" class="card usage-card overview-usage">
+      <div class="usage-tabs" role="tablist" aria-label="Usage display mode">
+        <button class="usage-tab active" type="button" role="tab" aria-selected="true" data-usage-mode="cost" data-i18n="usage.mode.cost">Cost</button>
+        <button class="usage-tab" type="button" role="tab" aria-selected="false" data-usage-mode="tokens" data-i18n="usage.mode.tokens">Token Usage</button>
+        <button class="usage-tab" type="button" role="tab" aria-selected="false" data-usage-mode="requests" data-i18n="usage.mode.requests">Requests</button>
+      </div>
+      <div class="card-body usage-body">
+        <div class="usage-content-grid">
+          <div class="usage-trend-pane">
+            <div class="usage-summary">
+              <div>
+                <div class="section-label" data-i18n="usage.trend">Usage Trend</div>
+                <div class="card-desc" id="usage-chart-summary">-</div>
+              </div>
+              <div class="usage-total">
+                <span class="mono" id="usage-total-value">-</span>
+                <span id="usage-total-sub">-</span>
+              </div>
+            </div>
+            <div class="legend" id="usage-legend"></div>
+            <div class="chart-area chart-container usage-chart" id="usage-trend-chart"></div>
+            <div class="chart-footer">
+              <span id="usage-chart-left">-</span>
+              <span id="usage-chart-right">-</span>
+            </div>
+          </div>
+          <div class="distribution-section">
+            <div class="subsection-head">
+              <div class="section-label" data-i18n="usage.distribution">Distribution</div>
+              <div class="card-desc" id="models-summary">-</div>
+            </div>
+            <div class="distribution-layout">
+              <div class="distribution-chart" id="model-distribution-chart"></div>
+              <div class="distribution-list" id="model-distribution-list"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
   </section>
 
-  <!-- Usage -->
-  <section id="usage" class="card usage-card section-gap">
-    <div class="usage-tabs" role="tablist" aria-label="Usage display mode">
-      <button class="usage-tab active" type="button" role="tab" aria-selected="true" data-usage-mode="cost" data-i18n="usage.mode.cost">Cost</button>
-      <button class="usage-tab" type="button" role="tab" aria-selected="false" data-usage-mode="tokens" data-i18n="usage.mode.tokens">Token Usage</button>
-      <button class="usage-tab" type="button" role="tab" aria-selected="false" data-usage-mode="requests" data-i18n="usage.mode.requests">Requests</button>
+  <!-- Observability -->
+  <section id="observability" class="card section-gap" data-layout-panel="credentials">
+    <div class="card-head">
+      <div class="card-head-left">
+        <div class="card-title" data-i18n="panel.observability">Observability</div>
+        <div class="card-desc" id="observability-summary">-</div>
+      </div>
+      <button class="ctrl-btn" id="quota-refresh" type="button" data-i18n="action.refresh_quota">Refresh quota</button>
     </div>
-    <div class="usage-summary">
-      <div>
-        <div class="section-label" data-i18n="usage.trend">Usage Trend</div>
-        <div class="card-desc" id="usage-chart-summary">-</div>
+    <div class="card-body">
+      <div class="diag-grid">
+        <div class="diag-tile"><div class="dt-name" data-i18n="obs.side_channel">Side Channel</div><div class="dt-val mono" id="side-channel-state">-</div><div class="dt-unit" id="side-channel-detail">-</div></div>
+        <div class="diag-tile"><div class="dt-name" data-i18n="obs.credentials">Credentials</div><div class="dt-val mono" id="credential-state">-</div><div class="dt-unit" id="credential-detail">-</div></div>
+        <div class="diag-tile"><div class="dt-name" data-i18n="obs.quota">Quota</div><div class="dt-val mono" id="quota-state">-</div><div class="dt-unit" id="quota-detail">-</div></div>
+        <div class="diag-tile"><div class="dt-name" data-i18n="obs.capture">Capture</div><div class="dt-val mono" id="capture-state">-</div><div class="dt-unit" id="capture-state-detail">-</div></div>
       </div>
-      <div class="usage-total">
-        <span class="mono" id="usage-total-value">-</span>
-        <span id="usage-total-sub">-</span>
-      </div>
-    </div>
-    <div class="card-body usage-body">
-      <div class="legend" id="usage-legend"></div>
-      <div class="chart-area chart-container usage-chart" id="usage-trend-chart"></div>
-      <div class="chart-footer">
-        <span id="usage-chart-left">-</span>
-        <span id="usage-chart-right">-</span>
-      </div>
-      <div class="distribution-section">
-        <div class="subsection-head">
-          <div class="section-label" data-i18n="usage.distribution">Distribution</div>
-          <div class="card-desc" id="models-summary">-</div>
-        </div>
-        <div class="distribution-layout">
-          <div class="distribution-chart" id="model-distribution-chart"></div>
-          <div class="distribution-list" id="model-distribution-list"></div>
-        </div>
-      </div>
+      <div id="quota-window-summary" class="quota-window-grid"></div>
     </div>
   </section>
 
   <!-- Images -->
-  <section id="images" class="card section-gap">
+  <section id="images" class="card section-gap" data-layout-panel="images">
     <div class="card-head">
       <div class="card-head-left">
         <div class="card-title" data-i18n="panel.images">Images</div>
@@ -154,7 +185,7 @@
   </section>
 
   <!-- API Keys -->
-  <section id="keys" class="card section-gap">
+  <section id="keys" class="card section-gap" data-layout-panel="keys">
     <div class="card-head">
       <div class="card-head-left">
         <div class="card-title" data-i18n="panel.api_keys">API Keys</div>
@@ -176,7 +207,7 @@
   </section>
 
   <!-- Requests and Issues -->
-  <section id="requests" class="card request-workbench section-gap">
+  <section id="requests" class="card request-workbench section-gap" data-layout-panel="requests">
     <div class="card-head">
       <div class="card-head-left">
         <div class="card-title" data-i18n="panel.request_workbench">Requests & Issues</div>
@@ -248,42 +279,8 @@
     </div>
   </section>
 
-  <!-- Observability -->
-  <section id="observability" class="card section-gap">
-    <div class="card-head">
-      <div class="card-head-left">
-        <div class="card-title" data-i18n="panel.observability">Observability</div>
-        <div class="card-desc" id="observability-summary">-</div>
-      </div>
-      <button class="ctrl-btn" id="quota-refresh" type="button" data-i18n="action.refresh_quota">Refresh quota</button>
-    </div>
-    <div class="card-body">
-      <div class="diag-grid">
-        <div class="diag-tile"><div class="dt-name" data-i18n="obs.side_channel">Side Channel</div><div class="dt-val mono" id="side-channel-state">-</div><div class="dt-unit" id="side-channel-detail">-</div></div>
-        <div class="diag-tile"><div class="dt-name" data-i18n="obs.credentials">Credentials</div><div class="dt-val mono" id="credential-state">-</div><div class="dt-unit" id="credential-detail">-</div></div>
-        <div class="diag-tile"><div class="dt-name" data-i18n="obs.quota">Quota</div><div class="dt-val mono" id="quota-state">-</div><div class="dt-unit" id="quota-detail">-</div></div>
-        <div class="diag-tile"><div class="dt-name" data-i18n="obs.capture">Capture</div><div class="dt-val mono" id="capture-state">-</div><div class="dt-unit" id="capture-state-detail">-</div></div>
-      </div>
-      <div id="quota-window-summary" class="quota-window-grid"></div>
-      <div class="table-wrap quota-table-wrap">
-        <table>
-          <thead><tr>
-            <th data-i18n="table.provider">Provider</th>
-            <th data-i18n="table.status">Status</th>
-            <th data-i18n="table.credential">Credential</th>
-            <th data-i18n="table.plan">Plan</th>
-            <th data-i18n="table.windows">Windows</th>
-            <th data-i18n="table.next_reset">Next reset</th>
-            <th data-i18n="table.checked_at">Checked</th>
-          </tr></thead>
-          <tbody id="quota-table"><tr><td colspan="7" class="empty-state">-</td></tr></tbody>
-        </table>
-      </div>
-    </div>
-  </section>
-
   <!-- Diagnostics -->
-  <section id="diagnostics" class="card">
+  <section id="diagnostics" class="card" data-layout-panel="diagnostics">
     <div class="card-head">
       <div class="card-head-left">
         <div class="card-title" data-i18n="panel.capture_diagnostics">Capture Diagnostics</div>

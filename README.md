@@ -481,7 +481,7 @@ Quota API 的 `full_quota_available=true` 仅表示后台已拿到受支持的 p
 
 请求错误展示优先使用 `error_class` / `error_code`，HTTP status 只作为传输层事实保留。例如代理连接失败会细分为 `proxy_connection_refused`、`proxy_timeout`、`proxy_dns_error` 等，而不是只在 UI 中显示 `502`。
 
-WebUI 为只读面板，不修改配置或数据库。页面默认展示请求总览、成本/Token/请求趋势、模型分布、图片计量、API Key 维度、近期问题、凭证/额度与采集诊断。最近 100 条请求明细默认隐藏，仅在点击展开或从 issue 卡片进入时查询。WebUI 支持中英文切换，语言偏好保存在浏览器本地；页面右上角提供项目 GitHub 链接。
+WebUI 为只读面板，不修改配置或数据库。页面默认展示请求总览、成本/Token/请求趋势、模型分布、图片计量、API Key 维度、近期问题、凭证/额度与采集诊断。最近 100 条请求明细默认隐藏，仅在点击展开或从 issue 卡片进入时查询。页面布局支持 Tabs 与长页两种模式，偏好保存在浏览器本地；也可通过 `?layout=classic` 强制回到长页模式，便于回退 Tabs 实验。WebUI 支持中英文切换，语言偏好保存在浏览器本地；页面右上角提供项目 GitHub 链接。
 
 后端为 `/metering/api/*` 设置不可缓存响应头。若页面顶部显示 `Partial` 或 `Error`，说明至少一个 API 请求失败，其余面板仍会继续展示。排查时优先检查反向代理是否缓存了 `/metering/api/*`，以及 Basic Auth 凭据是否正确传递。
 

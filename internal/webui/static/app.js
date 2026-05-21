@@ -6,7 +6,19 @@ const BASE = apiBaseMeta && apiBaseMeta.content ? apiBaseMeta.content : '/meteri
 const LANG_KEY = 'mp-lang';
 const THEME_KEY = 'mp-theme';
 const USAGE_MODE_KEY = 'mp-usage-mode';
+const LAYOUT_MODE_KEY = 'mp-layout-mode';
+const LAYOUT_TAB_KEY = 'mp-layout-tab';
 const I18N = window.METERING_I18N || {};
+const QUOTA_PAGE_SIZE = 8;
+const layoutTabs = [
+  { key: 'overview', label: 'layout.tab.overview' },
+  { key: 'credentials', label: 'layout.tab.credentials' },
+  { key: 'requests', label: 'layout.tab.requests' },
+  { key: 'images', label: 'layout.tab.images' },
+  { key: 'keys', label: 'layout.tab.keys' },
+  { key: 'diagnostics', label: 'layout.tab.diagnostics' }
+];
+// Rollback contract: classic mode keeps the original long page; tabs only hide existing panels.
 
 let metadata = null;
 let currentModels = [];
@@ -17,6 +29,8 @@ let requestsExpanded = false;
 let currentLang = detectLang();
 let currentTheme = detectTheme();
 let currentUsageMode = detectUsageMode();
+let currentLayoutMode = detectLayoutMode();
+let currentLayoutTab = detectLayoutTab();
 let lastTSRows = [];
 let lastTSBucket = '';
 let latestOverview = null;
@@ -27,6 +41,9 @@ let latestQuota = null;
 let latestObservability = null;
 let selectedIssueSeverity = '';
 let currentIssueClassFilter = '';
+let statusHideTimer = null;
+let latestQuotaGroups = [];
+let quotaPage = 1;
 
 const fallbackRanges = [
   { key: '24h', label: 'Last 24 Hours', bucket: '1h' },
@@ -44,11 +61,29 @@ function detectLang() {
 }
 function detectTheme() {
   try { const s = localStorage.getItem(THEME_KEY); if (s === 'light' || s === 'dark') return s; } catch (_) {}
-  return 'dark';
+  return 'light';
 }
 function detectUsageMode() {
   try { const s = localStorage.getItem(USAGE_MODE_KEY); if (s === 'cost' || s === 'tokens' || s === 'requests') return s; } catch (_) {}
   return 'cost';
+}
+function detectLayoutMode() {
+  try {
+    const qp = new URLSearchParams(window.location.search).get('layout');
+    if (qp === 'tabs' || qp === 'classic') return qp;
+    const s = localStorage.getItem(LAYOUT_MODE_KEY);
+    if (s === 'tabs' || s === 'classic') return s;
+  } catch (_) {}
+  return 'tabs';
+}
+function detectLayoutTab() {
+  try {
+    const qp = new URLSearchParams(window.location.search).get('tab');
+    if (layoutTabs.some(tab => tab.key === qp)) return qp;
+    const s = localStorage.getItem(LAYOUT_TAB_KEY);
+    if (layoutTabs.some(tab => tab.key === s)) return s;
+  } catch (_) {}
+  return 'overview';
 }
 function applyTheme(theme) {
   currentTheme = theme;
@@ -96,7 +131,43 @@ function applyI18N() {
   document.querySelectorAll('[data-i18n-title]').forEach(el => { el.setAttribute('title', t(el.dataset.i18nTitle)); });
   const s = $('language-select'); if (s) s.value = currentLang;
   const zh = document.querySelector('#language-select option[value="zh"]'); if (zh) zh.textContent = '中文';
+  const ls = $('layout-select'); if (ls) ls.value = currentLayoutMode;
+  renderLayoutTabs();
   updateToggleLabels();
+}
+
+function applyLayoutMode(mode) {
+  currentLayoutMode = mode === 'classic' ? 'classic' : 'tabs';
+  document.documentElement.setAttribute('data-layout', currentLayoutMode);
+  try { localStorage.setItem(LAYOUT_MODE_KEY, currentLayoutMode); } catch (_) {}
+  const select = $('layout-select'); if(select) select.value = currentLayoutMode;
+  renderLayoutTabs();
+  updateLayoutPanels();
+  requestAnimationFrame(rerenderCharts);
+}
+function renderLayoutTabs() {
+  const nav = $('layout-tabs');
+  if(!nav) return;
+  nav.innerHTML = layoutTabs.map(tab => {
+    const active=tab.key===currentLayoutTab;
+    return `<button class="layout-tab ${active?'active':''}" type="button" role="tab" aria-selected="${active?'true':'false'}" tabindex="${active?'0':'-1'}" data-layout-tab="${esc(tab.key)}">${esc(t(tab.label))}</button>`;
+  }).join('');
+  nav.querySelectorAll('[data-layout-tab]').forEach(btn => btn.addEventListener('click', () => setLayoutTab(btn.dataset.layoutTab)));
+}
+function setLayoutTab(tab) {
+  if(!layoutTabs.some(item => item.key === tab)) tab = 'overview';
+  currentLayoutTab = tab;
+  try { localStorage.setItem(LAYOUT_TAB_KEY, currentLayoutTab); } catch (_) {}
+  renderLayoutTabs();
+  updateLayoutPanels();
+  requestAnimationFrame(rerenderCharts);
+}
+function updateLayoutPanels() {
+  document.querySelectorAll('[data-layout-panel]').forEach(panel => {
+    const hidden=currentLayoutMode === 'tabs' && panel.dataset.layoutPanel !== currentLayoutTab;
+    panel.classList.toggle('layout-panel-hidden', hidden);
+    panel.setAttribute('aria-hidden', hidden ? 'true' : 'false');
+  });
 }
 
 /* --- Formatters -------------------------------------------- */
@@ -108,6 +179,11 @@ function fmtLat(ms) { ms=Number(ms||0); if(ms<=0)return'-'; if(ms<1000)return ms
 function fmtTime(v) { if(!v)return'-'; const d=new Date(v); return isNaN(d)?v:d.toLocaleString(locale()); }
 function fmtShort(v) { if(!v)return'-'; const d=new Date(v); return isNaN(d)?v:d.toLocaleString(locale(),{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}); }
 function shortHash(h) { return h ? String(h).slice(0,10)+'...' : '-'; }
+function quotaCredentialLabel(value) {
+  const s=String(value||'');
+  if(!s) return '-';
+  return s.length>42?s.slice(0,38)+'...':s;
+}
 function modelName(m) { return !m||m==='unknown'||m==='unidentified' ? t('model.unidentified') : m; }
 function statusBadgeClass(status) {
   status=String(status||'').toLowerCase();
@@ -125,6 +201,47 @@ function moduleStatusLabel(status) {
 }
 function errorDiagnosticLabel(row) {
   return row && (row.error_code || row.latest_error_code || row.error_class || row.latest_error_class || row.error_type || row.latest_error || row.error || '');
+}
+function selectOptionValue(id, value) {
+  const el=$(id);
+  if(!el) return '';
+  const v=String(value||'');
+  return [...el.options].some(opt=>opt.value===v) ? v : '';
+}
+function singleSelectOptionValue(id, values) {
+  const unique=[...new Set([...(values||[])].map(v=>String(v||'')).filter(Boolean))];
+  return unique.length===1 ? selectOptionValue(id, unique[0]) : '';
+}
+function statusFilterFromStatuses(statuses) {
+  const families=new Set();
+  [...(statuses||[])].forEach(status=>{
+    const n=Number(status||0);
+    if(n>=200&&n<400) families.add('success');
+    else if(n>=400&&n<500) families.add('4xx');
+    else if(n>=500) families.add('5xx');
+  });
+  return families.size===1 ? [...families][0] : '';
+}
+function syncRequestFiltersForIssue(group) {
+  const status=statusFilterFromStatuses(group&&group.statuses);
+  const model=singleSelectOptionValue('filter-model', group&&group.rawModels);
+  const endpoint=singleSelectOptionValue('filter-endpoint', group&&group.endpoints);
+  const fs=$('filter-status'), fm=$('filter-model'), fe=$('filter-endpoint');
+  if(fs) fs.value=status;
+  if(fm) fm.value=model;
+  if(fe) fe.value=endpoint;
+}
+function diagnosticGuide(cls, code) {
+  const fb=I18N.en||{}, dict=I18N[currentLang]||fb;
+  const candidates=[
+    `issues.guide.${cls||'unknown'}.${code||''}`,
+    `issues.guide.${cls||'unknown'}`,
+    `issues.guide.${code||''}`
+  ];
+  for(const key of candidates){
+    if(dict[key]||fb[key]) return dict[key]||fb[key];
+  }
+  return '';
 }
 function quotaWindowRank(key) {
   key=String(key||'').toLowerCase();
@@ -204,12 +321,6 @@ function quotaGroups(items) {
     return String(a.credential||'').localeCompare(String(b.credential||''));
   });
 }
-function quotaLatest(rows, field) {
-  return rows.map(row=>row&&row[field]).filter(Boolean).sort((a,b)=>new Date(b).getTime()-new Date(a).getTime())[0]||'';
-}
-function quotaNextReset(rows) {
-  return rows.map(quotaWindowReset).filter(Boolean).sort((a,b)=>new Date(a).getTime()-new Date(b).getTime())[0]||'';
-}
 function quotaMeterHTML(row) {
   const m=quotaMetric(row);
   const qClass=quotaStatusClass((row&&row.status)||(row&&row.adapter_status));
@@ -235,11 +346,24 @@ function quotaWindowItemHTML(row, compact) {
     <div class="quota-window-foot">${esc(quotaResetText(reset))}</div>
   </div>`;
 }
-function renderQuotaSummary(groups) {
+function renderQuotaSummary(groups, emptyText) {
   const el=$('quota-window-summary');
   if(!el) return;
-  if(!groups.length){ el.innerHTML=''; return; }
-  el.innerHTML=groups.map(group=>{
+  latestQuotaGroups=Array.isArray(groups)?groups:[];
+  if(!groups.length){
+    el.innerHTML=`<div class="quota-empty-card">${esc(emptyText||t('state.no_quota_data'))}</div>`;
+    return;
+  }
+  const totalPages=Math.max(1,Math.ceil(groups.length/QUOTA_PAGE_SIZE));
+  quotaPage=Math.min(Math.max(1,quotaPage),totalPages);
+  const start=(quotaPage-1)*QUOTA_PAGE_SIZE;
+  const visibleGroups=groups.slice(start,start+QUOTA_PAGE_SIZE);
+  const pager=groups.length>QUOTA_PAGE_SIZE?`<div class="quota-pager">
+    <button class="ctrl-btn" type="button" data-quota-page="prev" ${quotaPage<=1?'disabled':''}>${esc(t('action.prev_page'))}</button>
+    <span>${esc(t('quota.page_status',{page:quotaPage,total:totalPages,count:groups.length}))}</span>
+    <button class="ctrl-btn" type="button" data-quota-page="next" ${quotaPage>=totalPages?'disabled':''}>${esc(t('action.next_page'))}</button>
+  </div>`:'';
+  el.innerHTML=visibleGroups.map(group=>{
     const primary=group.primary||{};
     const status=primary.status||primary.adapter_status||'-';
     const title=[primary.adapter_status,primary.error_class].filter(Boolean).join(' / ');
@@ -247,24 +371,34 @@ function renderQuotaSummary(groups) {
       <div class="quota-account-head">
         <div>
           <div class="quota-account-title">${esc(group.provider)}</div>
-          <div class="quota-account-sub"><code>${esc(shortHash(group.credential))}</code>${group.plan&&group.plan!=='-'?`<span>${esc(group.plan)}</span>`:''}</div>
+          <div class="quota-account-sub"><code class="quota-credential" title="${esc(group.credential)}">${esc(quotaCredentialLabel(group.credential))}</code>${group.plan&&group.plan!=='-'?`<span>${esc(group.plan)}</span>`:''}</div>
         </div>
         <span class="badge ${statusBadgeClass(status)}" title="${esc(title)}">${esc(status)}</span>
       </div>
       <div class="quota-account-windows">${group.rows.map(row=>quotaWindowItemHTML(row,false)).join('')}</div>
     </div>`;
-  }).join('');
+  }).join('')+pager;
+  el.querySelectorAll('[data-quota-page]').forEach(btn=>btn.addEventListener('click',()=>{
+    const dir=btn.dataset.quotaPage;
+    quotaPage+=dir==='next'?1:-1;
+    renderQuotaSummary(latestQuotaGroups);
+  }));
 }
 
 /* --- Status / refresh -------------------------------------- */
 function setStatus(kind, title, detail) {
+  if(statusHideTimer){clearTimeout(statusHideTimer);statusHideTimer=null;}
+  const strip=$('status-strip');
+  if(strip) strip.classList.remove('is-hidden');
   const dot = $('status-dot');
   if (dot) { dot.className = 'status-dot' + (kind==='error'?' err':kind==='partial'?' warn':''); }
   const tt = $('status-title'); if(tt) tt.textContent = title;
   const dd = $('status-detail'); if(dd) dd.textContent = detail||'';
   // legacy compat
   const pill = $('status-pill');
-  if (pill) { pill.className = 'status-pill '+(kind==='error'?'err':kind==='partial'?'warn':'ok'); pill.textContent = title; }
+  if (pill) { pill.className = 'status-pill hidden '+(kind==='error'?'err':kind==='partial'?'warn':'ok'); pill.textContent = title; }
+  const ttl=kind==='live'?4200:kind==='partial'?9000:kind==='error'?12000:0;
+  if(ttl>0) statusHideTimer=setTimeout(()=>{const el=$('status-strip'); if(el) el.classList.add('is-hidden');}, ttl);
 }
 function setLastRefresh(date) {
   lastRefreshAt = date ? date.getTime() : 0;
@@ -276,7 +410,14 @@ function setNodeState() {} // proxy path removed - no-op
 function setRefreshing(active) {
   document.documentElement.classList.toggle('is-refreshing', active);
   const strip=$('status-strip');
-  if(strip) strip.setAttribute('aria-busy', active ? 'true' : 'false');
+  if(strip) {
+    strip.setAttribute('aria-busy', active ? 'true' : 'false');
+    if(active) {
+      if(statusHideTimer){clearTimeout(statusHideTimer);statusHideTimer=null;}
+      strip.classList.remove('is-hidden');
+      statusHideTimer=setTimeout(()=>{const el=$('status-strip'); if(el) el.classList.add('is-hidden');}, 18000);
+    }
+  }
   const btn=$('refresh-btn');
   if(btn) {
     btn.disabled=active;
@@ -480,7 +621,8 @@ async function loadRequests() {
   tbody.innerHTML=rows.map(r=>{
     const sc=r.status<400?'ok':r.status<500?'warn':'err';
     const diag=errorDiagnosticLabel(r);
-    const statusTitle=[diag&&`error:${diag}`,r.error_type&&`type:${r.error_type}`,r.error_param&&`param:${r.error_param}`].filter(Boolean).join(' / ');
+    const guide=diagnosticGuide(r.error_class||r.error||'',r.error_code||diag||'');
+    const statusTitle=[diag&&`error:${diag}`,r.error_type&&`type:${r.error_type}`,r.error_param&&`param:${r.error_param}`,guide&&`next:${guide}`].filter(Boolean).join(' / ');
     const statusCell=`<span class="badge ${sc}" title="${esc(statusTitle)}">${esc(r.status)}</span>${diag?`<div class="request-error-code">${esc(diag)}</div>`:''}`;
     const md2=modelName(r.model_returned||r.model_requested||'unidentified');
     const sourceBits=[r.model_returned_source&&`model:${r.model_returned_source}`,r.usage_source&&`usage:${r.usage_source}`,r.terminal_event&&`terminal:${r.terminal_event}`,r.side_usage_event_id&&`side:${r.side_usage_event_id}`].filter(Boolean);
@@ -754,8 +896,8 @@ function renderModelDistribution() {
     list.innerHTML='';
     return;
   }
-  const display=rows.slice(0,8);
-  const rest=rows.slice(8).reduce((s,r)=>s+r._value,0);
+  const display=rows.slice(0,5);
+  const rest=rows.slice(5).reduce((s,r)=>s+r._value,0);
   if(rest>0) display.push({model:t('model.other'),_value:rest,cost_known:true});
   chart.innerHTML=pieSvg(display,total,meta);
   list.innerHTML=display.map((r,i)=>{
@@ -895,13 +1037,16 @@ async function loadIssues() {
       const cls=item.class||'unknown';
       const source=item.source_group||item.scope||'system';
       const key=source+'::'+cls;
-      const g=groups.get(key)||{class:cls,source,label:issueClassLabel(cls,item.label),count:0,latestAt:'',messages:[],codes:new Set(),models:new Set(),endpoints:new Set(),statuses:new Set(),systemOnly:true};
+      const g=groups.get(key)||{class:cls,source,label:issueClassLabel(cls,item.label),count:0,latestAt:'',messages:[],codes:new Set(),models:new Set(),rawModels:new Set(),endpoints:new Set(),statuses:new Set(),systemOnly:true};
       g.count+=Number(item.count||0);
       if((Date.parse(item.latest_at||'')||0)>(Date.parse(g.latestAt||'')||0)) g.latestAt=item.latest_at||g.latestAt;
       const diag=errorDiagnosticLabel(item);
       if(diag) g.codes.add(diag);
       if(item.message||item.error_code||item.error_type) g.messages.push(item.message||item.error_code||item.error_type);
-      if(item.model) g.models.add(modelName(item.model));
+      if(item.model) {
+        g.models.add(modelName(item.model));
+        g.rawModels.add(item.model);
+      }
       if(item.endpoint) g.endpoints.add(item.endpoint);
       if(item.status) g.statuses.add(String(item.status));
       if(!item.system) g.systemOnly=false;
@@ -909,14 +1054,18 @@ async function loadIssues() {
     });
     const rows=[...groups.values()].sort((a,b)=>b.count-a.count);
     list.classList.remove('hidden');
+    const issueGroupByKey=new Map();
     list.innerHTML=`<div class="issue-class-head">${esc(issueSevLabel(selectedIssueSeverity))}${esc(t('issues.class_breakdown_suffix'))}</div>
       <div class="issue-filter-grid">${rows.map(g=>{
+        const issueKey=`${g.source}::${g.class}`;
+        issueGroupByKey.set(issueKey,g);
         const bits=[...g.codes].slice(0,2).concat([...g.statuses].slice(0,1).map(s=>'HTTP '+s),[...g.models].slice(0,1),[...g.endpoints].slice(0,1)).filter(Boolean);
         const detail=[g.source,bits.join(' / ') || (g.systemOnly?t('issues.scope_process'):t('issues.no_message'))].filter(Boolean).join(' / ');
         const msg=(g.messages[0]&&!g.codes.has(g.messages[0]))?g.messages[0]:'';
+        const guide=diagnosticGuide(g.class,[...g.codes][0]||'');
         const active=currentIssueClassFilter===g.class;
         const cardClass=g.systemOnly?'issue-filter-card':`issue-filter-card clickable ${active?'active':''}`;
-        const attrs=g.systemOnly?'':` role="button" tabindex="0" data-issue-class="${esc(g.class)}"`;
+        const attrs=g.systemOnly?'':` role="button" tabindex="0" data-issue-key="${esc(issueKey)}" data-issue-class="${esc(g.class)}"`;
         return `<div class="${cardClass}"${attrs}>
           <div class="issue-filter-top">
             <span class="issue-sev ${selectedIssueSeverity}"></span>
@@ -924,11 +1073,12 @@ async function loadIssues() {
             <span class="issue-count mono">${esc(fmtFull(g.count))}</span>
           </div>
           <div class="issue-detail">${esc(detail)}${msg?' - '+esc(msg):''}</div>
+          ${guide?`<div class="issue-guide">${esc(guide)}</div>`:''}
           <div class="issue-filter-foot"><span class="mono">${esc(g.latestAt?fmtShort(g.latestAt):'-')}</span>${g.systemOnly?'':`<span>${esc(t('action.show_matching_requests'))}</span>`}</div>
         </div>`;
       }).join('')}</div>`;
     list.querySelectorAll('.issue-filter-card[data-issue-class]').forEach(row=>{
-      const open=()=>showReqForIssueClass(row.dataset.issueClass);
+      const open=()=>showReqForIssueClass(row.dataset.issueClass, issueGroupByKey.get(row.dataset.issueKey));
       row.addEventListener('click',open);
       row.addEventListener('keydown',e=>{
         if(e.key==='Enter'||e.key===' '){e.preventDefault();open();}
@@ -977,36 +1127,18 @@ async function loadQuota() {
     return quotaRowCompare(a,b);
   });
   const groups=quotaGroups(items);
+  if(quotaPage<1) quotaPage=1;
   const moduleStatus=data.module_status||'disabled';
   const moduleLabel=moduleStatusLabel(moduleStatus);
   setText('quota-state',moduleLabel);
   setText('quota-detail',data.full_quota_available?t('obs.full_quota'):phase);
-  setText('observability-summary',t('obs.summary',{phase:moduleLabel,quota:items.length}));
-  renderQuotaSummary(groups);
-  const table=$('quota-table');
-  if(!table) return;
+  setText('observability-summary',t('obs.summary',{phase:moduleLabel,quota:groups.length}));
   if(!items.length){
     const empty = moduleStatus==='disabled'?t('state.quota_disabled'):moduleStatus==='unavailable'?t('state.quota_unavailable'):t('state.no_quota_data');
-    table.innerHTML=`<tr><td colspan="7" class="empty-state">${esc(empty)}</td></tr>`;
+    renderQuotaSummary([], empty);
     return;
   }
-  table.innerHTML=groups.map(group=>{
-    const primary=group.primary||{};
-    const status=primary.status||primary.adapter_status||'-';
-    const qClass=quotaStatusClass(status);
-    const statusTitle=[primary.adapter_status,primary.error_class,primary.error_message].filter(Boolean).join(' / ');
-    const reset=quotaNextReset(group.rows);
-    const checked=quotaLatest(group.rows,'checked_at');
-    return `<tr>
-      <td>${esc(group.provider||'-')}</td>
-      <td><span class="badge ${statusBadgeClass(status)}" title="${esc(statusTitle)}">${esc(status)}</span></td>
-      <td><code>${esc(shortHash(group.credential))}</code></td>
-      <td>${esc(group.plan||'-')}</td>
-      <td><div class="quota-window-stack ${qClass}">${group.rows.map(row=>quotaWindowItemHTML(row,true)).join('')}</div></td>
-      <td class="mono">${esc(reset?fmtShort(reset):'-')}</td>
-      <td class="mono">${esc(fmtShort(checked))}</td>
-    </tr>`;
-  }).join('');
+  renderQuotaSummary(groups);
 }
 
 async function loadObservability() {
@@ -1075,21 +1207,25 @@ function markFailed(failures) {
   if(fm.has('requests'))$('requests-table').innerHTML=errorRow(11,fm.get('requests').message);
   if(fm.has('issues')){$('issues-state').classList.remove('hidden');$('issues-state').innerHTML=`<div class="issues-empty error-text">${esc(fm.get('issues').message)}</div>`;const io=$('issues-overview');if(io)io.innerHTML='';$('issues-list').innerHTML=`<div class="issue-class-placeholder">${esc(t('issues.select_severity_hint'))}</div>`;}
   if(fm.has('timeseries')){const el=$('usage-trend-chart');if(el)el.innerHTML=`<div class="empty-state error-text">${esc(fm.get('timeseries').message)}</div>`;}
-  if(fm.has('quota')){const qt=$('quota-table');if(qt)qt.innerHTML=errorRow(11,fm.get('quota').message);}
+  if(fm.has('quota'))renderQuotaSummary([],fm.get('quota').message);
   if(fm.has('observability'))setText('observability-summary',fm.get('observability').message);
 }
 
 /* --- Toggle requests / nav --------------------------------- */
 async function toggleRequests() {
   const next=!requestsExpanded;
-  if(currentIssueClassFilter){
+  if(!next){
+    selectedIssueSeverity='';
     currentIssueClassFilter='';
+    closeRequestDetails();
     loadIssues();
+    return;
   }
-  requestsExpanded=next;
-  $('request-details').classList.toggle('hidden',!requestsExpanded);
+  requestsExpanded=true;
+  $('request-details').classList.remove('hidden');
   updateToggleLabels();
-  if(requestsExpanded){$('requests-table').innerHTML=emptyRow(11,t('state.loading_requests'));await reloadReqFilter();}
+  $('requests-table').innerHTML=emptyRow(11,t('state.loading_requests'));
+  await reloadReqFilter();
 }
 function updateToggleLabels() {
   document.querySelectorAll('[data-toggle-requests]').forEach(b=>{b.textContent=requestsExpanded?t('action.hide_requests'):t('action.show_requests');});
@@ -1103,7 +1239,7 @@ function closeRequestDetails() {
   updateToggleLabels();
 }
 async function reloadReqFilter() { if(!requestsExpanded)return; try{await loadRequests();}catch(e){$('requests-table').innerHTML=errorRow(11,e.message);} }
-async function showReqForIssueClass(errorClass) {
+async function showReqForIssueClass(errorClass, group) {
   if(!errorClass)return;
   if(currentIssueClassFilter===errorClass && requestsExpanded){
     currentIssueClassFilter='';
@@ -1112,9 +1248,7 @@ async function showReqForIssueClass(errorClass) {
     return;
   }
   currentIssueClassFilter=errorClass;
-  $('filter-status').value='';
-  $('filter-model').value='';
-  $('filter-endpoint').value='';
+  syncRequestFiltersForIssue(group);
   if(!requestsExpanded){requestsExpanded=true;$('request-details').classList.remove('hidden');updateToggleLabels();}
   $('requests-table').innerHTML=emptyRow(11,t('state.loading_requests'));
   await reloadReqFilter();
@@ -1139,9 +1273,11 @@ function rerenderCharts(){renderUsagePanel();}
 document.addEventListener('DOMContentLoaded', async ()=>{
   applyTheme(currentTheme);
   applyI18N(); applyMeta();
+  applyLayoutMode(currentLayoutMode);
   setStatus('live',t('status.ready'),t('status.waiting'));
   setLastRefresh(null);
   $('language-select').addEventListener('change',e=>setLang(e.target.value));
+  const layoutSelect=$('layout-select'); if(layoutSelect) layoutSelect.addEventListener('change',e=>applyLayoutMode(e.target.value));
   $('refresh-btn').addEventListener('click',refresh);
   const qr=$('quota-refresh'); if(qr)qr.addEventListener('click',refreshQuotaNow);
   $('range-select').addEventListener('change',()=>{resetIssueSelection();refresh();});
