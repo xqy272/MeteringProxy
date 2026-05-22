@@ -195,7 +195,7 @@ multimodal_pricing:
 ### 6. 拉取并启动容器
 
 ```bash
-docker pull ghcr.io/xqy272/ai-gateway-metering-proxy:v0.3.1
+docker pull ghcr.io/xqy272/ai-gateway-metering-proxy:v0.4.0
 
 docker run -d \
   --name metering-proxy \
@@ -203,7 +203,7 @@ docker run -d \
   --network ai-gateway \
   -v /opt/ai-gateway/metering:/data \
   -p 127.0.0.1:8320:8320 \
-  ghcr.io/xqy272/ai-gateway-metering-proxy:v0.3.1 \
+  ghcr.io/xqy272/ai-gateway-metering-proxy:v0.4.0 \
   -config /data/config.yaml
 ```
 
@@ -315,7 +315,7 @@ curl -s http://127.0.0.1:8320/metering/api/observability
 
 | 标签 | 说明 |
 |---|---|
-| `v0.3.1` | 固定版本，生产推荐 |
+| `v0.4.0` | 固定版本，生产推荐 |
 | `edge` | 追踪 main 分支最新提交 |
 | `latest` | 指向最新发布版本 |
 
@@ -345,7 +345,7 @@ cp /opt/ai-gateway/metering/usage.sqlite /opt/ai-gateway/metering/backups/usage.
 cp /opt/ai-gateway/metering/salt       /opt/ai-gateway/metering/backups/salt.$(date +%Y%m%d-%H%M%S).bak
 
 # 2. 更新镜像
-docker pull ghcr.io/xqy272/ai-gateway-metering-proxy:v0.3.1
+docker pull ghcr.io/xqy272/ai-gateway-metering-proxy:v0.4.0
 docker rm metering-proxy
 docker run -d \
   --name metering-proxy \
@@ -353,7 +353,7 @@ docker run -d \
   --network ai-gateway \
   -v /opt/ai-gateway/metering:/data \
   -p 127.0.0.1:8320:8320 \
-  ghcr.io/xqy272/ai-gateway-metering-proxy:v0.3.1 \
+  ghcr.io/xqy272/ai-gateway-metering-proxy:v0.4.0 \
   -config /data/config.yaml
 
 # 3. 验证
@@ -566,7 +566,7 @@ docker run -d \
   -v /opt/ai-gateway/metering:/data \
   --add-host host.docker.internal:host-gateway \
   -p 127.0.0.1:8320:8320 \
-  ghcr.io/xqy272/ai-gateway-metering-proxy:v0.3.1 \
+  ghcr.io/xqy272/ai-gateway-metering-proxy:v0.4.0 \
   -config /data/config.yaml
 ```
 

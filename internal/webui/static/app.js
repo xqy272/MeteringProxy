@@ -12,7 +12,6 @@ const QUOTA_PAGE_SIZE = 8;
 const layoutTabs = [
   { key: 'overview', label: 'layout.tab.overview' },
   { key: 'credentials', label: 'layout.tab.credentials' },
-  { key: 'quota-diagnostics', label: 'layout.tab.quota_diagnostics' },
   { key: 'requests', label: 'layout.tab.requests' },
   { key: 'images', label: 'layout.tab.images' },
   { key: 'keys', label: 'layout.tab.keys' },
@@ -70,8 +69,10 @@ function detectUsageMode() {
 function detectLayoutTab() {
   try {
     const qp = new URLSearchParams(window.location.search).get('tab');
+    if (qp === 'quota-diagnostics') return 'diagnostics';
     if (layoutTabs.some(tab => tab.key === qp)) return qp;
     const s = localStorage.getItem(LAYOUT_TAB_KEY);
+    if (s === 'quota-diagnostics') return 'diagnostics';
     if (layoutTabs.some(tab => tab.key === s)) return s;
   } catch (_) {}
   return 'overview';
@@ -136,6 +137,7 @@ function renderLayoutTabs() {
   nav.querySelectorAll('[data-layout-tab]').forEach(btn => btn.addEventListener('click', () => setLayoutTab(btn.dataset.layoutTab)));
 }
 function setLayoutTab(tab) {
+  if(tab === 'quota-diagnostics') tab = 'diagnostics';
   if(!layoutTabs.some(item => item.key === tab)) tab = 'overview';
   currentLayoutTab = tab;
   try { localStorage.setItem(LAYOUT_TAB_KEY, currentLayoutTab); } catch (_) {}
@@ -325,38 +327,118 @@ function credentialIdentity(row) {
 function credentialDisplayName(row) {
   return (row&&row.display_label)||(row&&row.identity_hint)||(row&&row.provider)||'-';
 }
+function credentialStatusLabel(status) {
+  const raw=String(status||'unknown').toLowerCase();
+  const key='credential.status.'+raw;
+  const label=t(key);
+  return label===key ? (status||'-') : label;
+}
+function credentialHealthCompare(a,b) {
+  const sr=quotaStatusRank(a)-quotaStatusRank(b);
+  if(sr) return sr;
+  const pc=String(a.provider||'').localeCompare(String(b.provider||''));
+  if(pc) return pc;
+  return credentialDisplayName(a).localeCompare(credentialDisplayName(b));
+}
+function parseCredentialDiagnosticText(value) {
+  const raw=String(value||'').trim();
+  if(!raw) return {};
+  if(!(raw.startsWith('{')&&raw.endsWith('}'))) return { message: raw };
+  try {
+    const outer=JSON.parse(raw);
+    const err=outer&&typeof outer.error==='object'&&outer.error?outer.error:outer;
+    const resetRaw=err.resets_at||err.reset_at||err.next_recover_at||err.nextRetryAfter||outer.resets_at||outer.reset_at||outer.next_recover_at;
+    let resetAt='';
+    if(resetRaw){
+      const n=Number(resetRaw);
+      if(Number.isFinite(n)&&n>0) resetAt=new Date((n>100000000000?n:n*1000)).toISOString();
+      else resetAt=String(resetRaw);
+    }
+    const resetIn=Number(err.resets_in_seconds||err.reset_in_seconds||err.retry_after_seconds||outer.resets_in_seconds||0);
+    if(!resetAt && Number.isFinite(resetIn) && resetIn>0) resetAt=new Date(Date.now()+resetIn*1000).toISOString();
+    return {
+      type: err.type||err.error_type||outer.type||outer.error_type||'',
+      code: err.code||err.error_code||outer.code||outer.error_code||'',
+      message: err.message||err.error_message||err.detail||outer.message||outer.error_message||'',
+      plan: err.plan_type||err.planType||err.plan||outer.plan_type||outer.planType||outer.plan||'',
+      resetAt
+    };
+  } catch (_) {
+    return { message: raw };
+  }
+}
+function credentialDiagnostic(row) {
+  const parsed=parseCredentialDiagnosticText((row&&row.status_message)||(row&&row.error_message)||'');
+  const message=parsed.message||(row&&row.error_message)||(row&&row.status_message)||'';
+  const resetAt=(row&&row.next_retry_after)||parsed.resetAt||'';
+  const label=row&&row.error_class?issueClassLabel(row.error_class,row.error_class):(parsed.type||parsed.code||t('credential.message'));
+  const plan=(row&&row.plan)||parsed.plan||'';
+  const rawTitle=[row&&row.error_class,row&&row.error_type,row&&row.error_code,message,resetAt&&quotaResetText(resetAt)].filter(Boolean).join(' / ');
+  return { label, message, resetAt, plan, title: rawTitle };
+}
+function credentialHealthStats(row) {
+  const success=Number(row&&row.success_count||0);
+  const failed=Number(row&&row.failed_count||0);
+  const total=success+failed;
+  const recentSuccess=Number(row&&row.recent_success_count||0);
+  const recentFailed=Number(row&&row.recent_failed_count||0);
+  const recentTotal=recentSuccess+recentFailed;
+  const pct=total>0?Math.max(0,Math.min(100,success/total*100)):0;
+  const recentPct=recentTotal>0?Math.max(0,Math.min(100,recentSuccess/recentTotal*100)):pct;
+  return { success, failed, total, pct, recentSuccess, recentFailed, recentTotal, recentPct };
+}
+function credentialFingerprintsHTML(row, credential) {
+  const rows=[
+    [t('credential.auth_index'), row&&row.auth_index_hash],
+    [t('credential.label_hash'), row&&row.label_hash],
+    [t('credential.credential_hash'), credential]
+  ].filter(item=>item[1]);
+  if(!rows.length) return '';
+  return `<details class="credential-fingerprints">
+    <summary>${esc(t('credential.fingerprints'))}</summary>
+    <div class="credential-fingerprint-grid">${rows.map(item=>`<div><span>${esc(item[0])}</span><code title="${esc(item[1])}">${esc(quotaCredentialLabel(item[1]))}</code></div>`).join('')}</div>
+  </details>`;
+}
 function credentialHealthCardHTML(row) {
   const status=(row&&row.status)||'-';
   const qClass=quotaStatusClass(status);
   const credential=credentialIdentity(row);
   const displayName=credentialDisplayName(row);
   const identityHint=row&&row.identity_hint&&row.identity_hint!==displayName?row.identity_hint:'';
-  const detail=row&&(row.status_message||row.error_message||row.error_code||row.error_type)||'';
-  const title=[row&&row.error_class,detail,row&&row.checked_at&&fmtTime(row.checked_at)].filter(Boolean).join(' / ');
-  const plan=row&&row.plan?`<span>${esc(row.plan)}</span>`:'';
-  const recentTotal=Number(row&&row.recent_success_count||0)+Number(row&&row.recent_failed_count||0);
-  const recent=recentTotal>0?`<div class="credential-line"><span>${esc(t('credential.recent'))}</span><code>${esc(t('metric.success_failed',{success:fmtFull(row.recent_success_count||0),failed:fmtFull(row.recent_failed_count||0)}))}</code></div>`:'';
-  const retry=row&&row.next_retry_after?`<div class="credential-line"><span>${esc(t('credential.next_retry'))}</span><code>${esc(fmtShort(row.next_retry_after))}</code></div>`:'';
-  const authHash=row&&row.auth_index_hash?`<div class="credential-line"><span>${esc(t('credential.auth_index'))}</span><code title="${esc(row.auth_index_hash)}">${esc(quotaCredentialLabel(row.auth_index_hash))}</code></div>`:'';
-  const labelHash=row&&row.label_hash?`<div class="credential-line"><span>${esc(t('credential.label_hash'))}</span><code title="${esc(row.label_hash)}">${esc(quotaCredentialLabel(row.label_hash))}</code></div>`:'';
+  const diag=credentialDiagnostic(row);
+  const title=[diag.title,row&&row.checked_at&&fmtTime(row.checked_at)].filter(Boolean).join(' / ');
+  const plan=diag.plan?`<span class="credential-plan">${esc(diag.plan)}</span>`:'';
+  const stats=credentialHealthStats(row);
+  const healthPct=stats.total>0?stats.pct.toFixed(1)+'%':'-';
+  const recent=stats.recentTotal>0?`<span>${esc(t('metric.success_failed',{success:fmtFull(stats.recentSuccess),failed:fmtFull(stats.recentFailed)}))}</span>`:'';
+  const retry=diag.resetAt?`<div class="credential-reset-chip">${esc(t('credential.next_retry'))}: <strong>${esc(fmtShort(diag.resetAt))}</strong></div>`:'';
+  const fingerprints=credentialFingerprintsHTML(row, credential);
   const errLevel=qClass==='err'?'err':(qClass==='low'||qClass==='warn'?'warn':'neutral');
-  const err=row&&(row.error_class||detail)?`<div class="credential-error ${errLevel}" title="${esc(title)}">${esc(row.error_class?issueClassLabel(row.error_class,row.error_class):t('credential.message'))}${detail?` · ${esc(detail)}`:''}</div>`:'';
+  const err=row&&(row.error_class||diag.message)?`<div class="credential-alert ${errLevel}" title="${esc(title)}">
+      <div><strong>${esc(diag.label)}</strong>${diag.message?`<p>${esc(diag.message)}</p>`:''}</div>
+      ${retry}
+    </div>`:'';
   return `<div class="quota-account credential-card ${qClass}">
-    <div class="quota-account-head">
-      <div>
-        <div class="quota-account-title" title="${esc(displayName)}">${esc(displayName)}</div>
-        <div class="quota-account-sub"><span>${esc((row&&row.provider)||'-')}</span>${identityHint?`<span title="${esc(identityHint)}">${esc(identityHint)}</span>`:''}${plan}</div>
-      </div>
-      <span class="badge ${statusBadgeClass(status)}" title="${esc(title)}">${esc(status)}</span>
+    <div class="credential-card-top">
+      <span class="credential-provider-chip">${esc((row&&row.provider)||'-')}</span>
+      <span class="badge ${statusBadgeClass(status)}" title="${esc(title)}">${esc(credentialStatusLabel(status))}</span>
     </div>
-    <div class="credential-health-metrics">
-      <div><span>${esc(t('credential.success'))}</span><strong class="mono">${esc(fmtFull(row&&row.success_count||0))}</strong></div>
-      <div><span>${esc(t('credential.failed'))}</span><strong class="mono">${esc(fmtFull(row&&row.failed_count||0))}</strong></div>
-    </div>
-    <div class="credential-lines">${recent}${retry}${authHash}${labelHash}</div>
-    <div class="credential-line credential-primary-hash"><span>${esc(t('credential.credential_hash'))}</span><code title="${esc(credential)}">${esc(quotaCredentialLabel(credential))}</code></div>
-    <div class="quota-window-foot">${esc(t('credential.checked_at',{time:fmtShort(row&&row.checked_at)}))}</div>
+    <div class="credential-title" title="${esc(displayName)}">${esc(displayName)}</div>
+    <div class="credential-meta">${identityHint?`<span title="${esc(identityHint)}">${esc(identityHint)}</span>`:''}${plan}<span>${esc(t('credential.checked_at',{time:fmtShort(row&&row.checked_at)}))}</span></div>
     ${err}
+    <div class="credential-stat-pills">
+      <span class="credential-stat ok">${esc(t('credential.success'))} <strong class="mono">${esc(fmtFull(stats.success))}</strong></span>
+      <span class="credential-stat err">${esc(t('credential.failed'))} <strong class="mono">${esc(fmtFull(stats.failed))}</strong></span>
+      ${recent?`<span class="credential-stat neutral">${esc(t('credential.recent'))} ${recent}</span>`:''}
+    </div>
+    <div class="credential-health-row">
+      <div>
+        <span>${esc(t('credential.health'))}</span>
+        <div class="credential-health-track ${errLevel}" style="--ok:${stats.pct.toFixed(2)}%;--recent:${stats.recentPct.toFixed(2)}%"><i></i><b></b></div>
+      </div>
+      <strong class="mono">${esc(healthPct)}</strong>
+    </div>
+    ${fingerprints}
   </div>`;
 }
 function renderCredentialHealthSummary(rows, emptyText) {
@@ -1189,6 +1271,7 @@ async function loadQuota() {
     return quotaRowCompare(a,b);
   });
   const credentialHealthMode=phase==='credential_health' && !data.full_quota_available && items.some(isCredentialHealthRow);
+  const credentialItems=credentialHealthMode?items.slice().sort(credentialHealthCompare):[];
   const groups=credentialHealthMode?[]:quotaGroups(items);
   if(quotaPage<1) quotaPage=1;
   const moduleStatus=data.module_status||'disabled';
@@ -1196,14 +1279,14 @@ async function loadQuota() {
   const diagnostic=quotaDiagnosticText(data);
   setText('quota-state',moduleLabel);
   setText('quota-detail',[data.full_quota_available?t('obs.full_quota'):(credentialHealthMode?t('obs.credential_fallback'):phase),diagnostic].filter(Boolean).join(' / '));
-  setText('observability-summary',t('obs.summary',{phase:moduleLabel,quota:credentialHealthMode?items.length:groups.length}));
+  setText('observability-summary',t('obs.summary',{phase:moduleLabel,quota:credentialHealthMode?credentialItems.length:groups.length}));
   if(!items.length){
     const empty = moduleStatus==='disabled'?t('state.quota_disabled'):moduleStatus==='unavailable'?t('state.quota_unavailable'):moduleStatus==='unsupported'?t('state.quota_unsupported'):t('state.no_quota_data');
     renderQuotaSummary([], diagnostic?[empty,diagnostic].join(' · '):empty);
     return;
   }
   if(credentialHealthMode){
-    renderCredentialHealthSummary(items);
+    renderCredentialHealthSummary(credentialItems);
     return;
   }
   renderQuotaSummary(groups);

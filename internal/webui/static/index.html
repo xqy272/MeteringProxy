@@ -130,36 +130,6 @@
     </div>
   </section>
 
-  <!-- Quota Diagnostics -->
-  <section id="quota-diagnostics" class="card section-gap" data-layout-panel="quota-diagnostics">
-    <div class="card-head">
-      <div class="card-head-left">
-        <div class="card-title" data-i18n="panel.quota_diagnostics">Quota & Credential Diagnostics</div>
-        <div class="card-desc" id="quota-diagnostics-summary">-</div>
-      </div>
-      <button class="ctrl-btn" id="quota-refresh-diagnostics" type="button" data-i18n="action.refresh_quota">Refresh quota</button>
-    </div>
-    <div class="card-body">
-      <div class="quota-diag-grid" id="quota-diagnostics-cards"></div>
-      <div class="table-wrap quota-diag-table">
-        <table>
-          <thead><tr>
-            <th data-i18n="table.time">Time</th>
-            <th data-i18n="table.provider">Provider</th>
-            <th data-i18n="quota_diag.phase">Phase</th>
-            <th data-i18n="table.status">Status</th>
-            <th data-i18n="quota_diag.adapter_status">Adapter</th>
-            <th class="numeric" data-i18n="quota_diag.http_status">HTTP</th>
-            <th data-i18n="quota_diag.probe">Probe</th>
-            <th data-i18n="quota_diag.error">Error</th>
-            <th class="numeric" data-i18n="quota_diag.duration">Duration</th>
-          </tr></thead>
-          <tbody id="quota-diagnostics-table"><tr><td colspan="9" class="empty-state" data-i18n="state.loading">Loading...</td></tr></tbody>
-        </table>
-      </div>
-    </div>
-  </section>
-
   <!-- Images -->
   <section id="images" class="card section-gap" data-layout-panel="images">
     <div class="card-head">
@@ -333,6 +303,39 @@
               <th class="numeric" data-i18n="table.dropped_events">Dropped</th>
             </tr></thead>
             <tbody id="errors-table"><tr><td colspan="5" class="empty-state">-</td></tr></tbody>
+          </table>
+        </div>
+      </details>
+    </div>
+  </section>
+
+  <!-- Quota Diagnostics -->
+  <section id="quota-diagnostics" class="card section-gap" data-layout-panel="diagnostics">
+    <div class="card-head">
+      <div class="card-head-left">
+        <div class="card-title" data-i18n="panel.quota_diagnostics">Quota & Credential Diagnostics</div>
+        <div class="card-desc" id="quota-diagnostics-summary">-</div>
+      </div>
+      <button class="ctrl-btn" id="quota-refresh-diagnostics" type="button" data-i18n="action.refresh_quota">Refresh quota</button>
+    </div>
+    <div class="card-body">
+      <div class="quota-diag-grid" id="quota-diagnostics-cards"></div>
+      <details class="diag-details quota-diag-details">
+        <summary data-i18n="quota_diag.show_list">Show quota diagnostic events</summary>
+        <div class="table-wrap quota-diag-table">
+          <table>
+            <thead><tr>
+              <th data-i18n="table.time">Time</th>
+              <th data-i18n="table.provider">Provider</th>
+              <th data-i18n="quota_diag.phase">Phase</th>
+              <th data-i18n="table.status">Status</th>
+              <th data-i18n="quota_diag.adapter_status">Adapter</th>
+              <th class="numeric" data-i18n="quota_diag.http_status">HTTP</th>
+              <th data-i18n="quota_diag.probe">Probe</th>
+              <th data-i18n="quota_diag.error">Error</th>
+              <th class="numeric" data-i18n="quota_diag.duration">Duration</th>
+            </tr></thead>
+            <tbody id="quota-diagnostics-table"><tr><td colspan="9" class="empty-state" data-i18n="state.loading">Loading...</td></tr></tbody>
           </table>
         </div>
       </details>

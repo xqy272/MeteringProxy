@@ -133,6 +133,15 @@ type AuthRecentRequestBucket struct {
 	Failed  int64  `json:"failed"`
 }
 
+type authErrorDetails struct {
+	ErrorType       string
+	ErrorCode       string
+	ErrorMessage    string
+	Plan            string
+	NextRecoverAt   string
+	NextRecoverUnix int64
+}
+
 func (e *AuthFileEntry) UnmarshalJSON(data []byte) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -174,6 +183,14 @@ func (e *AuthFileEntry) UnmarshalJSON(data []byte) error {
 	}
 	e.NextRetryAfter = firstString(raw, "next_retry_after", "nextRetryAfter")
 	e.NextRetryAfterUnix = firstUnixTime(raw, "next_retry_after", "nextRetryAfter")
+	inlineErr := rawErrorDetails(raw)
+	if e.Plan == "" {
+		e.Plan = inlineErr.Plan
+	}
+	if e.NextRetryAfter == "" && inlineErr.NextRecoverAt != "" {
+		e.NextRetryAfter = inlineErr.NextRecoverAt
+		e.NextRetryAfterUnix = inlineErr.NextRecoverUnix
+	}
 	e.QuotaExceeded, e.QuotaReason, e.QuotaNextRecoverAt, e.QuotaNextRecoverUnix = rawQuotaDetails(raw)
 	if e.NextRetryAfter == "" && e.QuotaNextRecoverAt != "" {
 		e.NextRetryAfter = e.QuotaNextRecoverAt
@@ -183,24 +200,27 @@ func (e *AuthFileEntry) UnmarshalJSON(data []byte) error {
 	e.ErrorType = rawString(raw, "error_type")
 	e.ErrorCode = rawString(raw, "error_code")
 	e.ErrorMessage = rawString(raw, "error_message")
-	errorType, errorCode, errorMessage := rawErrorDetails(raw)
 	if e.ErrorType == "" {
-		e.ErrorType = errorType
+		e.ErrorType = inlineErr.ErrorType
 	}
 	if e.ErrorCode == "" {
-		e.ErrorCode = errorCode
+		e.ErrorCode = inlineErr.ErrorCode
 	}
 	if e.ErrorMessage == "" {
-		e.ErrorMessage = errorMessage
+		e.ErrorMessage = inlineErr.ErrorMessage
+	} else if looksLikeJSONObject(e.ErrorMessage) && inlineErr.ErrorMessage != "" {
+		e.ErrorMessage = inlineErr.ErrorMessage
 	}
 	if e.ErrorClass == "" {
-		e.ErrorClass = firstNonEmpty(errorType, errorCode)
+		e.ErrorClass = firstNonEmpty(inlineErr.ErrorType, inlineErr.ErrorCode)
 	}
 	if e.ErrorClass == "" && e.QuotaExceeded {
 		e.ErrorClass = firstNonEmpty(e.QuotaReason, "quota")
 	}
 	if e.StatusMessage == "" {
-		e.StatusMessage = errorMessage
+		e.StatusMessage = inlineErr.ErrorMessage
+	} else if looksLikeJSONObject(e.StatusMessage) && inlineErr.ErrorMessage != "" {
+		e.StatusMessage = inlineErr.ErrorMessage
 	}
 	return nil
 }
@@ -397,25 +417,87 @@ func rawUnixTime(raw map[string]json.RawMessage, key string) int64 {
 	return 0
 }
 
-func rawErrorDetails(raw map[string]json.RawMessage) (errorType, errorCode, errorMessage string) {
-	for _, key := range []string{"error", "last_error"} {
+func rawErrorDetails(raw map[string]json.RawMessage) authErrorDetails {
+	for _, key := range []string{"error", "last_error", "status_message", "message", "error_message", "last_error_message"} {
 		data, ok := raw[key]
 		if !ok || len(data) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 			continue
 		}
-		var message string
-		if err := json.Unmarshal(data, &message); err == nil {
-			return "", "", strings.TrimSpace(message)
+		if details, ok := decodeAuthErrorDetails(data); ok {
+			return details
 		}
-		var obj map[string]json.RawMessage
-		if err := json.Unmarshal(data, &obj); err != nil {
-			continue
-		}
-		return firstString(obj, "type", "error_type"),
-			firstString(obj, "code", "error_code"),
-			firstString(obj, "message", "error_message", "detail")
 	}
-	return "", "", ""
+	return authErrorDetails{}
+}
+
+func decodeAuthErrorDetails(data json.RawMessage) (authErrorDetails, bool) {
+	var message string
+	if err := json.Unmarshal(data, &message); err == nil {
+		message = strings.TrimSpace(message)
+		if looksLikeJSONObject(message) {
+			if details, ok := decodeAuthErrorDetails(json.RawMessage(message)); ok {
+				return details, true
+			}
+		}
+		return authErrorDetails{ErrorMessage: message}, message != ""
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return authErrorDetails{}, false
+	}
+	if inner := rawObject(obj, "error"); inner != nil {
+		details := authErrorDetailsFromObject(inner)
+		outer := authErrorDetailsFromObject(obj)
+		if details.Plan == "" {
+			details.Plan = outer.Plan
+		}
+		if details.NextRecoverAt == "" {
+			details.NextRecoverAt = outer.NextRecoverAt
+			details.NextRecoverUnix = outer.NextRecoverUnix
+		}
+		return details, details.hasValue()
+	}
+	details := authErrorDetailsFromObject(obj)
+	return details, details.hasValue()
+}
+
+func authErrorDetailsFromObject(obj map[string]json.RawMessage) authErrorDetails {
+	nextRecoverAt, nextRecoverUnix := rawRecoverTime(obj)
+	return authErrorDetails{
+		ErrorType:       firstString(obj, "type", "error_type"),
+		ErrorCode:       firstString(obj, "code", "error_code"),
+		ErrorMessage:    firstString(obj, "message", "error_message", "detail"),
+		Plan:            firstString(obj, "plan", "plan_type", "planType"),
+		NextRecoverAt:   nextRecoverAt,
+		NextRecoverUnix: nextRecoverUnix,
+	}
+}
+
+func (d authErrorDetails) hasValue() bool {
+	return d.ErrorType != "" || d.ErrorCode != "" || d.ErrorMessage != "" || d.Plan != "" || d.NextRecoverAt != ""
+}
+
+func rawRecoverTime(raw map[string]json.RawMessage) (string, int64) {
+	if unix := firstUnixTime(raw, "next_recover_at", "nextRecoverAt", "reset_at", "resetAt", "resets_at", "resetsAt"); unix > 0 {
+		return time.Unix(normalizeUnixSeconds(unix), 0).UTC().Format(time.RFC3339), normalizeUnixSeconds(unix)
+	}
+	if seconds := firstInt64(raw, "resets_in_seconds", "reset_in_seconds", "retry_after_seconds", "retryAfterSeconds"); seconds > 0 {
+		t := time.Now().UTC().Add(time.Duration(seconds) * time.Second)
+		return t.Format(time.RFC3339), t.Unix()
+	}
+	return "", 0
+}
+
+func normalizeUnixSeconds(unix int64) int64 {
+	if unix > 100000000000 {
+		return unix / 1000
+	}
+	return unix
+}
+
+func looksLikeJSONObject(value string) bool {
+	value = strings.TrimSpace(value)
+	return strings.HasPrefix(value, "{") && strings.HasSuffix(value, "}")
 }
 
 func rawQuotaDetails(raw map[string]json.RawMessage) (exceeded bool, reason, nextRecoverAt string, nextRecoverUnix int64) {

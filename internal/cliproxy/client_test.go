@@ -112,6 +112,49 @@ func TestFetchAuthFilesDecodesCredentialErrorObject(t *testing.T) {
 	if entry.StatusMessage != "The usage limit has been reached" || entry.ErrorMessage != "The usage limit has been reached" {
 		t.Fatalf("entry error message = %#v", entry)
 	}
+	if entry.NextRetryAfterUnix <= time.Now().Unix() {
+		t.Fatalf("NextRetryAfterUnix = %d, want future retry time", entry.NextRetryAfterUnix)
+	}
+}
+
+func TestFetchAuthFilesDecodesStringifiedErrorEnvelope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"files":[{
+			"id":"codex-1",
+			"type":"codex",
+			"provider":"codex",
+			"status":"error",
+			"status_message":"{\"error\":{\"type\":\"usage_limit_reached\",\"message\":\"The usage limit has been reached\",\"plan_type\":\"plus\",\"resets_at\":1779492770}}"
+		}]}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(CLIProxyConfig{
+		BaseURL: server.URL + "/v0/management",
+		Key:     "secret",
+		Timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	resp, err := client.FetchAuthFiles()
+	if err != nil {
+		t.Fatalf("FetchAuthFiles: %v", err)
+	}
+	entry := resp.AuthFiles[0]
+	if entry.ErrorType != "usage_limit_reached" || entry.ErrorMessage != "The usage limit has been reached" {
+		t.Fatalf("entry error fields = %#v", entry)
+	}
+	if entry.StatusMessage != "The usage limit has been reached" {
+		t.Fatalf("StatusMessage = %q, want readable message", entry.StatusMessage)
+	}
+	if entry.Plan != "plus" {
+		t.Fatalf("Plan = %q, want plus", entry.Plan)
+	}
+	if entry.NextRetryAfterUnix != 1779492770 {
+		t.Fatalf("NextRetryAfterUnix = %d, want resets_at", entry.NextRetryAfterUnix)
+	}
 }
 
 func TestFetchAuthFilesDecodesRuntimeHealthFields(t *testing.T) {
