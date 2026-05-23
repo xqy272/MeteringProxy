@@ -558,6 +558,11 @@ func TestCredentialHealthPersistsRuntimeDiagnostics(t *testing.T) {
 		FailedCount:        2,
 		RecentSuccessCount: 3,
 		RecentFailedCount:  1,
+		RecentRequests: []CredentialRecentRequestBucket{{
+			Time:    "17:30-17:40",
+			Success: 3,
+			Failed:  1,
+		}},
 		NextRetryAfter:     "2026-05-21T18:00:00Z",
 		NextRetryAfterUnix: 1779386400,
 		CheckedAt:          now.Format(time.RFC3339),
@@ -580,6 +585,9 @@ func TestCredentialHealthPersistsRuntimeDiagnostics(t *testing.T) {
 	row := rows[0]
 	if row.Plan != "plus" || row.StatusMessage != "quota exhausted" || row.RecentSuccessCount != 3 || row.RecentFailedCount != 1 {
 		t.Fatalf("runtime fields = %+v", row)
+	}
+	if len(row.RecentRequests) != 1 || row.RecentRequests[0].Time != "17:30-17:40" || row.RecentRequests[0].Success != 3 || row.RecentRequests[0].Failed != 1 {
+		t.Fatalf("recent requests = %+v", row.RecentRequests)
 	}
 	if row.DisplayLabel != "Codex Plus" || row.IdentityHint != "codex@example.com" {
 		t.Fatalf("identity fields = %+v", row)

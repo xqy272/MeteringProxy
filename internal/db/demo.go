@@ -200,47 +200,114 @@ func seedCredentialQuotaDemo(database *DB, now time.Time) error {
 	weeklyReset := now.Add(4*24*time.Hour + 6*time.Hour)
 	weeklyResetStr := weeklyReset.Format(time.RFC3339)
 	weeklyResetUnix := weeklyReset.Unix()
+	makeRecent := func() []CredentialRecentRequestBucket {
+		rows := make([]CredentialRecentRequestBucket, 20)
+		start := now.Add(-200 * time.Minute)
+		for i := range rows {
+			bucketStart := start.Add(time.Duration(i) * 10 * time.Minute)
+			bucketEnd := bucketStart.Add(10 * time.Minute)
+			rows[i].Time = bucketStart.Format("15:04") + " - " + bucketEnd.Format("15:04")
+		}
+		return rows
+	}
+	sumRecent := func(rows []CredentialRecentRequestBucket) (int64, int64) {
+		var success, failed int64
+		for _, row := range rows {
+			success += row.Success
+			failed += row.Failed
+		}
+		return success, failed
+	}
+	codexPrimaryRecent := makeRecent()
+	codexPrimaryRecent[17].Success = 26
+	codexPrimaryRecent[18].Success = 37
+	codexPrimaryRecent[18].Failed = 1
+	codexPrimaryRecentSuccess, codexPrimaryRecentFailed := sumRecent(codexPrimaryRecent)
+	codexSpareRecent := makeRecent()
+	codexSpareRecent[15].Success = 18
+	codexSpareRecent[16].Failed = 8
+	codexSpareRecent[17].Failed = 11
+	codexSpareRecentSuccess, codexSpareRecentFailed := sumRecent(codexSpareRecent)
+	claudeRecent := makeRecent()
+	claudeRecent[18].Success = 40
+	claudeRecent[18].Failed = 1
+	claudeRecentSuccess, claudeRecentFailed := sumRecent(claudeRecent)
+	antigravityRecent := makeRecent()
+	antigravityRecent[16].Success = 31
+	antigravityRecent[17].Success = 24
+	antigravityRecent[18].Success = 18
+	antigravityRecent[18].Failed = 4
+	antigravityRecentSuccess, antigravityRecentFailed := sumRecent(antigravityRecent)
 
 	credentials := []CredentialHealthRow{
 		{
-			Provider:       "codex",
-			CredentialHash: "demo_cred_codex_primary",
-			AuthIndexHash:  "demo_auth_codex_0",
-			LabelHash:      "demo_label_codex_primary",
-			DisplayLabel:   "Codex Primary",
-			IdentityHint:   "codex-primary@example.com",
-			Status:         "ready",
-			SuccessCount:   184,
-			FailedCount:    3,
-			CheckedAt:      checkedAt,
-			CheckedAtUnix:  checkedAtUnix,
+			Provider:           "codex",
+			CredentialHash:     "demo_cred_codex_primary",
+			AuthIndexHash:      "demo_auth_codex_0",
+			LabelHash:          "demo_label_codex_primary",
+			DisplayLabel:       "Codex Primary",
+			IdentityHint:       "codex-primary@example.com",
+			Status:             "ready",
+			Plan:               "plus",
+			SuccessCount:       184,
+			FailedCount:        3,
+			RecentSuccessCount: codexPrimaryRecentSuccess,
+			RecentFailedCount:  codexPrimaryRecentFailed,
+			RecentRequests:     codexPrimaryRecent,
+			CheckedAt:          checkedAt,
+			CheckedAtUnix:      checkedAtUnix,
 		},
 		{
-			Provider:       "codex",
-			CredentialHash: "demo_cred_codex_spare",
-			AuthIndexHash:  "demo_auth_codex_1",
-			LabelHash:      "demo_label_codex_spare",
-			DisplayLabel:   "Codex Spare",
-			IdentityHint:   "codex-spare@example.com",
-			Status:         "unavailable",
-			SuccessCount:   42,
-			FailedCount:    19,
-			CheckedAt:      checkedAt,
-			CheckedAtUnix:  checkedAtUnix,
-			ErrorClass:     "auth_failed",
+			Provider:           "codex",
+			CredentialHash:     "demo_cred_codex_spare",
+			AuthIndexHash:      "demo_auth_codex_1",
+			LabelHash:          "demo_label_codex_spare",
+			DisplayLabel:       "Codex Spare",
+			IdentityHint:       "codex-spare@example.com",
+			Status:             "unavailable",
+			Plan:               "plus",
+			SuccessCount:       42,
+			FailedCount:        19,
+			RecentSuccessCount: codexSpareRecentSuccess,
+			RecentFailedCount:  codexSpareRecentFailed,
+			RecentRequests:     codexSpareRecent,
+			CheckedAt:          checkedAt,
+			CheckedAtUnix:      checkedAtUnix,
+			ErrorClass:         "auth_failed",
 		},
 		{
-			Provider:       "claude",
-			CredentialHash: "demo_cred_claude_team",
-			AuthIndexHash:  "demo_auth_claude_0",
-			LabelHash:      "demo_label_claude_team",
-			DisplayLabel:   "Claude Team",
-			IdentityHint:   "claude-team@example.com",
-			Status:         "ready",
-			SuccessCount:   91,
-			FailedCount:    1,
-			CheckedAt:      checkedAt,
-			CheckedAtUnix:  checkedAtUnix,
+			Provider:           "claude",
+			CredentialHash:     "demo_cred_claude_team",
+			AuthIndexHash:      "demo_auth_claude_0",
+			LabelHash:          "demo_label_claude_team",
+			DisplayLabel:       "Claude Team",
+			IdentityHint:       "claude-team@example.com",
+			Status:             "ready",
+			Plan:               "max",
+			SuccessCount:       91,
+			FailedCount:        1,
+			RecentSuccessCount: claudeRecentSuccess,
+			RecentFailedCount:  claudeRecentFailed,
+			RecentRequests:     claudeRecent,
+			CheckedAt:          checkedAt,
+			CheckedAtUnix:      checkedAtUnix,
+		},
+		{
+			Provider:           "antigravity",
+			CredentialHash:     "demo_cred_antigravity_workspace",
+			AuthIndexHash:      "demo_auth_antigravity_0",
+			LabelHash:          "demo_label_antigravity_workspace",
+			DisplayLabel:       "Antigravity Workspace",
+			IdentityHint:       "workspace@example.com",
+			Status:             "ready",
+			Plan:               "google-project",
+			SuccessCount:       73,
+			FailedCount:        4,
+			RecentSuccessCount: antigravityRecentSuccess,
+			RecentFailedCount:  antigravityRecentFailed,
+			RecentRequests:     antigravityRecent,
+			CheckedAt:          checkedAt,
+			CheckedAtUnix:      checkedAtUnix,
 		},
 		{
 			Provider:       "kimi",
@@ -270,7 +337,7 @@ func seedCredentialQuotaDemo(database *DB, now time.Time) error {
 			WindowKey:       "5h",
 			CheckedAt:       checkedAt,
 			CheckedAtUnix:   checkedAtUnix,
-			Plan:            "team",
+			Plan:            "plus",
 			LimitAmount:     180,
 			RemainingAmount: 64,
 			UsedAmount:      116,
@@ -287,7 +354,7 @@ func seedCredentialQuotaDemo(database *DB, now time.Time) error {
 			WindowKey:       "weekly",
 			CheckedAt:       checkedAt,
 			CheckedAtUnix:   checkedAtUnix,
-			Plan:            "team",
+			Plan:            "plus",
 			LimitAmount:     900,
 			RemainingAmount: 514,
 			UsedAmount:      386,
@@ -304,7 +371,7 @@ func seedCredentialQuotaDemo(database *DB, now time.Time) error {
 			WindowKey:       "5h",
 			CheckedAt:       checkedAt,
 			CheckedAtUnix:   checkedAtUnix,
-			Plan:            "team",
+			Plan:            "plus",
 			LimitAmount:     180,
 			RemainingAmount: 0,
 			UsedAmount:      180,
@@ -333,6 +400,40 @@ func seedCredentialQuotaDemo(database *DB, now time.Time) error {
 			QuotaSupported:  1,
 			AdapterStatus:   "available",
 			ErrorClass:      "quota_low",
+		},
+		{
+			Provider:        "antigravity",
+			CredentialHash:  "demo_cred_antigravity_workspace",
+			WindowKey:       "project_daily",
+			CheckedAt:       checkedAt,
+			CheckedAtUnix:   checkedAtUnix,
+			Plan:            "google-project",
+			LimitAmount:     1000,
+			RemainingAmount: 720,
+			UsedAmount:      280,
+			Unit:            "requests",
+			ResetAt:         now.Add(11 * time.Hour).Format(time.RFC3339),
+			ResetAtUnix:     now.Add(11 * time.Hour).Unix(),
+			Status:          "ok",
+			QuotaSupported:  1,
+			AdapterStatus:   "available",
+		},
+		{
+			Provider:        "antigravity",
+			CredentialHash:  "demo_cred_antigravity_workspace",
+			WindowKey:       "model_rate",
+			CheckedAt:       checkedAt,
+			CheckedAtUnix:   checkedAtUnix,
+			Plan:            "google-project",
+			LimitAmount:     60,
+			RemainingAmount: 42,
+			UsedAmount:      18,
+			Unit:            "rpm",
+			ResetAt:         now.Add(42 * time.Minute).Format(time.RFC3339),
+			ResetAtUnix:     now.Add(42 * time.Minute).Unix(),
+			Status:          "ok",
+			QuotaSupported:  1,
+			AdapterStatus:   "available",
 		},
 		{
 			Provider:        "claude",

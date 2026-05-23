@@ -128,6 +128,7 @@ func (p *Poller) poll() {
 			FailedCount:        af.FailedCount,
 			RecentSuccessCount: af.RecentSuccessCount,
 			RecentFailedCount:  af.RecentFailedCount,
+			RecentRequests:     credentialRecentRequests(af.RecentRequests),
 			NextRetryAfter:     af.NextRetryAfter,
 			NextRetryAfterUnix: af.NextRetryAfterUnix,
 			CheckedAt:          nowStr,
@@ -147,6 +148,21 @@ func (p *Poller) poll() {
 	p.cache = rows
 	p.lastAt = now
 	p.mu.Unlock()
+}
+
+func credentialRecentRequests(rows []cliproxy.AuthRecentRequestBucket) []db.CredentialRecentRequestBucket {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]db.CredentialRecentRequestBucket, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, db.CredentialRecentRequestBucket{
+			Time:    row.Time,
+			Success: row.Success,
+			Failed:  row.Failed,
+		})
+	}
+	return out
 }
 
 func normalizeCredentialStatus(af cliproxy.AuthFileEntry) string {

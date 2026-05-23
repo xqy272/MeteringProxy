@@ -825,6 +825,7 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
 			"checked_at":           formatRFC3339OrEmpty(checkedAt),
 			"providers":            providers,
 			"items":                quotaRows,
+			"credential_items":     credRows,
 			"diagnostics":          diagnostics,
 		}
 		writeJSON(w, resp)
@@ -879,6 +880,7 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
 			"checked_at":           formatRFC3339OrEmpty(credTime),
 			"providers":            providers,
 			"items":                credRows,
+			"quota_items":          quotaRows,
 			"diagnostics":          diagnostics,
 		}
 		writeJSON(w, resp)

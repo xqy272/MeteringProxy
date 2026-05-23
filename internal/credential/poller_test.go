@@ -241,6 +241,9 @@ func TestPollStoresCPARuntimeHealthFields(t *testing.T) {
 	if row.RecentSuccessCount != 4 || row.RecentFailedCount != 1 || row.NextRetryAfterUnix != 1779386400 {
 		t.Fatalf("recent/retry fields = %#v", row)
 	}
+	if len(row.RecentRequests) != 1 || row.RecentRequests[0].Time != "17:30-17:40" || row.RecentRequests[0].Success != 4 || row.RecentRequests[0].Failed != 1 {
+		t.Fatalf("recent requests = %#v", row.RecentRequests)
+	}
 	if row.ErrorType != "server_error" || row.ErrorCode != "bad_gateway" || row.ErrorMessage != "upstream failed" {
 		t.Fatalf("error details = %#v", row)
 	}

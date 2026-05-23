@@ -161,6 +161,13 @@ function fmtPct(v,total) { v=Number(v||0);total=Number(total||0); return total<=
 function fmtLat(ms) { ms=Number(ms||0); if(ms<=0)return'-'; if(ms<1000)return ms+'ms'; return(ms/1000).toFixed(1)+'s'; }
 function fmtTime(v) { if(!v)return'-'; const d=new Date(v); return isNaN(d)?v:d.toLocaleString(locale()); }
 function fmtShort(v) { if(!v)return'-'; const d=new Date(v); return isNaN(d)?v:d.toLocaleString(locale(),{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}); }
+function fmtMDHM(v) {
+  if(!v)return'';
+  const d=new Date(v);
+  if(isNaN(d))return String(v);
+  const p=n=>String(n).padStart(2,'0');
+  return `${p(d.getMonth()+1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 function shortHash(h) { return h ? String(h).slice(0,10)+'...' : '-'; }
 function quotaCredentialLabel(value) {
   const s=String(value||'');
@@ -248,6 +255,36 @@ function quotaWindowLabel(key) {
   if(k.includes('month')) return t('quota.window_monthly');
   return raw || '-';
 }
+function providerKey(provider) {
+  return String(provider||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'_') || 'default';
+}
+function providerInitial(provider) {
+  const raw=String(provider||'?').trim();
+  if(!raw) return '?';
+  const words=raw.split(/[^a-zA-Z0-9]+/).filter(Boolean);
+  if(words.length>1) return words.slice(0,2).map(w=>w[0]).join('').toUpperCase();
+  return raw.slice(0,2).toUpperCase();
+}
+function credentialProviderClass(provider) {
+  const key=providerKey(provider);
+  if(['codex','antigravity','claude','kimi'].includes(key)) return key;
+  return 'default';
+}
+function credentialProviderName(provider) {
+  const key='credential.provider.'+providerKey(provider);
+  const label=t(key);
+  return label===key ? (provider||'-') : label;
+}
+function quotaWindowLabelForProvider(provider, key) {
+  const raw=String(key||'').trim();
+  const k=raw.toLowerCase();
+  if(providerKey(provider)==='antigravity'){
+    if(k.includes('project')) return t('quota.window_project');
+    if(k.includes('model')) return t('quota.window_model');
+    if(k.includes('minute')||k==='rpm'||k==='tpm') return t('quota.window_rate');
+  }
+  return quotaWindowLabel(raw);
+}
 function quotaResetText(reset) {
   return reset ? t('quota.resets_at',{time:fmtShort(reset)}) : t('quota.no_reset');
 }
@@ -325,6 +362,8 @@ function credentialIdentity(row) {
   return (row&&row.credential_hash)||(row&&row.auth_index_hash)||(row&&row.label_hash)||'';
 }
 function credentialDisplayName(row) {
+  const identity=String(row&&row.identity_hint||'').trim();
+  if(identity.includes('@')) return identity;
   return (row&&row.display_label)||(row&&row.identity_hint)||(row&&row.provider)||'-';
 }
 function credentialStatusLabel(status) {
@@ -376,6 +415,68 @@ function credentialDiagnostic(row) {
   const rawTitle=[row&&row.error_class,row&&row.error_type,row&&row.error_code,message,resetAt&&quotaResetText(resetAt)].filter(Boolean).join(' / ');
   return { label, message, resetAt, plan, title: rawTitle };
 }
+function titleCaseValue(value) {
+  const raw=String(value||'').replace(/[_-]+/g,' ').trim();
+  if(!raw) return '';
+  return raw.replace(/\b([a-z])([a-z0-9]*)/gi,(_,a,b)=>a.toUpperCase()+b.toLowerCase());
+}
+function credentialPlanFromQuotaRows(rows) {
+  const row=(rows||[]).find(r=>r&&r.plan&&r.plan!=='-');
+  return row ? row.plan : '';
+}
+function credentialPlanBadgeHTML(plan, provider) {
+  const raw=String(plan||'').trim();
+  if(!raw) return '';
+  const cls=raw.toLowerCase().replace(/[^a-z0-9]+/g,'-') || 'unknown';
+  return `<span class="credential-plan-badge plan-${esc(cls)} provider-${esc(credentialProviderClass(provider))}" title="${esc(t('credential.plan'))}: ${esc(raw)}">
+    <span>${esc(t('credential.plan'))}</span><strong>${esc(titleCaseValue(raw))}</strong>
+  </span>`;
+}
+function credentialQuotaTitle(provider) {
+  const key='credential.quota_title.'+providerKey(provider);
+  const label=t(key);
+  return label===key ? t('credential.quota_title.default') : label;
+}
+function credentialQuotaEmptyText(row, diag) {
+  const provider=providerKey(row&&row.provider);
+  const status=String(row&&row.status||'').toLowerCase();
+  const err=String(row&&row.error_class||'').toLowerCase();
+  if((diag&&diag.resetAt)||err.includes('quota')) return t('credential.quota_limited_hint');
+  if(status==='disabled') return t('credential.quota_disabled_hint');
+  if(status==='unavailable'||status==='error') return t('credential.quota_unavailable_hint');
+  const key='credential.quota_empty.'+provider;
+  const label=t(key);
+  return label===key ? t('credential.no_quota_snapshot') : label;
+}
+function credentialQuotaRowsFor(row, quotaRows) {
+  const provider=String(row&&row.provider||'');
+  const credential=credentialIdentity(row);
+  const alt=new Set([credential,row&&row.auth_index_hash,row&&row.label_hash].filter(Boolean));
+  return (quotaRows||[]).filter(q=>{
+    if(provider && q.provider && String(q.provider)!==provider) return false;
+    return alt.has(q.credential_hash||'') || alt.has(q.auth_index_hash||'') || alt.has(q.label_hash||'');
+  }).slice().sort(quotaRowCompare);
+}
+function credentialQuotaSectionHTML(row, quotaRows, diag) {
+  const provider=row&&row.provider||'';
+  const rows=credentialQuotaRowsFor(row, quotaRows);
+  const title=credentialQuotaTitle(provider);
+  if(rows.length){
+    return `<div class="credential-quota-section provider-${esc(credentialProviderClass(provider))}">
+      <div class="credential-quota-head"><span>${esc(title)}</span></div>
+      <div class="credential-quota-windows">${rows.map(q=>quotaWindowItemHTML(q,true,provider)).join('')}</div>
+    </div>`;
+  }
+  const qClass=quotaStatusClass((row&&row.status)||'unknown');
+  const retry=(diag&&diag.resetAt)?`<div class="credential-quota-retry">${esc(t('credential.next_retry'))}: <strong>${esc(fmtShort(diag.resetAt))}</strong></div>`:'';
+  return `<div class="credential-quota-section provider-${esc(credentialProviderClass(provider))}">
+    <div class="credential-quota-head"><span>${esc(title)}</span></div>
+    <div class="credential-quota-empty ${qClass}">
+      <span>${esc(credentialQuotaEmptyText(row,diag))}</span>
+      ${retry}
+    </div>
+  </div>`;
+}
 function credentialHealthStats(row) {
   const success=Number(row&&row.success_count||0);
   const failed=Number(row&&row.failed_count||0);
@@ -387,65 +488,98 @@ function credentialHealthStats(row) {
   const recentPct=recentTotal>0?Math.max(0,Math.min(100,recentSuccess/recentTotal*100)):pct;
   return { success, failed, total, pct, recentSuccess, recentFailed, recentTotal, recentPct };
 }
-function credentialFingerprintsHTML(row, credential) {
-  const rows=[
-    [t('credential.auth_index'), row&&row.auth_index_hash],
-    [t('credential.label_hash'), row&&row.label_hash],
-    [t('credential.credential_hash'), credential]
-  ].filter(item=>item[1]);
-  if(!rows.length) return '';
-  return `<details class="credential-fingerprints">
-    <summary>${esc(t('credential.fingerprints'))}</summary>
-    <div class="credential-fingerprint-grid">${rows.map(item=>`<div><span>${esc(item[0])}</span><code title="${esc(item[1])}">${esc(quotaCredentialLabel(item[1]))}</code></div>`).join('')}</div>
-  </details>`;
+function credentialHealthBucketClass(bucket) {
+  const success=Number(bucket&&bucket.success||0);
+  const failed=Number(bucket&&bucket.failed||0);
+  const total=success+failed;
+  if(total<=0) return 'empty';
+  const pct=success/total*100;
+  if(pct>=95) return 'ok';
+  if(pct>=80) return 'warn';
+  return 'err';
 }
-function credentialHealthCardHTML(row) {
+function credentialHealthBucketTitle(bucket) {
+  const success=Number(bucket&&bucket.success||0);
+  const failed=Number(bucket&&bucket.failed||0);
+  const total=success+failed;
+  const pct=total>0?(success/total*100).toFixed(1)+'%':'-';
+  if(total<=0) return `${bucket&&bucket.time?bucket.time:'-'}\n${t('credential.no_requests')}`;
+  return `${bucket&&bucket.time?bucket.time:'-'}\n${t('credential.success')} ${fmtFull(success)} / ${t('credential.failed')} ${fmtFull(failed)} (${pct})`;
+}
+function credentialEmptyHealthBuckets(row) {
+  const count=20;
+  const checked=Date.parse(row&&row.checked_at||'');
+  if(!checked) return Array.from({length:count},()=>({time:'',success:0,failed:0}));
+  const span=10*60*1000;
+  return Array.from({length:count},(_,i)=>{
+    const start=new Date(checked-(count-i)*span);
+    const end=new Date(start.getTime()+span);
+    const hm=d=>`${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+    return { time:`${hm(start)} - ${hm(end)}`, success:0, failed:0 };
+  });
+}
+function credentialHealthTimelineHTML(row, stats) {
+  const realBuckets=Array.isArray(row&&row.recent_requests)?row.recent_requests:[];
+  const buckets=realBuckets.length?realBuckets:credentialEmptyHealthBuckets(row);
+  const hasRecent=realBuckets.some(bucket=>Number(bucket&&bucket.success||0)+Number(bucket&&bucket.failed||0)>0);
+  const healthPct=hasRecent&&stats.recentTotal>0?stats.recentPct.toFixed(1)+'%':'--';
+  return `<div class="credential-health-row timeline">
+    <div>
+      <span>${esc(t('credential.health'))}</span>
+      <div class="credential-health-segments" aria-label="${esc(t('credential.health'))}">
+        ${buckets.map(bucket=>`<i class="${esc(credentialHealthBucketClass(bucket))}" title="${esc(credentialHealthBucketTitle(bucket))}"></i>`).join('')}
+      </div>
+    </div>
+    <strong class="mono">${esc(healthPct)}</strong>
+  </div>`;
+}
+function credentialHealthCardHTML(row, quotaRows) {
   const status=(row&&row.status)||'-';
   const qClass=quotaStatusClass(status);
   const credential=credentialIdentity(row);
   const displayName=credentialDisplayName(row);
   const identityHint=row&&row.identity_hint&&row.identity_hint!==displayName?row.identity_hint:'';
   const diag=credentialDiagnostic(row);
+  const matchingQuotaRows=credentialQuotaRowsFor(row, quotaRows);
+  const plan=diag.plan||credentialPlanFromQuotaRows(matchingQuotaRows);
   const title=[diag.title,row&&row.checked_at&&fmtTime(row.checked_at)].filter(Boolean).join(' / ');
-  const plan=diag.plan?`<span class="credential-plan">${esc(diag.plan)}</span>`:'';
+  const planBadge=credentialPlanBadgeHTML(plan,row&&row.provider);
   const stats=credentialHealthStats(row);
-  const healthPct=stats.total>0?stats.pct.toFixed(1)+'%':'-';
-  const recent=stats.recentTotal>0?`<span>${esc(t('metric.success_failed',{success:fmtFull(stats.recentSuccess),failed:fmtFull(stats.recentFailed)}))}</span>`:'';
   const retry=diag.resetAt?`<div class="credential-reset-chip">${esc(t('credential.next_retry'))}: <strong>${esc(fmtShort(diag.resetAt))}</strong></div>`:'';
-  const fingerprints=credentialFingerprintsHTML(row, credential);
   const errLevel=qClass==='err'?'err':(qClass==='low'||qClass==='warn'?'warn':'neutral');
   const err=row&&(row.error_class||diag.message)?`<div class="credential-alert ${errLevel}" title="${esc(title)}">
       <div><strong>${esc(diag.label)}</strong>${diag.message?`<p>${esc(diag.message)}</p>`:''}</div>
       ${retry}
     </div>`:'';
-  return `<div class="quota-account credential-card ${qClass}">
+  const providerClass=credentialProviderClass(row&&row.provider);
+  const providerName=credentialProviderName(row&&row.provider);
+  const quotaSection=credentialQuotaSectionHTML(row, quotaRows, {...diag, plan});
+  const healthTimeline=credentialHealthTimelineHTML(row,stats);
+  return `<div class="quota-account credential-card provider-${esc(providerClass)} ${qClass}">
     <div class="credential-card-top">
-      <span class="credential-provider-chip">${esc((row&&row.provider)||'-')}</span>
+      <div class="credential-provider-wrap">
+        <span class="credential-provider-chip">${esc(providerName)}</span>
+        ${planBadge}
+      </div>
       <span class="badge ${statusBadgeClass(status)}" title="${esc(title)}">${esc(credentialStatusLabel(status))}</span>
     </div>
     <div class="credential-title" title="${esc(displayName)}">${esc(displayName)}</div>
-    <div class="credential-meta">${identityHint?`<span title="${esc(identityHint)}">${esc(identityHint)}</span>`:''}${plan}<span>${esc(t('credential.checked_at',{time:fmtShort(row&&row.checked_at)}))}</span></div>
-    ${err}
+    <div class="credential-meta">${identityHint?`<span title="${esc(identityHint)}">${esc(identityHint)}</span>`:''}<span>${esc(t('credential.checked_at',{time:fmtShort(row&&row.checked_at)}))}</span></div>
     <div class="credential-stat-pills">
       <span class="credential-stat ok">${esc(t('credential.success'))} <strong class="mono">${esc(fmtFull(stats.success))}</strong></span>
       <span class="credential-stat err">${esc(t('credential.failed'))} <strong class="mono">${esc(fmtFull(stats.failed))}</strong></span>
-      ${recent?`<span class="credential-stat neutral">${esc(t('credential.recent'))} ${recent}</span>`:''}
     </div>
-    <div class="credential-health-row">
-      <div>
-        <span>${esc(t('credential.health'))}</span>
-        <div class="credential-health-track ${errLevel}" style="--ok:${stats.pct.toFixed(2)}%;--recent:${stats.recentPct.toFixed(2)}%"><i></i><b></b></div>
-      </div>
-      <strong class="mono">${esc(healthPct)}</strong>
-    </div>
-    ${fingerprints}
+    ${healthTimeline}
+    ${quotaSection}
+    ${err}
   </div>`;
 }
-function renderCredentialHealthSummary(rows, emptyText) {
+function renderCredentialHealthSummary(rows, emptyText, quotaRows) {
   const el=$('quota-window-summary');
   if(!el) return;
   latestCredentialRows=Array.isArray(rows)?rows:[];
   latestQuotaGroups=[];
+  const allQuotaRows=Array.isArray(quotaRows)?quotaRows:[];
   if(!latestCredentialRows.length){
     el.innerHTML=`<div class="quota-empty-card">${esc(emptyText||t('state.no_quota_data'))}</div>`;
     return;
@@ -459,34 +593,50 @@ function renderCredentialHealthSummary(rows, emptyText) {
     <span>${esc(t('quota.page_status',{page:quotaPage,total:totalPages,count:latestCredentialRows.length}))}</span>
     <button class="ctrl-btn" type="button" data-credential-page="next" ${quotaPage>=totalPages?'disabled':''}>${esc(t('action.next_page'))}</button>
   </div>`:'';
-  el.innerHTML=visibleRows.map(credentialHealthCardHTML).join('')+pager;
+  el.innerHTML=visibleRows.map(row=>credentialHealthCardHTML(row,allQuotaRows)).join('')+pager;
   el.querySelectorAll('[data-credential-page]').forEach(btn=>btn.addEventListener('click',()=>{
     quotaPage+=btn.dataset.credentialPage==='next'?1:-1;
-    renderCredentialHealthSummary(latestCredentialRows);
+    renderCredentialHealthSummary(latestCredentialRows,undefined,allQuotaRows);
   }));
 }
-function quotaMeterHTML(row) {
+function quotaPercentText(row) {
+  const m=quotaMetric(row);
+  return m.hasQuota?`${m.pct}%`:'--';
+}
+function quotaMeterHTML(row, compact) {
   const m=quotaMetric(row);
   const qClass=quotaStatusClass((row&&row.status)||(row&&row.adapter_status));
   const unit=row&&row.unit?`<div class="quota-unit">${esc(row.unit)}</div>`:'';
   if(!m.hasQuota) return `<div class="quota-empty mono">${esc(quotaAmountLabel(row))}</div>${unit}`;
-  return `<div class="quota-meter ${qClass}" style="--pct:${m.pct}%"><span></span><strong class="mono">${esc(quotaAmountLabel(row))}</strong></div>${unit}`;
+  const label=quotaAmountLabel(row);
+  return `<div class="quota-meter ${compact?'compact':''} ${qClass}" style="--pct:${m.pct}%"><span></span>${compact?'':`<strong class="mono">${esc(label)}</strong>`}</div>${unit}`;
 }
-function quotaWindowItemHTML(row, compact) {
+function quotaWindowItemHTML(row, compact, providerOverride) {
   const status=(row&&row.status)||(row&&row.adapter_status)||'-';
   const qClass=quotaStatusClass(status);
   const window=row&&row.window_key?row.window_key:'-';
+  const provider=providerOverride||(row&&row.provider)||'';
+  const windowLabel=quotaWindowLabelForProvider(provider,window);
   const reset=quotaWindowReset(row);
-  const title=[row&&row.adapter_status,row&&row.error_class,quotaWindowLabel(window),quotaResetText(reset)].filter(Boolean).join(' / ');
+  const title=[row&&row.adapter_status,row&&row.error_class,windowLabel,quotaResetText(reset)].filter(Boolean).join(' / ');
+  if(compact){
+    return `<div class="quota-window-item compact ${qClass}">
+      <div class="quota-window-line">
+        <div class="quota-window ${qClass}">${esc(windowLabel)}</div>
+        <div class="quota-window-meta"><strong class="mono">${esc(quotaPercentText(row))}</strong>${reset?`<span>${esc(fmtMDHM(reset))}</span>`:''}</div>
+      </div>
+      ${quotaMeterHTML(row,true)}
+    </div>`;
+  }
   return `<div class="quota-window-item ${compact?'compact':''} ${qClass}">
     <div class="quota-window-line">
       <div>
-        <div class="quota-window ${qClass}">${esc(quotaWindowLabel(window))}</div>
+        <div class="quota-window ${qClass}">${esc(windowLabel)}</div>
         <div class="quota-window-sub mono">${esc(window)}</div>
       </div>
       <span class="badge ${statusBadgeClass(status)}" title="${esc(title)}">${esc(status)}</span>
     </div>
-    ${quotaMeterHTML(row)}
+    ${quotaMeterHTML(row,compact)}
     <div class="quota-window-foot">${esc(quotaResetText(reset))}</div>
   </div>`;
 }
@@ -1044,36 +1194,38 @@ function renderModelDistribution() {
   const display=rows.slice(0,5);
   const rest=rows.slice(5).reduce((s,r)=>s+r._value,0);
   if(rest>0) display.push({model:t('model.other'),_value:rest,cost_known:true});
-  chart.innerHTML=pieSvg(display,total,meta);
+  chart.innerHTML=donutSvg(display,total,meta);
+  attachTT(chart);
   list.innerHTML=display.map((r,i)=>{
-    const share=r._value/total*100, color=modelColors[i%modelColors.length];
+    const color=modelColors[i%modelColors.length];
     return `<div class="dist-row" title="${esc(modelName(r.model))}">
       <span class="dist-swatch" style="--color:${color}"></span>
       <span class="dist-name">${esc(modelName(r.model))}</span>
-      <span class="dist-value mono">${esc(meta.fmtFull(r._value))}</span>
-      <span class="dist-share mono">${share.toFixed(1)}%</span>
     </div>`;
   }).join('')+(meta.mode==='cost'&&currentModels.some(r=>!r.cost_known)?`<div class="dist-note">${esc(t('model.unpriced_excluded'))}</div>`:'');
 }
 
-function pieSvg(rows,total,meta) {
-  const cx=160, cy=160, r=110, c=2*Math.PI*r;
+function donutTooltip(row,share,meta) {
+  return `<div class="tt-title"><span>${esc(modelName(row.model))}</span><small>${esc(share.toFixed(1))}%</small></div>
+    <div class="tt-row"><span><i class="tt-dot cost"></i>${esc(meta.label)}</span><strong>${esc(meta.fmtFull(row._value))}</strong></div>`;
+}
+function donutSvg(rows,total,meta) {
+  const cx=180, cy=180, r=116, c=2*Math.PI*r;
   let offset=0;
   const rings=rows.map((row,i)=>{
+    const share=row._value/total*100;
     const len=c*(row._value/total);
-    const gap=rows.length>1?2:0;
+    const gap=rows.length>1?3.2:0;
     const dash=Math.max(0,len-gap);
-    const ring=`<circle class="distribution-slice" cx="${cx}" cy="${cy}" r="${r}" stroke="${modelColors[i%modelColors.length]}" stroke-dasharray="${dash.toFixed(2)} ${(c-dash).toFixed(2)}" stroke-dashoffset="${(-offset).toFixed(2)}"/>`;
+    const ring=`<circle class="distribution-slice chart-hover-group" tabindex="0" cx="${cx}" cy="${cy}" r="${r}" stroke="${modelColors[i%modelColors.length]}" stroke-dasharray="${dash.toFixed(2)} ${(c-dash).toFixed(2)}" stroke-dashoffset="${(-offset).toFixed(2)}" data-tooltip="${esc(donutTooltip(row,share,meta))}"/>`;
     offset+=len;
     return ring;
   }).join('');
-  return `<svg viewBox="0 0 320 320" role="img" aria-label="${esc(t('usage.distribution'))}">
+  return `<svg viewBox="0 0 360 360" role="img" aria-label="${esc(t('usage.distribution'))}">
     <g transform="rotate(-90 ${cx} ${cy})">
       <circle class="distribution-ring-track" cx="${cx}" cy="${cy}" r="${r}"/>
       ${rings}
     </g>
-    <text class="distribution-center-value" x="${cx}" y="${cy-2}" text-anchor="middle">${esc(meta.fmtFull(total))}</text>
-    <text class="distribution-center-label" x="${cx}" y="${cy+20}" text-anchor="middle">${esc(meta.label)}</text>
   </svg>`;
 }
 
@@ -1270,23 +1422,25 @@ async function loadQuota() {
     if(ac) return ac;
     return quotaRowCompare(a,b);
   });
+  const quotaItems=(Array.isArray(data.quota_items)?data.quota_items:(items.some(isCredentialHealthRow)?[]:items)).slice().sort(quotaRowCompare);
+  const credentialRowsFromAPI=Array.isArray(data.credential_items)?data.credential_items:[];
   const credentialHealthMode=phase==='credential_health' && !data.full_quota_available && items.some(isCredentialHealthRow);
-  const credentialItems=credentialHealthMode?items.slice().sort(credentialHealthCompare):[];
-  const groups=credentialHealthMode?[]:quotaGroups(items);
+  const credentialItems=(credentialRowsFromAPI.length?credentialRowsFromAPI:(credentialHealthMode?items:[])).slice().sort(credentialHealthCompare);
+  const groups=quotaGroups(quotaItems);
   if(quotaPage<1) quotaPage=1;
   const moduleStatus=data.module_status||'disabled';
   const moduleLabel=moduleStatusLabel(moduleStatus);
   const diagnostic=quotaDiagnosticText(data);
   setText('quota-state',moduleLabel);
   setText('quota-detail',[data.full_quota_available?t('obs.full_quota'):(credentialHealthMode?t('obs.credential_fallback'):phase),diagnostic].filter(Boolean).join(' / '));
-  setText('observability-summary',t('obs.summary',{phase:moduleLabel,quota:credentialHealthMode?credentialItems.length:groups.length}));
+  setText('observability-summary',t('obs.summary',{phase:moduleLabel,quota:credentialItems.length||groups.length}));
   if(!items.length){
     const empty = moduleStatus==='disabled'?t('state.quota_disabled'):moduleStatus==='unavailable'?t('state.quota_unavailable'):moduleStatus==='unsupported'?t('state.quota_unsupported'):t('state.no_quota_data');
     renderQuotaSummary([], diagnostic?[empty,diagnostic].join(' · '):empty);
     return;
   }
-  if(credentialHealthMode){
-    renderCredentialHealthSummary(credentialItems);
+  if(credentialItems.length){
+    renderCredentialHealthSummary(credentialItems,undefined,quotaItems);
     return;
   }
   renderQuotaSummary(groups);

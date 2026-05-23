@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -307,27 +308,34 @@ type SideUsageEvent struct {
 }
 
 type CredentialHealthRow struct {
-	Provider           string `json:"provider"`
-	CredentialHash     string `json:"credential_hash"`
-	AuthIndexHash      string `json:"auth_index_hash"`
-	LabelHash          string `json:"label_hash"`
-	DisplayLabel       string `json:"display_label"`
-	IdentityHint       string `json:"identity_hint"`
-	Status             string `json:"status"`
-	StatusMessage      string `json:"status_message"`
-	Plan               string `json:"plan"`
-	SuccessCount       int64  `json:"success_count"`
-	FailedCount        int64  `json:"failed_count"`
-	RecentSuccessCount int64  `json:"recent_success_count"`
-	RecentFailedCount  int64  `json:"recent_failed_count"`
-	NextRetryAfter     string `json:"next_retry_after"`
-	NextRetryAfterUnix int64  `json:"next_retry_after_unix"`
-	CheckedAt          string `json:"checked_at"`
-	CheckedAtUnix      int64  `json:"checked_at_unix"`
-	ErrorClass         string `json:"error_class"`
-	ErrorType          string `json:"error_type"`
-	ErrorCode          string `json:"error_code"`
-	ErrorMessage       string `json:"error_message"`
+	Provider           string                          `json:"provider"`
+	CredentialHash     string                          `json:"credential_hash"`
+	AuthIndexHash      string                          `json:"auth_index_hash"`
+	LabelHash          string                          `json:"label_hash"`
+	DisplayLabel       string                          `json:"display_label"`
+	IdentityHint       string                          `json:"identity_hint"`
+	Status             string                          `json:"status"`
+	StatusMessage      string                          `json:"status_message"`
+	Plan               string                          `json:"plan"`
+	SuccessCount       int64                           `json:"success_count"`
+	FailedCount        int64                           `json:"failed_count"`
+	RecentSuccessCount int64                           `json:"recent_success_count"`
+	RecentFailedCount  int64                           `json:"recent_failed_count"`
+	RecentRequests     []CredentialRecentRequestBucket `json:"recent_requests,omitempty"`
+	NextRetryAfter     string                          `json:"next_retry_after"`
+	NextRetryAfterUnix int64                           `json:"next_retry_after_unix"`
+	CheckedAt          string                          `json:"checked_at"`
+	CheckedAtUnix      int64                           `json:"checked_at_unix"`
+	ErrorClass         string                          `json:"error_class"`
+	ErrorType          string                          `json:"error_type"`
+	ErrorCode          string                          `json:"error_code"`
+	ErrorMessage       string                          `json:"error_message"`
+}
+
+type CredentialRecentRequestBucket struct {
+	Time    string `json:"time"`
+	Success int64  `json:"success"`
+	Failed  int64  `json:"failed"`
 }
 
 type QuotaCurrentRow struct {
@@ -643,6 +651,7 @@ func createTablesV6(sqlDB *sql.DB) error {
 			failed_count INTEGER NOT NULL DEFAULT 0,
 			recent_success_count INTEGER NOT NULL DEFAULT 0,
 			recent_failed_count INTEGER NOT NULL DEFAULT 0,
+			recent_requests_json TEXT NOT NULL DEFAULT '',
 			next_retry_after TEXT NOT NULL DEFAULT '',
 			next_retry_after_unix INTEGER NOT NULL DEFAULT 0,
 			checked_at TEXT NOT NULL,
@@ -880,6 +889,7 @@ func credentialHealthColumns() []columnSpec {
 		{"plan", "plan TEXT NOT NULL DEFAULT ''"},
 		{"recent_success_count", "recent_success_count INTEGER NOT NULL DEFAULT 0"},
 		{"recent_failed_count", "recent_failed_count INTEGER NOT NULL DEFAULT 0"},
+		{"recent_requests_json", "recent_requests_json TEXT NOT NULL DEFAULT ''"},
 		{"next_retry_after", "next_retry_after TEXT NOT NULL DEFAULT ''"},
 		{"next_retry_after_unix", "next_retry_after_unix INTEGER NOT NULL DEFAULT 0"},
 		{"error_type", "error_type TEXT NOT NULL DEFAULT ''"},
@@ -2067,11 +2077,12 @@ func (db *DB) InsertSideUsageEvent(e SideUsageEvent) (int64, error) {
 }
 
 func (db *DB) UpsertCredentialHealth(row *CredentialHealthRow) error {
+	recentRequestsJSON := marshalCredentialRecentRequests(row.RecentRequests)
 	_, err := db.sql.Exec(`
 		INSERT INTO credential_health (provider, credential_hash, auth_index_hash, label_hash, display_label, identity_hint, status, status_message, plan,
-			success_count, failed_count, recent_success_count, recent_failed_count, next_retry_after, next_retry_after_unix,
+			success_count, failed_count, recent_success_count, recent_failed_count, recent_requests_json, next_retry_after, next_retry_after_unix,
 			checked_at, checked_at_unix, error_class, error_type, error_code, error_message)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(provider, credential_hash) DO UPDATE SET
 			auth_index_hash = excluded.auth_index_hash,
 			label_hash = excluded.label_hash,
@@ -2084,6 +2095,7 @@ func (db *DB) UpsertCredentialHealth(row *CredentialHealthRow) error {
 			failed_count = excluded.failed_count,
 			recent_success_count = excluded.recent_success_count,
 			recent_failed_count = excluded.recent_failed_count,
+			recent_requests_json = excluded.recent_requests_json,
 			next_retry_after = excluded.next_retry_after,
 			next_retry_after_unix = excluded.next_retry_after_unix,
 			checked_at = excluded.checked_at,
@@ -2094,14 +2106,14 @@ func (db *DB) UpsertCredentialHealth(row *CredentialHealthRow) error {
 			error_message = excluded.error_message
 	`, row.Provider, row.CredentialHash, row.AuthIndexHash, row.LabelHash, row.DisplayLabel,
 		row.IdentityHint, row.Status, row.StatusMessage, row.Plan, row.SuccessCount, row.FailedCount, row.RecentSuccessCount, row.RecentFailedCount,
-		row.NextRetryAfter, row.NextRetryAfterUnix, row.CheckedAt, row.CheckedAtUnix,
+		recentRequestsJSON, row.NextRetryAfter, row.NextRetryAfterUnix, row.CheckedAt, row.CheckedAtUnix,
 		row.ErrorClass, row.ErrorType, row.ErrorCode, row.ErrorMessage)
 	return err
 }
 
 func (db *DB) AllCredentialHealth() ([]CredentialHealthRow, error) {
 	rows, err := db.read.Query(`SELECT provider, credential_hash, auth_index_hash, label_hash, display_label, identity_hint, status, status_message, plan,
-		success_count, failed_count, recent_success_count, recent_failed_count, next_retry_after, next_retry_after_unix,
+		success_count, failed_count, recent_success_count, recent_failed_count, recent_requests_json, next_retry_after, next_retry_after_unix,
 		checked_at, checked_at_unix, error_class, error_type, error_code, error_message
 		FROM credential_health ORDER BY provider, credential_hash`)
 	if err != nil {
@@ -2111,14 +2123,39 @@ func (db *DB) AllCredentialHealth() ([]CredentialHealthRow, error) {
 	var result []CredentialHealthRow
 	for rows.Next() {
 		var r CredentialHealthRow
+		var recentRequestsJSON string
 		if err := rows.Scan(&r.Provider, &r.CredentialHash, &r.AuthIndexHash, &r.LabelHash, &r.DisplayLabel, &r.IdentityHint, &r.Status, &r.StatusMessage, &r.Plan,
-			&r.SuccessCount, &r.FailedCount, &r.RecentSuccessCount, &r.RecentFailedCount, &r.NextRetryAfter, &r.NextRetryAfterUnix,
+			&r.SuccessCount, &r.FailedCount, &r.RecentSuccessCount, &r.RecentFailedCount, &recentRequestsJSON, &r.NextRetryAfter, &r.NextRetryAfterUnix,
 			&r.CheckedAt, &r.CheckedAtUnix, &r.ErrorClass, &r.ErrorType, &r.ErrorCode, &r.ErrorMessage); err != nil {
 			return nil, err
 		}
+		r.RecentRequests = parseCredentialRecentRequests(recentRequestsJSON)
 		result = append(result, r)
 	}
 	return result, rows.Err()
+}
+
+func marshalCredentialRecentRequests(rows []CredentialRecentRequestBucket) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(rows)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func parseCredentialRecentRequests(value string) []CredentialRecentRequestBucket {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	var rows []CredentialRecentRequestBucket
+	if err := json.Unmarshal([]byte(value), &rows); err != nil {
+		return nil
+	}
+	return rows
 }
 
 func (db *DB) UpsertQuotaCurrent(row *QuotaCurrentRow) error {
