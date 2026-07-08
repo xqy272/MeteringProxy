@@ -121,10 +121,12 @@ func TestRequestsFromDBComputesUsageConfidence(t *testing.T) {
 		{UsageSource: UsageSourceHTTPResponse, CaptureOutcome: OutcomeCaptured, InputTokens: 1},
 		{UsageSource: UsageSourceCliproxySide, CaptureOutcome: OutcomeCaptured, InputTokens: 1},
 		{SideUsageMatchStatus: "conflict", InputTokens: 1},
-		{},
+		{CaptureMode: CaptureUsageMetered, CaptureOutcome: OutcomeSkipped},
+		{CaptureMode: CaptureRequestOnly, CaptureOutcome: OutcomeCaptured},
+		{CaptureMode: CapturePassthrough, CaptureOutcome: OutcomeCaptured},
 	}
 	reports := RequestsFromDB(rows)
-	want := []string{"observed", "enriched", "conflict", "missing"}
+	want := []string{"observed", "side_channel", "conflict", "missing_usage", "request_only", "unsupported"}
 	for i := range want {
 		if reports[i].UsageConfidence != want[i] {
 			t.Fatalf("row %d UsageConfidence = %q, want %q", i, reports[i].UsageConfidence, want[i])

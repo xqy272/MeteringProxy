@@ -260,23 +260,33 @@ func RequestsFromDB(rows []db.RequestRow) []RequestReport {
 	return result
 }
 
+// usageConfidence computes a confidence label from capture fields per the
+// design (4.7 节). The states, in priority order:
+//   - conflict: HTTP and side-channel usage disagree (needs manual attention)
+//   - side_channel: usage supplemented by CPA usage queue
+//   - observed: HTTP response/stream directly captured usage
+//   - request_only: endpoint only records request facts (not complete usage)
+//   - unsupported: passthrough profile, no usage extraction attempted
+//   - missing_usage: usage-metered endpoint but usage was not captured
 func usageConfidence(r db.RequestRow) string {
 	if r.SideUsageMatchStatus == "conflict" {
 		return "conflict"
 	}
 	if r.UsageSource == UsageSourceCliproxySide {
-		return "enriched"
+		return "side_channel"
 	}
-	if r.UsageSource == UsageSourceHTTPResponse && r.CaptureOutcome == OutcomeCaptured {
-		return "observed"
+	// request_only and passthrough profiles do not produce observed usage even
+	// when capture_outcome is "captured" (the reason is request_only_profile).
+	if r.CaptureMode == CaptureRequestOnly {
+		return "request_only"
 	}
-	if r.InputTokens == 0 && r.OutputTokens == 0 && r.ReasoningTokens == 0 && r.CachedTokens == 0 && r.TotalTokens == 0 {
-		return "missing"
+	if r.CaptureMode == CapturePassthrough {
+		return "unsupported"
 	}
 	if r.CaptureOutcome == OutcomeCaptured {
 		return "observed"
 	}
-	return "unknown"
+	return "missing_usage"
 }
 
 // ErrorTimelineFromDB converts db.ErrorTimelineRow slice to domain ErrorTimelineReport slice.

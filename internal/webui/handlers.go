@@ -461,6 +461,7 @@ func (s *Server) handleModelAssets(w http.ResponseWriter, r *http.Request) {
 		if len(captureModes) > 0 {
 			captureMode = captureModes[0]
 		}
+		confidence := modelAssetConfidence(captureMode, known)
 
 		sources := []string{"requested"}
 		if known {
@@ -472,6 +473,7 @@ func (s *Server) handleModelAssets(w http.ResponseWriter, r *http.Request) {
 			Sources:          sources,
 			EndpointProfiles: profiles,
 			CaptureMode:      captureMode,
+			Confidence:       confidence,
 			RequestCount:     row.RequestCount,
 			FailedCount:      row.FailedCount,
 			TotalTokens:      row.TotalTokens,
@@ -491,6 +493,10 @@ func (s *Server) handleModelAssets(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Cost is partial if any used model is unpriced or request-only (cannot
+	// represent complete cost).
+	report.Summary.CostPartial = report.Summary.UnpricedUsedModels > 0 || report.Summary.RequestOnlyModels > 0
+
 	writeJSON(w, report)
 }
 
@@ -506,6 +512,24 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// modelAssetConfidence computes a model-level confidence label from the
+// dominant capture mode and pricing status (4.7 节).
+func modelAssetConfidence(captureMode string, priced bool) string {
+	switch captureMode {
+	case event.CaptureRequestOnly:
+		return "request_only"
+	case event.CapturePassthrough:
+		return "unsupported"
+	case event.CaptureUsageMetered:
+		if priced {
+			return "observed"
+		}
+		return "missing_usage"
+	default:
+		return "missing_usage"
+	}
 }
 
 // handlePricingStub generates a YAML pricing stub with all-zero prices for

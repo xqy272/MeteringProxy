@@ -267,6 +267,7 @@ type ModelAssetItem struct {
 	Sources          []string `json:"sources"`
 	EndpointProfiles []string `json:"endpoint_profiles"`
 	CaptureMode      string   `json:"capture_mode"`
+	Confidence       string   `json:"confidence"`
 	RequestCount     int64    `json:"request_count"`
 	FailedCount      int64    `json:"failed_count"`
 	TotalTokens      int64    `json:"total_tokens"`
@@ -281,4 +282,5 @@ type ModelAssetSummary struct {
 	UsedModels          int   `json:"used_models"`
 	UnpricedUsedModels  int   `json:"unpriced_used_models"`
 	RequestOnlyModels   int   `json:"request_only_models"`
+	CostPartial         bool  `json:"cost_partial"`
 }
