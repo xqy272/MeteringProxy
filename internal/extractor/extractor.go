@@ -564,7 +564,16 @@ func skipJSONSpace(body []byte, pos int) int {
 }
 
 // decodeJSON decodes the first JSON value from data, tolerating trailing non-JSON bytes.
+//
+// It tries json.Unmarshal first, which operates directly on the input slice and
+// avoids the Decoder's internal buffer-growth allocations (significant for large
+// non-streaming response samples). When the input contains trailing non-JSON
+// bytes after a valid top-level value, Unmarshal returns a SyntaxError and the
+// call falls back to json.Decoder, which ignores trailing data.
 func decodeJSON(data []byte, v any) error {
+	if err := json.Unmarshal(data, v); err == nil {
+		return nil
+	}
 	return json.NewDecoder(bytes.NewReader(data)).Decode(v)
 }
 
