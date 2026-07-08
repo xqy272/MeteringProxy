@@ -562,6 +562,12 @@ func migrate(sqlDB *sql.DB) error {
 			name TEXT PRIMARY KEY,
 			applied_at TEXT NOT NULL
 		);
+
+		CREATE TABLE IF NOT EXISTS db_metadata (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL DEFAULT ''
+		);
 		`
 	if _, err := sqlDB.Exec(schema); err != nil {
 		return err

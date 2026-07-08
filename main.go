@@ -71,6 +71,13 @@ func main() {
 	}
 	defer database.Close()
 
+	// Salt consistency guard (invariant #7): refuse to start if the salt file
+	// has changed but the DB already has historical data, because that would
+	// silently break all api_key_hash and client_ip_hash groupings.
+	if err := database.VerifySaltFingerprint(hasher.SaltFingerprint(), cfg.Database, cfg.SaltFile); err != nil {
+		log.Fatalf("Salt consistency check failed: %v", err)
+	}
+
 	// Check pricing file is parseable.
 	pricingData, err := pricing.Load(cfg.PricingFile)
 	if err != nil {

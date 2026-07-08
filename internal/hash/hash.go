@@ -80,6 +80,16 @@ func GenerateSalt() string {
 	return hex.EncodeToString(b)
 }
 
+// SaltFingerprint returns a stable, non-reversible fingerprint of the salt
+// bytes. It is stored in db_metadata so startup can detect a salt file change
+// that would break historical api_key_hash / client_ip_hash groupings.
+// The prefix domain-separates this fingerprint from any other SHA256 usage.
+// The salt itself is never persisted or logged.
+func (h *Hasher) SaltFingerprint() string {
+	sum := sha256.Sum256([]byte("metering-proxy-salt-fingerprint-v1:" + h.salt))
+	return hex.EncodeToString(sum[:])
+}
+
 var randRead = func(b []byte) (int, error) {
 	return rand.Read(b)
 }

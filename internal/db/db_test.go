@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -1179,5 +1180,67 @@ func TestInsertBatch_AllFieldsPopulated(t *testing.T) {
 	}
 	if r.CaptureOutcome != "captured" {
 		t.Errorf("capture_outcome = %q, want captured", r.CaptureOutcome)
+	}
+}
+
+func TestSaltFingerprint_FreshDBWritesAndPasses(t *testing.T) {
+	d := newTestDB(t)
+	fp := "abc123fresh"
+	if err := d.VerifySaltFingerprint(fp, "test.db", "test.salt"); err != nil {
+		t.Fatalf("first VerifySaltFingerprint: %v", err)
+	}
+	// Second call with same fingerprint should pass.
+	if err := d.VerifySaltFingerprint(fp, "test.db", "test.salt"); err != nil {
+		t.Fatalf("second VerifySaltFingerprint: %v", err)
+	}
+}
+
+func TestSaltFingerprint_LegacyDBBindsCurrentSalt(t *testing.T) {
+	d := newTestDB(t)
+	// Insert historical data before any fingerprint is stored.
+	insertRecord(t, d, ts(-time.Hour), "/v1/chat/completions", 200, "gpt-4o", 10, 5, 15)
+
+	fp := "legacy-fp-xyz"
+	if err := d.VerifySaltFingerprint(fp, "test.db", "test.salt"); err != nil {
+		t.Fatalf("legacy bind: %v", err)
+	}
+	// After bind, same fingerprint passes.
+	if err := d.VerifySaltFingerprint(fp, "test.db", "test.salt"); err != nil {
+		t.Fatalf("post-bind verify: %v", err)
+	}
+}
+
+func TestSaltFingerprint_MismatchWithHistoricalDataRefusesStart(t *testing.T) {
+	d := newTestDB(t)
+	insertRecord(t, d, ts(-time.Hour), "/v1/chat/completions", 200, "gpt-4o", 10, 5, 15)
+
+	original := "original-salt-fp"
+	if err := d.VerifySaltFingerprint(original, "test.db", "test.salt"); err != nil {
+		t.Fatalf("initial bind: %v", err)
+	}
+
+	// Changing the salt after data exists must refuse to start.
+	err := d.VerifySaltFingerprint("changed-salt-fp", "/path/to/usage.sqlite", "/path/to/salt")
+	if err == nil {
+		t.Fatal("expected error when salt fingerprint mismatches with historical data")
+	}
+	msg := err.Error()
+	for _, want := range []string{"salt file has changed", "/path/to/usage.sqlite", "/path/to/salt", "recovery"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error message missing %q:\n%s", want, msg)
+		}
+	}
+}
+
+func TestSaltFingerprint_MismatchOnEmptyDBStillBinds(t *testing.T) {
+	d := newTestDB(t)
+	// No data, no fingerprint. First call binds.
+	if err := d.VerifySaltFingerprint("first-fp", "test.db", "test.salt"); err != nil {
+		t.Fatalf("first bind: %v", err)
+	}
+	// Empty DB with stored fingerprint that does not match: the stored
+	// fingerprint is authoritative, so this must still fail.
+	if err := d.VerifySaltFingerprint("different-fp", "test.db", "test.salt"); err == nil {
+		t.Fatal("expected error when fingerprint mismatches stored value even on empty DB")
 	}
 }

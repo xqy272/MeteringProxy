@@ -1,7 +1,9 @@
 package db
 
 import (
+	"database/sql"
 	"fmt"
+	"log"
 	"sort"
 	"time"
 )
@@ -597,6 +599,57 @@ type GatewayCapabilityRow struct {
 	UsageMeteredCount  int64  `json:"usage_metered_count"`
 	RequestOnlyCount   int64  `json:"request_only_count"`
 	PassthroughCount   int64  `json:"passthrough_count"`
+}
+
+// VerifySaltFingerprint enforces the salt-consistency invariant (CLAUDE.md #7).
+// On a fresh DB (no request_usage data, no stored fingerprint) it binds the
+// current fingerprint. On a legacy DB (has data, no fingerprint) it performs a
+// one-time legacy bind. If a fingerprint is already stored and does not match,
+// it returns an error telling the operator how to recover. The salt itself is
+// never stored; only the non-reversible fingerprint is persisted.
+func (db *DB) VerifySaltFingerprint(fingerprint, dbPath, saltPath string) error {
+	var hasData bool
+	if err := db.read.QueryRow(`SELECT EXISTS(SELECT 1 FROM request_usage LIMIT 1)`).Scan(&hasData); err != nil {
+		return fmt.Errorf("check request_usage data: %w", err)
+	}
+
+	var stored string
+	err := db.read.QueryRow(`SELECT value FROM db_metadata WHERE key = 'salt_fingerprint'`).Scan(&stored)
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("read salt fingerprint: %w", err)
+	}
+	hasFingerprint := err == nil
+
+	if !hasFingerprint {
+		// Fresh DB or legacy bind: write the current fingerprint.
+		now := time.Now().UTC().Format(time.RFC3339)
+		if _, err := db.sql.Exec(
+			`INSERT INTO db_metadata (key, value, updated_at) VALUES ('salt_fingerprint', ?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+			fingerprint, now,
+		); err != nil {
+			return fmt.Errorf("write salt fingerprint: %w", err)
+		}
+		if hasData {
+			log.Printf("salt fingerprint: legacy DB bound to current salt file (one-time migration)")
+		}
+		return nil
+	}
+
+	if stored != fingerprint {
+		return fmt.Errorf(
+			"salt file has changed but the database already has historical data; "+
+				"changing the salt breaks all historical api_key_hash and client_ip_hash groupings.\n"+
+				"  database: %s\n"+
+				"  salt file: %s\n"+
+				"  stored fingerprint: %s\n"+
+				"  current fingerprint: %s\n"+
+				"recovery: restore the original salt file from backup (it must be backed up alongside the SQLite DB), "+
+				"or start with a fresh database if you do not need historical grouping",
+			dbPath, saltPath, stored, fingerprint,
+		)
+	}
+	return nil
 }
 
 // GatewayCapabilities aggregates request_usage by endpoint_profile for the
