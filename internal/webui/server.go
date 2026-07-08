@@ -182,6 +182,8 @@ func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleGatewayCapabilities(w, r)
 	case strings.HasSuffix(path, "/api/model-assets"):
 		s.handleModelAssets(w, r)
+	case strings.HasSuffix(path, "/api/pricing/stub"):
+		s.handlePricingStub(w, r)
 	case strings.HasSuffix(path, "/api/cpa/auth"):
 		s.handleCPAAuth(w, r)
 	case strings.HasSuffix(path, "/api/cpa/auth/refresh"):

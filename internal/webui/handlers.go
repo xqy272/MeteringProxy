@@ -8,6 +8,8 @@ import (
 
 	"ai-gateway-metering-proxy/internal/db"
 	"ai-gateway-metering-proxy/internal/event"
+
+	"gopkg.in/yaml.v3"
 )
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
@@ -504,4 +506,51 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// handlePricingStub generates a YAML pricing stub with all-zero prices for
+// models that have been used in the time range but are not yet configured in
+// pricing.yaml. It does not guess prices; the operator fills in real values.
+func (s *Server) handlePricingStub(w http.ResponseWriter, r *http.Request) {
+	since, _ := parseRange(r)
+	rows, err := s.db.ModelAssets(since)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+
+	type stubModel struct {
+		InputPer1M         float64 `yaml:"input_per_1m"`
+		CachedInputPer1M   float64 `yaml:"cached_input_per_1m"`
+		OutputPer1M        float64 `yaml:"output_per_1m"`
+		ReasoningPer1M     float64 `yaml:"reasoning_per_1m"`
+		CacheCreationPer1M float64 `yaml:"cache_creation_per_1m"`
+	}
+	stub := struct {
+		Pricing map[string]stubModel `yaml:"pricing"`
+	}{
+		Pricing: make(map[string]stubModel),
+	}
+	var unpricedCount int
+	for _, row := range rows {
+		if row.Model == "" || row.Model == "unidentified" {
+			continue
+		}
+		if _, known := s.pricing.CostWithCacheCreation(row.Model, 0, 0, 0, 0, 0); known {
+			continue
+		}
+		stub.Pricing[row.Model] = stubModel{}
+		unpricedCount++
+	}
+
+	w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
+	w.Header().Set("X-Unpriced-Model-Count", strconv.Itoa(unpricedCount))
+	if unpricedCount == 0 {
+		w.Write([]byte("# All used models in this range already have pricing configured.\n"))
+		return
+	}
+	enc := yaml.NewEncoder(w)
+	enc.SetIndent(2)
+	enc.Encode(stub)
+	enc.Close()
 }

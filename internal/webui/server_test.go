@@ -1478,3 +1478,53 @@ func TestModelAssets(t *testing.T) {
 		t.Errorf("summary request_only_models = %d, want 1", report.Summary.RequestOnlyModels)
 	}
 }
+
+func TestPricingStub(t *testing.T) {
+	s, database := newTestServer(t, "/metering")
+	s.pricing.Models["gpt-4o"] = pricing.ModelPrice{InputPer1M: 2.5, OutputPer1M: 10.0}
+	now := time.Now().UTC().Truncate(time.Second)
+
+	records := []db.UsageRecord{
+		{
+			CreatedAt: now.Add(-10 * time.Minute).Format(time.RFC3339),
+			Endpoint:  "/v1/chat/completions", Method: "POST", Status: 200,
+			EndpointProfile: "chat_completions", CaptureMode: "usage_metered",
+			ModelRequested: "gpt-4o", ModelReturned: "gpt-4o",
+			InputTokens: 100, OutputTokens: 50, TotalTokens: 150,
+		},
+		{
+			CreatedAt: now.Add(-5 * time.Minute).Format(time.RFC3339),
+			Endpoint:  "/v1/chat/completions", Method: "POST", Status: 200,
+			EndpointProfile: "chat_completions", CaptureMode: "usage_metered",
+			ModelRequested: "claude-sonnet-4-6", ModelReturned: "claude-sonnet-4-6",
+			InputTokens: 50, OutputTokens: 20, TotalTokens: 70,
+		},
+	}
+	if err := database.InsertBatch(records); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/metering/api/pricing/stub?range=24h", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/yaml") {
+		t.Errorf("Content-Type = %q, want text/yaml", ct)
+	}
+	if rec.Header().Get("X-Unpriced-Model-Count") != "1" {
+		t.Errorf("X-Unpriced-Model-Count = %q, want 1", rec.Header().Get("X-Unpriced-Model-Count"))
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "claude-sonnet-4-6") {
+		t.Errorf("stub missing claude-sonnet-4-6:\n%s", body)
+	}
+	if strings.Contains(body, "gpt-4o") {
+		t.Errorf("stub should not include already-priced gpt-4o:\n%s", body)
+	}
+	// All prices should be zero (stub does not guess prices).
+	if strings.Contains(body, ": 0") {
+		// has zero-valued entries, which is expected
+	}
+}
