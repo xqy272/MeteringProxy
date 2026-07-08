@@ -123,11 +123,12 @@ type RequestReport struct {
 }
 
 type ErrorTimelineReport struct {
-	Timestamp     string `json:"timestamp"`
-	Count         int64  `json:"count"`
-	ParseErrors   int64  `json:"parse_errors"`
-	DBErrors      int64  `json:"db_errors"`
-	DroppedEvents int64  `json:"dropped_events"`
+	Timestamp       string `json:"timestamp"`
+	Count           int64  `json:"count"`
+	ParseErrors     int64  `json:"parse_errors"`
+	DBErrors        int64  `json:"db_errors"`
+	DroppedEvents   int64  `json:"dropped_events"`
+	BaselineMissing bool   `json:"baseline_missing,omitempty"`
 }
 
 type HealthReport struct {

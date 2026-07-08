@@ -242,11 +242,12 @@ type HealthRow struct {
 }
 
 type ErrorTimelineRow struct {
-	Timestamp     string `json:"timestamp"`
-	Count         int64  `json:"count"`
-	ParseErrors   int64  `json:"parse_errors"`
-	DBErrors      int64  `json:"db_errors"`
-	DroppedEvents int64  `json:"dropped_events"`
+	Timestamp       string `json:"timestamp"`
+	Count           int64  `json:"count"`
+	ParseErrors     int64  `json:"parse_errors"`
+	DBErrors        int64  `json:"db_errors"`
+	DroppedEvents   int64  `json:"dropped_events"`
+	BaselineMissing bool   `json:"baseline_missing"`
 }
 
 type OverviewSection struct {
@@ -1930,6 +1931,7 @@ func (db *DB) ErrorTimeline(since time.Time) ([]ErrorTimelineRow, error) {
 	var result []ErrorTimelineRow
 	var prevParse, prevDB, prevDropped int64
 	havePrev := false
+	baselineMissing := false
 	for rows.Next() {
 		var timestamp string
 		var timestampUnix int64
@@ -1947,18 +1949,22 @@ func (db *DB) ErrorTimeline(since time.Time) ([]ErrorTimelineRow, error) {
 			}
 			// No baseline row exists before the query range. Seed prev from
 			// the first in-range row so the delta is zero rather than the raw
-			// cumulative value.
+			// cumulative value, and mark this bucket as baseline_missing so
+			// the UI can distinguish it from a genuine zero-delta interval.
 			prevParse = parseErrors
 			prevDB = dbErrors
 			prevDropped = droppedEvents
+			baselineMissing = true
 		}
 		r := ErrorTimelineRow{
-			Timestamp:     timestamp,
-			Count:         0,
-			ParseErrors:   positiveDelta(parseErrors, prevParse),
-			DBErrors:      positiveDelta(dbErrors, prevDB),
-			DroppedEvents: positiveDelta(droppedEvents, prevDropped),
+			Timestamp:       timestamp,
+			Count:           0,
+			ParseErrors:     positiveDelta(parseErrors, prevParse),
+			DBErrors:        positiveDelta(dbErrors, prevDB),
+			DroppedEvents:   positiveDelta(droppedEvents, prevDropped),
+			BaselineMissing: baselineMissing,
 		}
+		baselineMissing = false
 		prevParse = parseErrors
 		prevDB = dbErrors
 		prevDropped = droppedEvents

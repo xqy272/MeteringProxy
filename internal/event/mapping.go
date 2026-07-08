@@ -284,11 +284,12 @@ func ErrorTimelineFromDB(rows []db.ErrorTimelineRow) []ErrorTimelineReport {
 	result := make([]ErrorTimelineReport, len(rows))
 	for i, r := range rows {
 		result[i] = ErrorTimelineReport{
-			Timestamp:     r.Timestamp,
-			Count:         r.Count,
-			ParseErrors:   r.ParseErrors,
-			DBErrors:      r.DBErrors,
-			DroppedEvents: r.DroppedEvents,
+			Timestamp:       r.Timestamp,
+			Count:           r.Count,
+			ParseErrors:     r.ParseErrors,
+			DBErrors:        r.DBErrors,
+			DroppedEvents:   r.DroppedEvents,
+			BaselineMissing: r.BaselineMissing,
 		}
 	}
 	return result

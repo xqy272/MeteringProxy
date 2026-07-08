@@ -1017,6 +1017,59 @@ func TestErrorTimelineHandlesCounterReset(t *testing.T) {
 	}
 }
 
+func TestErrorTimelineBaselineMissingWhenNoPriorRow(t *testing.T) {
+	d := newTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// Insert only in-range rows - no baseline row before the query range.
+	if err := d.InsertHealthMetric(now.Add(-30*time.Minute).Format(time.RFC3339), 0, 5, 10, 15, 0); err != nil {
+		t.Fatalf("InsertHealthMetric: %v", err)
+	}
+
+	rows, err := d.ErrorTimeline(now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("ErrorTimeline: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected one row, got %d", len(rows))
+	}
+	if !rows[0].BaselineMissing {
+		t.Error("first row should have BaselineMissing=true when no prior baseline exists")
+	}
+	// Delta should be zero (seeded from self), not the raw cumulative value.
+	if rows[0].ParseErrors != 0 || rows[0].DBErrors != 0 || rows[0].DroppedEvents != 0 {
+		t.Errorf("first row delta = parse=%d db=%d dropped=%d, want all 0 (baseline_missing seeds self)",
+			rows[0].ParseErrors, rows[0].DBErrors, rows[0].DroppedEvents)
+	}
+}
+
+func TestErrorTimelineBaselinePresentWhenPriorRowExists(t *testing.T) {
+	d := newTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// Insert a baseline row before the range, then an in-range row.
+	if err := d.InsertHealthMetric(now.Add(-2*time.Hour).Format(time.RFC3339), 0, 1, 2, 3, 0); err != nil {
+		t.Fatalf("InsertHealthMetric baseline: %v", err)
+	}
+	if err := d.InsertHealthMetric(now.Add(-30*time.Minute).Format(time.RFC3339), 0, 4, 6, 8, 0); err != nil {
+		t.Fatalf("InsertHealthMetric in-range: %v", err)
+	}
+
+	rows, err := d.ErrorTimeline(now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("ErrorTimeline: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected one in-range row, got %d", len(rows))
+	}
+	if rows[0].BaselineMissing {
+		t.Error("first row should NOT have BaselineMissing when a prior baseline exists")
+	}
+	if rows[0].ParseErrors != 4 || rows[0].DBErrors != 5 || rows[0].DroppedEvents != 3 {
+		t.Errorf("delta = parse=%d db=%d dropped=%d, want 4/5/3", rows[0].ParseErrors, rows[0].DBErrors, rows[0].DroppedEvents)
+	}
+}
+
 func TestDBFilePermissions(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/test.sqlite"
