@@ -501,6 +501,41 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 		return
 	}
 
+	// Compressed SSE: the proxy forwards bytes transparently (invariant #3,
+	// does not strip Accept-Encoding) but cannot parse compressed bytes for
+	// usage. Skip SSE line parsing and mark the capture reason so the UI can
+	// explain "forwarded but not metered" instead of a generic missing-usage.
+	if isCompressedContentEncoding(resp.Header.Get("Content-Encoding")) {
+		metrics.AddCompressedStream(1)
+		var compressedBytes int64
+		cbuf := make([]byte, 32*1024)
+		for {
+			n, readErr := resp.Body.Read(cbuf)
+			if n > 0 {
+				compressedBytes += int64(n)
+				if _, werr := w.Write(cbuf[:n]); werr != nil {
+					finalModelRequested, finalRequestMeta := finalizeRequest()
+					p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, true,
+						clientIPHash, apiKeyHash, finalModelRequested, finalRequestMeta, nil, cr.bytesRead, compressedBytes, safeOperationalError(werr),
+						event.OutcomeSkipped, event.ReasonCompressedStreamNotMetered, nil, "", "", "", "")
+					return
+				}
+				flusher.Flush()
+			}
+			if readErr != nil {
+				errStr := ""
+				if readErr != io.EOF {
+					errStr = safeOperationalError(readErr)
+				}
+				finalModelRequested, finalRequestMeta := finalizeRequest()
+				p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, true,
+					clientIPHash, apiKeyHash, finalModelRequested, finalRequestMeta, nil, cr.bytesRead, compressedBytes, errStr,
+					event.OutcomeSkipped, event.ReasonCompressedStreamNotMetered, nil, "", "", "", "")
+				return
+			}
+		}
+	}
+
 	var lastUsage *extractor.UsageInfo
 	var totalBytes int64
 	var sseParseErrs int64
@@ -702,6 +737,15 @@ type sseEventAssembler struct {
 	data     [][]byte
 	size     int
 	overflow bool
+}
+
+// isCompressedContentEncoding reports whether the Content-Encoding header
+// value indicates a compressed transfer. "identity" and empty are uncompressed.
+func isCompressedContentEncoding(ce string) bool {
+	if ce == "" || strings.EqualFold(ce, "identity") {
+		return false
+	}
+	return true
 }
 
 func newSSEEventAssembler(maxBytes int) *sseEventAssembler {

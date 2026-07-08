@@ -145,6 +145,7 @@ const (
 	ReasonResponseIncomplete            = "response_incomplete"
 	ReasonStreamEndedWithoutCompleted   = "stream_ended_without_completed"
 	ReasonResponseErrorEvent            = "response_error_event"
+	ReasonCompressedStreamNotMetered    = "compressed_stream_not_metered"
 )
 
 // Model returned source constants.

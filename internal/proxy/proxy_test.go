@@ -1582,6 +1582,59 @@ func TestCaptureOutcome_Skipped_StreamWithoutUsage(t *testing.T) {
 	}
 }
 
+func TestCompressedSSEStreamMarkedNotMetered(t *testing.T) {
+	// Upstream returns a gzip-compressed SSE stream. The proxy must forward
+	// bytes transparently (invariant #3) but cannot parse compressed bytes
+	// for usage, so capture_reason should be compressed_stream_not_metered.
+	streamBody := "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\ndata: [DONE]\n"
+	var compressed bytes.Buffer
+	gz := gzip.NewWriter(&compressed)
+	if _, err := gz.Write([]byte(streamBody)); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	compressedBytes := compressed.Bytes()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Write(compressedBytes)
+	}))
+	defer upstream.Close()
+
+	rw := &testRW{}
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false}, config.ProxyTransportConfig{})
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"stream":true}`))
+	req.Header.Set("Accept", "text/event-stream")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	// Forwarded bytes must be unchanged (transparent forwarding).
+	if !bytes.Equal(rec.Body.Bytes(), compressedBytes) {
+		t.Fatalf("compressed stream bytes were modified: got %d bytes, want %d", rec.Body.Len(), len(compressedBytes))
+	}
+	if rec.Header().Get("Content-Encoding") != "gzip" {
+		t.Errorf("Content-Encoding = %q, want gzip", rec.Header().Get("Content-Encoding"))
+	}
+
+	if len(rw.events) == 0 {
+		t.Fatal("no event recorded")
+	}
+	ev := lastEvent(rw)
+	if ev.CaptureOutcome != event.OutcomeSkipped {
+		t.Errorf("capture_outcome = %q, want %q", ev.CaptureOutcome, event.OutcomeSkipped)
+	}
+	if ev.CaptureReason != event.ReasonCompressedStreamNotMetered {
+		t.Errorf("capture_reason = %q, want %q", ev.CaptureReason, event.ReasonCompressedStreamNotMetered)
+	}
+	if ev.ResponseBytes != int64(len(compressedBytes)) {
+		t.Errorf("response_bytes = %d, want %d", ev.ResponseBytes, len(compressedBytes))
+	}
+}
+
 func TestImageGenerationUsageIsCaptured(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

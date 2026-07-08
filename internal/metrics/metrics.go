@@ -24,6 +24,7 @@ var (
 	transportDialErr  int64
 	transportDNSErr   int64
 	transportClosed   int64
+	compressedStreams int64
 )
 
 func SetQueueDepth(v int64)    { atomic.StoreInt64(&queueDepth, v) }
@@ -52,6 +53,7 @@ func AddTransportConns(n int64)   { atomic.AddInt64(&transportConns, n) }
 func AddTransportDialErrs(n int64) { atomic.AddInt64(&transportDialErr, n) }
 func AddTransportDNSErrs(n int64)  { atomic.AddInt64(&transportDNSErr, n) }
 func AddTransportClosed(n int64)   { atomic.AddInt64(&transportClosed, n) }
+func AddCompressedStream(n int64)  { atomic.AddInt64(&compressedStreams, n) }
 
 // Handler returns an HTTP handler that serves Prometheus text metrics.
 func Handler() http.Handler {
@@ -132,4 +134,9 @@ func writePrometheus(w io.Writer) {
 	fmt.Fprintf(w, "# HELP metering_proxy_transport_dns_errors_total Total upstream DNS resolution failures\n")
 	fmt.Fprintf(w, "# TYPE metering_proxy_transport_dns_errors_total counter\n")
 	fmt.Fprintf(w, "metering_proxy_transport_dns_errors_total %d\n", tDNS)
+
+	cs := atomic.LoadInt64(&compressedStreams)
+	fmt.Fprintf(w, "# HELP metering_proxy_compressed_streams_total Total SSE streams forwarded but not metered because the response was compressed\n")
+	fmt.Fprintf(w, "# TYPE metering_proxy_compressed_streams_total counter\n")
+	fmt.Fprintf(w, "metering_proxy_compressed_streams_total %d\n", cs)
 }
