@@ -93,6 +93,11 @@ type CredentialHealthConfig struct {
 	CacheTTL            time.Duration `yaml:"cache_ttl"`
 	Timeout             time.Duration `yaml:"timeout"`
 	DiagnosticRetention time.Duration `yaml:"diagnostic_retention"`
+	// MinRefreshInterval debounces manual auth-files refresh calls. Default 30s.
+	MinRefreshInterval time.Duration `yaml:"min_refresh_interval"`
+	// RefreshMode controls background polling. "manual" (default) means
+	// refresh only on explicit POST; no startup or periodic polling.
+	RefreshMode string `yaml:"refresh_mode"`
 }
 
 type QuotaConfig struct {
@@ -325,6 +330,16 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.CLIProxyManagement.CredentialHealth.DiagnosticRetention <= 0 {
 		cfg.CLIProxyManagement.CredentialHealth.DiagnosticRetention = 72 * time.Hour
+	}
+	if cfg.CLIProxyManagement.CredentialHealth.MinRefreshInterval <= 0 {
+		cfg.CLIProxyManagement.CredentialHealth.MinRefreshInterval = 30 * time.Second
+	}
+	cfg.CLIProxyManagement.CredentialHealth.RefreshMode = strings.ToLower(strings.TrimSpace(cfg.CLIProxyManagement.CredentialHealth.RefreshMode))
+	if cfg.CLIProxyManagement.CredentialHealth.RefreshMode == "" {
+		cfg.CLIProxyManagement.CredentialHealth.RefreshMode = "manual"
+	}
+	if cfg.CLIProxyManagement.CredentialHealth.RefreshMode != "manual" && cfg.CLIProxyManagement.CredentialHealth.RefreshMode != "scheduled" {
+		return nil, fmt.Errorf("cliproxy_management.credential_health.refresh_mode must be manual or scheduled")
 	}
 	if cfg.CLIProxyManagement.Quota.CacheTTL <= 0 {
 		cfg.CLIProxyManagement.Quota.CacheTTL = 5 * time.Minute

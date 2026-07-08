@@ -1,6 +1,7 @@
 package credential
 
 import (
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -24,6 +25,13 @@ type Poller struct {
 	stopCh    chan struct{}
 	doneCh    chan struct{}
 	refreshCh chan struct{}
+
+	// refreshMu serializes manual refresh calls (singleflight). refreshInFlight
+	// prevents concurrent auth-files requests; lastRefresh gates by
+	// MinRefreshInterval so rapid WebUI clicks do not flood CPA logs.
+	refreshMu       sync.Mutex
+	refreshInFlight bool
+	lastRefresh     time.Time
 }
 
 func NewPoller(client *cliproxy.Client, database store.CredentialHealthStore, hasher *hash.Hasher, cfg config.CredentialHealthConfig) *Poller {
@@ -49,17 +57,16 @@ func (p *Poller) Stop() {
 
 func (p *Poller) loop() {
 	defer close(p.doneCh)
-	p.poll()
+	// Manual-only refresh (refresh_mode "manual", the default): do NOT poll at
+	// startup or on a periodic ticker. The loop only runs retention cleanup
+	// and serves explicit Refresh signals so startup and WebUI-open never
+	// trigger CPA auth-files requests.
 	cleanupTicker := time.NewTicker(p.cfg.DiagnosticRetention)
-	ticker := time.NewTicker(p.cfg.CacheTTL)
-	defer ticker.Stop()
 	defer cleanupTicker.Stop()
 	for {
 		select {
-		case <-ticker.C:
-			p.poll()
 		case <-p.refreshCh:
-			p.poll()
+			p.doRefresh()
 		case <-cleanupTicker.C:
 			p.cleanup()
 		case <-p.stopCh:
@@ -380,11 +387,50 @@ func (p *Poller) Snapshot() ([]db.CredentialHealthRow, time.Time) {
 	return out, p.lastAt
 }
 
+// ResetCooldown calls CPA POST /v0/management/reset-quota to clear internal
+// auth/model cooldown routing state. It is a maintenance action, NOT a
+// provider quota recovery. The reset can succeed or fail independently of the
+// provider quota snapshot state.
+func (p *Poller) ResetCooldown() error {
+	if p.client == nil {
+		return fmt.Errorf("credential client not configured")
+	}
+	return p.client.ResetQuota()
+}
+
+// Refresh triggers a manual auth-files refresh. It is debounced by
+// MinRefreshInterval and serialized via singleflight so concurrent WebUI
+// clicks do not flood CPA. The call returns immediately; the refresh runs
+// asynchronously in the loop goroutine.
 func (p *Poller) Refresh() {
+	p.refreshMu.Lock()
+	if p.refreshInFlight {
+		p.refreshMu.Unlock()
+		return
+	}
+	if min := p.cfg.MinRefreshInterval; min > 0 && time.Since(p.lastRefresh) < min {
+		p.refreshMu.Unlock()
+		return
+	}
+	p.refreshInFlight = true
+	p.lastRefresh = time.Now()
+	p.refreshMu.Unlock()
+
 	select {
 	case p.refreshCh <- struct{}{}:
 	default:
 	}
+}
+
+// doRefresh runs the actual auth-files poll. It is only called from the loop
+// goroutine in response to a Refresh signal, never at startup.
+func (p *Poller) doRefresh() {
+	defer func() {
+		p.refreshMu.Lock()
+		p.refreshInFlight = false
+		p.refreshMu.Unlock()
+	}()
+	p.poll()
 }
 
 func (p *Poller) markExistingStale() {

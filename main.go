@@ -319,6 +319,10 @@ func (p demoCredentialPoller) Snapshot() ([]db.CredentialHealthRow, time.Time) {
 
 func (p demoCredentialPoller) Refresh() {}
 
+func (p demoCredentialPoller) ResetCooldown() error {
+	return fmt.Errorf("reset cooldown not available in demo mode")
+}
+
 type demoQuotaPoller struct {
 	database *db.DB
 }

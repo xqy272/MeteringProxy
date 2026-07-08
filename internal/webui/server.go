@@ -37,6 +37,7 @@ type Server struct {
 	credPoller interface {
 		Snapshot() ([]db.CredentialHealthRow, time.Time)
 		Refresh()
+		ResetCooldown() error
 	}
 	quotaPoller interface {
 		Snapshot() ([]db.QuotaCurrentRow, time.Time, bool)
@@ -108,6 +109,7 @@ func (s *Server) SetMeteringEnabledFunc(fn func() bool) {
 func (s *Server) SetCredPoller(p interface {
 	Snapshot() ([]db.CredentialHealthRow, time.Time)
 	Refresh()
+	ResetCooldown() error
 }) {
 	s.credPoller = p
 }
@@ -178,6 +180,18 @@ func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleObservability(w, r)
 	case strings.HasSuffix(path, "/api/gateway/capabilities"):
 		s.handleGatewayCapabilities(w, r)
+	case strings.HasSuffix(path, "/api/cpa/auth"):
+		s.handleCPAAuth(w, r)
+	case strings.HasSuffix(path, "/api/cpa/auth/refresh"):
+		s.handleCPAAuthRefresh(w, r)
+	case strings.HasSuffix(path, "/api/cpa/cooldown/reset"):
+		s.handleCPACooldownReset(w, r)
+	case strings.HasSuffix(path, "/api/provider-quota"):
+		s.handleProviderQuota(w, r)
+	case strings.HasSuffix(path, "/api/provider-quota/refresh"):
+		s.handleProviderQuotaRefresh(w, r)
+	case strings.HasSuffix(path, "/api/provider-quota/diagnostics"):
+		s.handleProviderQuotaDiagnostics(w, r)
 	default:
 		http.NotFound(w, r)
 	}

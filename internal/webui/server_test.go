@@ -417,6 +417,8 @@ func (p *fakeCredPoller) Snapshot() ([]db.CredentialHealthRow, time.Time) {
 
 func (p *fakeCredPoller) Refresh() {}
 
+func (p *fakeCredPoller) ResetCooldown() error { return nil }
+
 func TestAPIQuotaDoesNotClaimFullQuotaForProbeOnlyAvailability(t *testing.T) {
 	s, _ := newTestServer(t, "/metering")
 	now := time.Now().UTC().Truncate(time.Second)
@@ -1283,4 +1285,94 @@ func TestAPIErrorsSource(t *testing.T) {
 
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
+}
+
+func TestCPAAuthAndProviderQuotaEndpoints(t *testing.T) {
+	s, _ := newTestServer(t, "/metering")
+
+	// Register pollers with fake data.
+	s.SetCredPoller(&fakeCredPoller{
+		rows:   []db.CredentialHealthRow{{Provider: "codex", Status: "ready"}},
+		lastAt: time.Now(),
+	})
+	s.SetQuotaPoller(&fakeQuotaPoller{
+		rows:         []db.QuotaCurrentRow{{Provider: "claude", Status: "ok", QuotaSupported: 1}},
+		lastAt:       time.Now(),
+		apiAvailable: true,
+	})
+
+	// GET /api/cpa/auth returns cached data, no CPA call.
+	req := httptest.NewRequest("GET", "/metering/api/cpa/auth", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("GET /api/cpa/auth: status %d", rec.Code)
+	}
+	var authResp map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &authResp)
+	if authResp["enabled"] != true {
+		t.Error("authResp enabled should be true")
+	}
+	items := authResp["items"].([]any)
+	if len(items) != 1 {
+		t.Errorf("items len = %d, want 1", len(items))
+	}
+
+	// POST /api/cpa/auth/refresh triggers Refresh.
+	req = httptest.NewRequest("POST", "/metering/api/cpa/auth/refresh", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("POST /api/cpa/auth/refresh: status %d", rec.Code)
+	}
+
+	// GET /api/provider-quota returns cached data.
+	req = httptest.NewRequest("GET", "/metering/api/provider-quota", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("GET /api/provider-quota: status %d", rec.Code)
+	}
+	var quotaResp map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &quotaResp)
+	if quotaResp["module_status"] != "available" {
+		t.Errorf("module_status = %v, want available", quotaResp["module_status"])
+	}
+
+	// POST /api/provider-quota/refresh triggers Refresh.
+	req = httptest.NewRequest("POST", "/metering/api/provider-quota/refresh", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("POST /api/provider-quota/refresh: status %d", rec.Code)
+	}
+
+	// POST /api/cpa/cooldown/reset calls ResetCooldown.
+	req = httptest.NewRequest("POST", "/metering/api/cpa/cooldown/reset", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("POST /api/cpa/cooldown/reset: status %d", rec.Code)
+	}
+}
+
+func TestProviderQuotaUnsupportedWhenNoAdapterRows(t *testing.T) {
+	s, _ := newTestServer(t, "/metering")
+	s.SetQuotaPoller(&fakeQuotaPoller{
+		rows:         []db.QuotaCurrentRow{{Provider: "claude", Status: "unsupported", QuotaSupported: 0}},
+		lastAt:       time.Now(),
+		apiAvailable: true,
+	})
+
+	req := httptest.NewRequest("GET", "/metering/api/provider-quota", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status %d", rec.Code)
+	}
+	var resp map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp["module_status"] != "unsupported" {
+		t.Errorf("module_status = %v, want unsupported", resp["module_status"])
+	}
 }

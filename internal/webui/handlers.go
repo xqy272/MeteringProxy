@@ -289,3 +289,141 @@ func (s *Server) handleGatewayCapabilities(w http.ResponseWriter, r *http.Reques
 
 	writeJSON(w, report)
 }
+
+// ---------- CPA Auth Mirror + Cooldown + Provider Quota (4.3.6) ----------
+
+// handleCPAAuth returns the cached credential health snapshot. It does NOT
+// call CPA; use POST /api/cpa/auth/refresh for an explicit refresh.
+func (s *Server) handleCPAAuth(w http.ResponseWriter, r *http.Request) {
+	rows, lastAt := []db.CredentialHealthRow{}, time.Time{}
+	enabled := false
+	if s.credPoller != nil {
+		enabled = true
+		rows, lastAt = s.credPoller.Snapshot()
+	}
+	writeJSON(w, map[string]any{
+		"status":      "ok",
+		"enabled":     enabled,
+		"checked_at":  formatRFC3339OrEmpty(lastAt),
+		"items":       rows,
+	})
+}
+
+// handleCPAAuthRefresh triggers an explicit auth-files fetch. The refresh is
+// debounced by the credential poller's MinRefreshInterval and singleflight.
+func (s *Server) handleCPAAuthRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	queued := false
+	if s.credPoller != nil {
+		s.credPoller.Refresh()
+		queued = true
+	}
+	writeJSON(w, map[string]any{
+		"status":         "ok",
+		"refresh_queued": queued,
+	})
+}
+
+// handleCPACooldownReset calls CPA POST /v0/management/reset-quota. This is a
+// maintenance action that clears CPA internal cooldown/routing state. It is
+// NOT a provider quota recovery and does not change the provider quota
+// snapshot state.
+func (s *Server) handleCPACooldownReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.credPoller == nil {
+		writeJSON(w, map[string]any{
+			"status": "error",
+			"error":  "credential health module not enabled",
+		})
+		return
+	}
+	if err := s.credPoller.ResetCooldown(); err != nil {
+		writeJSON(w, map[string]any{
+			"status": "error",
+			"error":  err.Error(),
+		})
+		return
+	}
+	writeJSON(w, map[string]any{
+		"status":  "ok",
+		"message": "CPA cooldown reset requested",
+	})
+}
+
+// handleProviderQuota returns the cached provider quota snapshot. It does NOT
+// call CPA /api-call; use POST /api/provider-quota/refresh for an explicit
+// refresh.
+func (s *Server) handleProviderQuota(w http.ResponseWriter, r *http.Request) {
+	rows, lastAt, apiCallAvail := []db.QuotaCurrentRow{}, time.Time{}, false
+	enabled := false
+	if s.quotaPoller != nil {
+		enabled = true
+		rows, lastAt, apiCallAvail = s.quotaPoller.Snapshot()
+	}
+	moduleStatus := "disabled"
+	if enabled {
+		if len(rows) == 0 {
+			moduleStatus = "not_refreshed"
+		} else {
+			supported := 0
+			for _, q := range rows {
+				if q.QuotaSupported > 0 {
+					supported++
+				}
+			}
+			if supported == 0 {
+				moduleStatus = "unsupported"
+			} else {
+				moduleStatus = "available"
+			}
+		}
+	}
+	writeJSON(w, map[string]any{
+		"status":           "ok",
+		"enabled":          enabled,
+		"module_status":    moduleStatus,
+		"api_call_available": apiCallAvail,
+		"checked_at":       formatRFC3339OrEmpty(lastAt),
+		"items":            rows,
+	})
+}
+
+// handleProviderQuotaRefresh triggers an explicit provider quota refresh via
+// CPA /api-call. The refresh is debounced by MinRefreshInterval and
+// singleflight. It returns immediately; the refresh runs asynchronously.
+func (s *Server) handleProviderQuotaRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	queued := false
+	if s.quotaPoller != nil {
+		s.quotaPoller.Refresh()
+		queued = true
+	}
+	writeJSON(w, map[string]any{
+		"status":         "ok",
+		"refresh_queued": queued,
+	})
+}
+
+// handleProviderQuotaDiagnostics returns recent quota refresh events for
+// diagnosing failures, rate limits, and unsupported providers.
+func (s *Server) handleProviderQuotaDiagnostics(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	events := s.recentQuotaDiagnostics(limit)
+	writeJSON(w, map[string]any{
+		"status":  "ok",
+		"enabled": s.quotaPoller != nil,
+		"events":  events,
+	})
+}

@@ -351,6 +351,30 @@ func (c *Client) FetchUsageQueue(count int) ([][]byte, error) {
 	return out, nil
 }
 
+// ResetQuota calls POST /v0/management/reset-quota, which clears CPA's internal
+// auth/model cooldown and quota-exceeded routing state. It is a maintenance
+// action, NOT a provider quota recovery. The response body is not persisted.
+func (c *Client) ResetQuota() error {
+	url := c.baseURL + "/reset-quota"
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		return fmt.Errorf("create reset-quota request: %w", err)
+	}
+	if c.key != "" {
+		req.Header.Set("Authorization", "Bearer "+c.key)
+	}
+	c.setManagementHeaders(req)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("reset-quota: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("reset-quota returned %d", resp.StatusCode)
+	}
+	return nil
+}
+
 func firstString(raw map[string]json.RawMessage, keys ...string) string {
 	for _, key := range keys {
 		if value := rawString(raw, key); value != "" {
