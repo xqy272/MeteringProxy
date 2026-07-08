@@ -276,17 +276,31 @@ GET /readyz     # 就绪检查（DB、salt、pricing 可用）
 
 ---
 
-## 8. 实施顺序（修订后）
+## 8. 实施顺序（benchmark 数据修订后）
+
+Phase 0 已完成（提交 `249d98f`），基线数据见 `docs/performance-baseline.md`。
+数据推翻了"请求体前置读取是主要瓶颈"的直觉判断：
+
+- 默认 4KB prefix 仅 12 μs pre-RT，对 LLM 请求可忽略。
+- 真实瓶颈在响应侧：非流式大响应 20.1 MB/op，SSE 大响应 44.0 MB/op + 110K allocs/op。
+
+因此实施顺序修订为：
 
 ```text
-Phase 0: Benchmark 基线              ← 前置，必须先做
-Phase 1: 请求体前置读取修复          ← 条件性，benchmark 确认瓶颈后执行
-Phase 2: Transport 层优化            ← HTTP/2、连接池配置、指标；预热 opt-in
-Phase 3: 缓冲区池化                  ← 条件性，benchmark 确认 GC 压力后执行
+Phase 0: Benchmark 基线              ← 已完成
+Phase 1: pprof 定位响应侧分配来源    ← 下一步，不猜测，用数据定位
+Phase 2: SSE 逐 chunk 解析分配优化   ← pprof 确认后，优化 top 分配点
+Phase 3: 非流式响应采样缓冲优化      ← pprof 确认后，优化 top 分配点
+Phase 4: Transport 层优化            ← HTTP/2、连接池配置、指标；预热 opt-in
+Phase 5: ExtendedModelScan 优化      ← 低优先级，默认禁用
 ```
 
-Phase 1 和 Phase 3 都是条件性的：只有 Phase 0 的数据证明对应瓶颈存在时才执行。
-Phase 2 中除了连接预热（opt-in）以外的部分风险较低，可以先行。
+明确不做：
+- 请求体 Tee 重构（数据不支持，12 μs 不值得引入复杂度）
+- 默认剥离 Accept-Encoding（invariant #3）
+
+Phase 1-3 的优化必须用 benchmark 对比验证，每次只改 top 分配点。
+注意区分代理逻辑分配和 benchmark harness 分配（pprof 可解决）。
 
 然后回到主方案 `next-iteration-design.md` 的 Phase 1（透明网关能力视图、LLM 体验指标等）。
 
@@ -294,16 +308,17 @@ Phase 2 中除了连接预热（opt-in）以外的部分风险较低，可以先
 
 ## 9. 成功标准
 
-性能基线（Phase 0 建立后作为对比基准）：
+性能基线（Phase 0 已记录，见 `docs/performance-baseline.md`）：
 
-| 指标 | 测量方式 | 目标 |
-|------|---------|------|
-| 非流式请求代理 overhead p50 | benchmark | 不劣于基线 |
-| 非流式请求代理 overhead p99 | benchmark | 不劣于基线 |
-| SSE 单 chunk 转发延迟 p50 | benchmark | 不劣于基线 |
-| 热路径 allocs/op | benchmark | Phase 3 后显著下降 |
-| 首次请求 TTFB | 集成测试 | Phase 2 后改善 |
-| events dropped（正常负载） | metrics | 0 |
+| 指标 | 基线值 | 目标 |
+|------|--------|------|
+| SSE large allocs/op | 110,098 | Phase 2 后显著下降（目标 <10K） |
+| SSE large B/op | 44.0 MB | Phase 2 后显著下降 |
+| nonstream large B/op | 20.1 MB | Phase 3 后下降（目标 <5MB，排除 harness） |
+| request-only large B/op | 4 KB | 保持不变（金标准） |
+| request-only large allocs/op | 53 | 保持不变 |
+| 默认 4KB prefix pre-RT | 12 μs | 不劣化 |
+| 首次请求 TTFB | 未测量 | Phase 4 后改善 |
 
 功能基线：
 - 所有现有 golden tests 通过
@@ -313,17 +328,19 @@ Phase 2 中除了连接预热（opt-in）以外的部分风险较低，可以先
 
 ---
 
-## 10. 与初版的差异
+## 10. 演进历程
 
-| 维度 | 初版 | 修订版 |
-|------|------|--------|
-| 热路径架构 | 全量 Tee/side observer 重构 | benchmark 驱动，条件性局部修复 |
-| Accept-Encoding | 默认剥离 | 保持透明（invariant #3） |
-| 功能范围 | 砍掉 gateway view/issues 等 | 保留，回归主方案顺序 |
-| 实施顺序 | 性能重构优先 | benchmark 优先，然后针对性修复 |
-| io.TeeReader | 视为零拷贝方案 | 承认非零成本，benchmark 后评估 |
-| 连接预热 | 默认执行 | opt-in，默认关闭（避免主动打 CPA） |
-| sync.Pool | 无条件引入 | 条件性，benchmark 确认 GC 压力后引入 |
+| 阶段 | 判断 | 结果 |
+|------|------|------|
+| 初版 | 全量 Tee/side observer 重构，默认剥离 Accept-Encoding | 过度，被 review 否决 |
+| 修订版 | benchmark 驱动，条件性局部修复，保持 header 透明 | 方向正确 |
+| benchmark 后 | 数据推翻"请求体前置读取是主要瓶颈"，真实瓶颈在响应侧 | 优先级转向 SSE/采样分配优化 |
+
+最终立场：
+- 不做请求体 Tee 重构（默认 4KB prefix 仅 12 μs，不值得）
+- 不剥离 Accept-Encoding（invariant #3）
+- 先 pprof 定位响应侧 top 分配点，再针对性优化
+- 每次优化用 benchmark 对比验证
 
 ---
 
