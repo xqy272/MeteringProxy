@@ -586,3 +586,56 @@ func (db *DB) CaptureOutcomeCounts(since time.Time) (captured, skipped, failed i
 	}
 	return captured, skipped, failed, nil
 }
+
+// GatewayCapabilityRow is one per-endpoint_profile aggregate for the gateway
+// capability view.
+type GatewayCapabilityRow struct {
+	EndpointProfile    string `json:"endpoint_profile"`
+	RequestCount       int64  `json:"request_count"`
+	StreamCount        int64  `json:"stream_count"`
+	MissingUsageCount  int64  `json:"missing_usage_count"`
+	UsageMeteredCount  int64  `json:"usage_metered_count"`
+	RequestOnlyCount   int64  `json:"request_only_count"`
+	PassthroughCount   int64  `json:"passthrough_count"`
+}
+
+// GatewayCapabilities aggregates request_usage by endpoint_profile for the
+// gateway capability view. Rows cover only profiles that had traffic in the
+// range; the webui layer merges in zero-traffic profiles from the registry.
+func (db *DB) GatewayCapabilities(since time.Time) ([]GatewayCapabilityRow, error) {
+	rows, err := db.read.Query(`
+		SELECT
+			COALESCE(NULLIF(endpoint_profile, ''), 'unknown') AS endpoint_profile,
+			COUNT(*) AS request_count,
+			SUM(CASE WHEN stream = 1 THEN 1 ELSE 0 END) AS stream_count,
+			SUM(CASE WHEN capture_mode = 'usage_metered' AND capture_outcome != 'captured' THEN 1 ELSE 0 END) AS missing_usage_count,
+			SUM(CASE WHEN capture_mode = 'usage_metered' THEN 1 ELSE 0 END) AS usage_metered_count,
+			SUM(CASE WHEN capture_mode = 'request_only' THEN 1 ELSE 0 END) AS request_only_count,
+			SUM(CASE WHEN capture_mode = 'passthrough' THEN 1 ELSE 0 END) AS passthrough_count
+		FROM request_usage
+		WHERE created_at_unix >= ?
+		GROUP BY COALESCE(NULLIF(endpoint_profile, ''), 'unknown')
+	`, since.Unix())
+	if err != nil {
+		return nil, fmt.Errorf("gateway capabilities query: %w", err)
+	}
+	defer rows.Close()
+
+	var result []GatewayCapabilityRow
+	for rows.Next() {
+		var r GatewayCapabilityRow
+		if err := rows.Scan(
+			&r.EndpointProfile,
+			&r.RequestCount,
+			&r.StreamCount,
+			&r.MissingUsageCount,
+			&r.UsageMeteredCount,
+			&r.RequestOnlyCount,
+			&r.PassthroughCount,
+		); err != nil {
+			return nil, fmt.Errorf("gateway capabilities scan: %w", err)
+		}
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}

@@ -220,3 +220,35 @@ type IssueSystemItem struct {
 	Scope    string `json:"scope"`
 	Severity string `json:"severity"`
 }
+
+// GatewayCapabilitiesReport answers "what does the proxy see and meter?" for
+// the transparent-gateway view. It merges the static profile.Registry
+// capability matrix with observed request_usage traffic.
+type GatewayCapabilitiesReport struct {
+	Range    string                     `json:"range"`
+	Summary  GatewayCapabilitySummary   `json:"summary"`
+	Profiles []GatewayCapabilityProfile `json:"profiles"`
+}
+
+type GatewayCapabilitySummary struct {
+	TotalRequests     int64 `json:"total_requests"`
+	UsageMeteredReqs  int64 `json:"usage_metered_requests"`
+	RequestOnlyReqs   int64 `json:"request_only_requests"`
+	PassthroughReqs   int64 `json:"passthrough_requests"`
+	StreamRequests    int64 `json:"stream_requests"`
+	MissingUsageReqs  int64 `json:"missing_usage_requests"`
+}
+
+// GatewayCapabilityProfile describes one profile's capability and observed
+// traffic. Profiles with zero traffic in the range are still listed so the
+// UI can show the full capability matrix.
+type GatewayCapabilityProfile struct {
+	Name              string   `json:"name"`
+	DisplayName       string   `json:"display_name"`
+	CaptureMode       string   `json:"capture_mode"`
+	MeteringKind      string   `json:"metering_kind"`
+	RequestCount      int64    `json:"request_count"`
+	MissingUsageCount int64    `json:"missing_usage_count"`
+	StreamCount       int64    `json:"stream_count"`
+	KnownLimitations  []string `json:"known_limitations,omitempty"`
+}

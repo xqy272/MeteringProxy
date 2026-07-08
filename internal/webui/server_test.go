@@ -831,6 +831,192 @@ func TestAPINotFound(t *testing.T) {
 	}
 }
 
+func TestGatewayCapabilities(t *testing.T) {
+	s, database := newTestServer(t, "/metering")
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// Insert traffic covering the four capture-mode distinctions:
+	//   - usage_metered with captured outcome (healthy)
+	//   - usage_metered with skipped outcome (missing usage)
+	//   - request_only (audio)
+	//   - passthrough (unknown route)
+	// Plus a streaming usage_metered request.
+	records := []db.UsageRecord{
+		{
+			CreatedAt: now.Add(-10 * time.Minute).Format(time.RFC3339),
+			Endpoint:  "/v1/chat/completions", Method: "POST", Status: 200,
+			EndpointProfile: "chat_completions", CaptureMode: "usage_metered",
+			MeteringKind: "llm_tokens", CaptureOutcome: "captured",
+			ModelReturned: "gpt-4o", InputTokens: 10, OutputTokens: 5, TotalTokens: 15,
+		},
+		{
+			CreatedAt: now.Add(-8 * time.Minute).Format(time.RFC3339),
+			Endpoint:  "/v1/chat/completions", Method: "POST", Status: 200,
+			Stream:          true,
+			EndpointProfile: "chat_completions", CaptureMode: "usage_metered",
+			MeteringKind: "llm_tokens", CaptureOutcome: "captured",
+			ModelReturned: "gpt-4o", InputTokens: 10, OutputTokens: 5, TotalTokens: 15,
+		},
+		{
+			CreatedAt: now.Add(-6 * time.Minute).Format(time.RFC3339),
+			Endpoint:  "/v1/responses", Method: "POST", Status: 200,
+			EndpointProfile: "responses", CaptureMode: "usage_metered",
+			MeteringKind: "llm_tokens", CaptureOutcome: "skipped",
+			CaptureReason: "usage_not_present",
+		},
+		{
+			CreatedAt: now.Add(-4 * time.Minute).Format(time.RFC3339),
+			Endpoint:  "/v1/audio/transcriptions", Method: "POST", Status: 200,
+			EndpointProfile: "openai_audio", CaptureMode: "request_only",
+			MeteringKind: "request_only", CaptureOutcome: "captured",
+			CaptureReason: "request_only_profile",
+		},
+		{
+			CreatedAt: now.Add(-2 * time.Minute).Format(time.RFC3339),
+			Endpoint:  "/v1/some-unknown-endpoint", Method: "POST", Status: 200,
+			EndpointProfile: "unknown_passthrough", CaptureMode: "passthrough",
+			MeteringKind: "none", CaptureOutcome: "captured",
+		},
+	}
+	if err := database.InsertBatch(records); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/metering/api/gateway/capabilities?range=24h", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("GET /metering/api/gateway/capabilities: status %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var report event.GatewayCapabilitiesReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &report); err != nil {
+		t.Fatalf("invalid JSON: %v; body=%s", err, rec.Body.String())
+	}
+
+	if report.Range != "24h" {
+		t.Errorf("Range = %q, want 24h", report.Range)
+	}
+
+	// Summary: 5 total, 3 usage_metered, 1 request_only, 1 passthrough,
+	// 1 stream, 1 missing usage.
+	if report.Summary.TotalRequests != 5 {
+		t.Errorf("TotalRequests = %d, want 5", report.Summary.TotalRequests)
+	}
+	if report.Summary.UsageMeteredReqs != 3 {
+		t.Errorf("UsageMeteredReqs = %d, want 3", report.Summary.UsageMeteredReqs)
+	}
+	if report.Summary.RequestOnlyReqs != 1 {
+		t.Errorf("RequestOnlyReqs = %d, want 1", report.Summary.RequestOnlyReqs)
+	}
+	if report.Summary.PassthroughReqs != 1 {
+		t.Errorf("PassthroughReqs = %d, want 1", report.Summary.PassthroughReqs)
+	}
+	if report.Summary.StreamRequests != 1 {
+		t.Errorf("StreamRequests = %d, want 1", report.Summary.StreamRequests)
+	}
+	if report.Summary.MissingUsageReqs != 1 {
+		t.Errorf("MissingUsageReqs = %d, want 1", report.Summary.MissingUsageReqs)
+	}
+
+	// Find specific profiles and verify counts.
+	byName := make(map[string]event.GatewayCapabilityProfile, len(report.Profiles))
+	for _, p := range report.Profiles {
+		byName[p.Name] = p
+	}
+
+	chat, ok := byName["chat_completions"]
+	if !ok {
+		t.Fatal("missing chat_completions profile in response")
+	}
+	if chat.CaptureMode != "usage_metered" {
+		t.Errorf("chat_completions CaptureMode = %q, want usage_metered", chat.CaptureMode)
+	}
+	if chat.RequestCount != 2 {
+		t.Errorf("chat_completions RequestCount = %d, want 2", chat.RequestCount)
+	}
+	if chat.StreamCount != 1 {
+		t.Errorf("chat_completions StreamCount = %d, want 1", chat.StreamCount)
+	}
+	if chat.MissingUsageCount != 0 {
+		t.Errorf("chat_completions MissingUsageCount = %d, want 0", chat.MissingUsageCount)
+	}
+
+	responses, ok := byName["responses"]
+	if !ok {
+		t.Fatal("missing responses profile in response")
+	}
+	if responses.MissingUsageCount != 1 {
+		t.Errorf("responses MissingUsageCount = %d, want 1", responses.MissingUsageCount)
+	}
+
+	audio, ok := byName["openai_audio"]
+	if !ok {
+		t.Fatal("missing openai_audio profile in response")
+	}
+	if audio.CaptureMode != "request_only" {
+		t.Errorf("openai_audio CaptureMode = %q, want request_only", audio.CaptureMode)
+	}
+	if audio.RequestCount != 1 {
+		t.Errorf("openai_audio RequestCount = %d, want 1", audio.RequestCount)
+	}
+
+	// Unknown passthrough should be present and not rendered as an error.
+	passthrough, ok := byName["unknown_passthrough"]
+	if !ok {
+		t.Fatal("missing unknown_passthrough profile in response")
+	}
+	if passthrough.CaptureMode != "passthrough" {
+		t.Errorf("unknown_passthrough CaptureMode = %q, want passthrough", passthrough.CaptureMode)
+	}
+	if passthrough.RequestCount != 1 {
+		t.Errorf("unknown_passthrough RequestCount = %d, want 1", passthrough.RequestCount)
+	}
+
+	// Profiles with SSE support should list the compressed_sse_not_metered limitation.
+	if chat.CaptureMode == "usage_metered" {
+		found := false
+		for _, lim := range chat.KnownLimitations {
+			if lim == "compressed_sse_not_metered" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("chat_completions KnownLimitations = %v, want compressed_sse_not_metered", chat.KnownLimitations)
+		}
+	}
+
+	// All registry profiles should be listed even with zero traffic.
+	embeddings, ok := byName["openai_embeddings"]
+	if !ok {
+		t.Fatal("missing openai_embeddings profile (zero-traffic profile should still be listed)")
+	}
+	if embeddings.RequestCount != 0 {
+		t.Errorf("openai_embeddings RequestCount = %d, want 0", embeddings.RequestCount)
+	}
+}
+
+func TestGatewayCapabilitiesEmptyDB(t *testing.T) {
+	s, _ := newTestServer(t, "/metering")
+	req := httptest.NewRequest("GET", "/metering/api/gateway/capabilities?range=24h", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status %d, want 200", rec.Code)
+	}
+	var report event.GatewayCapabilitiesReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &report); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	// Empty DB should still list all registry profiles with zero counts.
+	if len(report.Profiles) == 0 {
+		t.Error("expected profiles from registry even with empty DB")
+	}
+	if report.Summary.TotalRequests != 0 {
+		t.Errorf("TotalRequests = %d, want 0", report.Summary.TotalRequests)
+	}
+}
+
 func TestCustomBasePath(t *testing.T) {
 	s, _ := newTestServer(t, "/stats")
 	req := httptest.NewRequest("GET", "/stats/", nil)

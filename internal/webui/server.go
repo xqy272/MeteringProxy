@@ -176,6 +176,8 @@ func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleQuotaRefresh(w, r)
 	case strings.HasSuffix(path, "/api/observability"):
 		s.handleObservability(w, r)
+	case strings.HasSuffix(path, "/api/gateway/capabilities"):
+		s.handleGatewayCapabilities(w, r)
 	default:
 		http.NotFound(w, r)
 	}

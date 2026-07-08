@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"time"
 
+	"ai-gateway-metering-proxy/internal/db"
 	"ai-gateway-metering-proxy/internal/event"
 )
 
@@ -198,4 +199,93 @@ func (s *Server) systemIssueCounts(since time.Time) (parseErrors, dbErrors, drop
 	}
 	_, dropped, parseErrors, dbErrors = s.writer.Snapshot()
 	return parseErrors, dbErrors, dropped, "process"
+}
+
+// handleGatewayCapabilities answers "what does the proxy see and meter?"
+// It merges the static profile.Registry capability matrix with observed
+// request_usage traffic so the UI can show usage-metered, request-only,
+// passthrough, and missing-usage distinctions. Unknown passthrough is a
+// normal capability and is never rendered as an error.
+func (s *Server) handleGatewayCapabilities(w http.ResponseWriter, r *http.Request) {
+	since, rangeKey := parseRange(r)
+
+	dbRows, _ := s.db.GatewayCapabilities(since)
+	byProfile := make(map[string]db.GatewayCapabilityRow, len(dbRows))
+	for _, row := range dbRows {
+		byProfile[row.EndpointProfile] = row
+	}
+
+	report := &event.GatewayCapabilitiesReport{
+		Range:    rangeKey,
+		Profiles: []event.GatewayCapabilityProfile{},
+	}
+
+	// Registry profiles first (capability matrix), then any DB-only profiles
+	// that are not in the registry (e.g. legacy endpoint_profile values).
+	seen := make(map[string]bool)
+	if s.registry != nil {
+		for _, p := range s.registry.Profiles() {
+			seen[p.Name] = true
+			row := byProfile[p.Name]
+			// The unknown_passthrough catch-all also absorbs DB rows whose
+			// endpoint_profile was empty (queried as "unknown").
+			if p.Name == "unknown_passthrough" {
+				if extra, ok := byProfile["unknown"]; ok {
+					row.RequestCount += extra.RequestCount
+					row.StreamCount += extra.StreamCount
+					row.MissingUsageCount += extra.MissingUsageCount
+					row.UsageMeteredCount += extra.UsageMeteredCount
+					row.RequestOnlyCount += extra.RequestOnlyCount
+					row.PassthroughCount += extra.PassthroughCount
+				}
+			}
+
+			var limitations []string
+			if p.StreamProtocol.UsesSSE {
+				limitations = append(limitations, "compressed_sse_not_metered")
+			}
+
+			report.Profiles = append(report.Profiles, event.GatewayCapabilityProfile{
+				Name:              p.Name,
+				DisplayName:       p.DisplayName(),
+				CaptureMode:       p.CaptureMode,
+				MeteringKind:      p.MeteringKind,
+				RequestCount:      row.RequestCount,
+				MissingUsageCount: row.MissingUsageCount,
+				StreamCount:       row.StreamCount,
+				KnownLimitations:  limitations,
+			})
+
+			report.Summary.TotalRequests += row.RequestCount
+			report.Summary.UsageMeteredReqs += row.UsageMeteredCount
+			report.Summary.RequestOnlyReqs += row.RequestOnlyCount
+			report.Summary.PassthroughReqs += row.PassthroughCount
+			report.Summary.StreamRequests += row.StreamCount
+			report.Summary.MissingUsageReqs += row.MissingUsageCount
+		}
+	}
+
+	// Any DB rows not matched by a registry profile (e.g. older endpoint names).
+	// "unknown" was already folded into unknown_passthrough above.
+	for name, row := range byProfile {
+		if seen[name] || name == "unknown" {
+			continue
+		}
+		report.Profiles = append(report.Profiles, event.GatewayCapabilityProfile{
+			Name:              name,
+			DisplayName:       name,
+			CaptureMode:       event.CapturePassthrough,
+			RequestCount:      row.RequestCount,
+			MissingUsageCount: row.MissingUsageCount,
+			StreamCount:       row.StreamCount,
+		})
+		report.Summary.TotalRequests += row.RequestCount
+		report.Summary.UsageMeteredReqs += row.UsageMeteredCount
+		report.Summary.RequestOnlyReqs += row.RequestOnlyCount
+		report.Summary.PassthroughReqs += row.PassthroughCount
+		report.Summary.StreamRequests += row.StreamCount
+		report.Summary.MissingUsageReqs += row.MissingUsageCount
+	}
+
+	writeJSON(w, report)
 }
