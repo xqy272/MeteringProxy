@@ -98,6 +98,109 @@ func TestLimitedBuffer_NoOverflow(t *testing.T) {
 	}
 }
 
+// TestPrefixTailBuffer_RingContract covers the prefix+tail reconstruction
+// contract across small, overlap, overflow, wrap-around, and large-single-write
+// scenarios. The ring buffer must produce the same Bytes() output as the old
+// append-and-copy implementation.
+func TestPrefixTailBuffer_RingContract(t *testing.T) {
+	// distill returns the byte a given stream offset should carry; using a
+	// deterministic pattern makes it easy to verify reconstruction order.
+	distill := func(offset int) byte { return byte('A' + offset%26) }
+
+	writeStream := func(t *testing.T, max int, writes ...int) []byte {
+		t.Helper()
+		b := &prefixTailBuffer{max: max}
+		off := 0
+		for _, n := range writes {
+			chunk := make([]byte, n)
+			for i := range chunk {
+				chunk[i] = distill(off + i)
+			}
+			off += n
+			b.Write(chunk)
+		}
+		return b.Bytes()
+	}
+
+	// Small stream: total well below half. Bytes() == prefix only.
+	got := writeStream(t, 60, 10)
+	if len(got) != 10 || got[0] != distill(0) {
+		t.Fatalf("small stream: got %q", got)
+	}
+
+	// Exact fit: total == max, no gap. prefix[0..30) + tail[30..60).
+	got = writeStream(t, 60, 60)
+	if len(got) != 60 {
+		t.Fatalf("exact fit: len=%d want 60", len(got))
+	}
+	for i := 0; i < 60; i++ {
+		if got[i] != distill(i) {
+			t.Fatalf("exact fit byte %d: got %q want %q", i, got[i], distill(i))
+		}
+	}
+
+	// Overlap: total < max but tail overlaps prefix region (split writes).
+	got = writeStream(t, 60, 30, 15)
+	if len(got) != 45 {
+		t.Fatalf("overlap: len=%d want 45", len(got))
+	}
+	for i := 0; i < 45; i++ {
+		if got[i] != distill(i) {
+			t.Fatalf("overlap byte %d: got %q want %q", i, got[i], distill(i))
+		}
+	}
+
+	// Overflow with gap: total > max. prefix + '\n' + tail(last half).
+	got = writeStream(t, 60, 30, 35, 35)
+	if len(got) != 61 {
+		t.Fatalf("overflow: len=%d want 61 (prefix+nl+tail)", len(got))
+	}
+	if got[30] != '\n' {
+		t.Fatalf("overflow: missing separator at 30, got %q", got[30])
+	}
+	// prefix = bytes[0..30)
+	for i := 0; i < 30; i++ {
+		if got[i] != distill(i) {
+			t.Fatalf("overflow prefix byte %d: got %q want %q", i, got[i], distill(i))
+		}
+	}
+	// tail = last 30 bytes of 100-byte stream = bytes[70..100)
+	for i := 0; i < 30; i++ {
+		if got[31+i] != distill(70+i) {
+			t.Fatalf("overflow tail byte %d: got %q want %q", i, got[31+i], distill(70+i))
+		}
+	}
+
+	// Ring wrap: many small writes that wrap the ring multiple times.
+	got = writeStream(t, 60, 10, 10, 10, 10, 10, 10, 10)
+	// total = 70 > 60, prefix = bytes[0..30), tail = last 30 = bytes[40..70)
+	if len(got) != 61 {
+		t.Fatalf("wrap: len=%d want 61", len(got))
+	}
+	if got[30] != '\n' {
+		t.Fatalf("wrap: missing separator at 30")
+	}
+	for i := 0; i < 30; i++ {
+		if got[31+i] != distill(40+i) {
+			t.Fatalf("wrap tail byte %d: got %q want %q", i, got[31+i], distill(40+i))
+		}
+	}
+
+	// Single write larger than tail window: only last half retained.
+	got = writeStream(t, 60, 100)
+	if len(got) != 61 {
+		t.Fatalf("large single: len=%d want 61", len(got))
+	}
+	if got[30] != '\n' {
+		t.Fatalf("large single: missing separator at 30")
+	}
+	for i := 0; i < 30; i++ {
+		if got[31+i] != distill(70+i) {
+			t.Fatalf("large single tail byte %d: got %q want %q", i, got[31+i], distill(70+i))
+		}
+	}
+}
+
 func TestExtractModel(t *testing.T) {
 	tests := []struct {
 		body string

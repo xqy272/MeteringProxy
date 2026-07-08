@@ -883,7 +883,9 @@ func (lb *limitedBuffer) Bytes() []byte {
 
 type prefixTailBuffer struct {
 	prefix []byte
-	tail   []byte
+	tail   []byte // fixed-capacity ring buffer holding the last `half` bytes
+	wpos   int    // next write position within tail
+	full   bool   // tail has wrapped and contains `half` valid bytes
 	max    int
 	total  int
 }
@@ -904,38 +906,86 @@ func (b *prefixTailBuffer) Write(p []byte) (int, error) {
 			need = len(p)
 		}
 		b.prefix = append(b.prefix, p[:need]...)
+		p = p[need:]
+		if len(p) == 0 {
+			return origLen, nil
+		}
 	}
-	b.tail = append(b.tail, p...)
-	if len(b.tail) > half {
-		b.tail = append([]byte(nil), b.tail[len(b.tail)-half:]...)
+	if b.tail == nil {
+		b.tail = make([]byte, half)
+	}
+	// When a single write covers the entire tail window, only the last
+	// `half` bytes are relevant; earlier bytes would be overwritten anyway.
+	if len(p) >= len(b.tail) {
+		copy(b.tail, p[len(p)-len(b.tail):])
+		b.wpos = 0
+		b.full = true
+		return origLen, nil
+	}
+	for len(p) > 0 {
+		n := copy(b.tail[b.wpos:], p)
+		b.wpos += n
+		if b.wpos == len(b.tail) {
+			b.wpos = 0
+			b.full = true
+		}
+		p = p[n:]
 	}
 	return origLen, nil
 }
 
+// tailLen returns the number of valid bytes currently held in the tail ring.
+func (b *prefixTailBuffer) tailLen() int {
+	if b.full {
+		return len(b.tail)
+	}
+	return b.wpos
+}
+
+// appendTail appends the valid tail bytes in chronological order to dst,
+// skipping the first `skip` bytes (oldest first).
+func (b *prefixTailBuffer) appendTail(dst []byte, skip int) []byte {
+	if b.tail == nil {
+		return dst
+	}
+	valid := b.tailLen()
+	if skip >= valid {
+		return dst
+	}
+	if !b.full {
+		return append(dst, b.tail[skip:b.wpos]...)
+	}
+	// Chronological order for a full ring is tail[wpos:] then tail[:wpos].
+	half := len(b.tail)
+	firstLen := half - b.wpos
+	if skip < firstLen {
+		dst = append(dst, b.tail[b.wpos+skip:]...)
+		dst = append(dst, b.tail[:b.wpos]...)
+	} else {
+		dst = append(dst, b.tail[skip-firstLen:b.wpos]...)
+	}
+	return dst
+}
+
 func (b *prefixTailBuffer) Bytes() []byte {
-	if len(b.tail) == 0 {
+	tailLen := b.tailLen()
+	if tailLen == 0 {
 		return b.prefix
 	}
 	if b.total <= len(b.prefix) {
 		return b.prefix
 	}
-	if b.total <= b.max && len(b.prefix)+len(b.tail) >= b.total {
-		overlap := len(b.prefix) + len(b.tail) - b.total
-		if overlap < 0 {
-			overlap = 0
-		}
-		if overlap > len(b.tail) {
-			overlap = len(b.tail)
-		}
+	if b.total <= b.max && len(b.prefix)+tailLen >= b.total {
+		overlap := len(b.prefix) + tailLen - b.total
 		out := make([]byte, 0, b.total)
 		out = append(out, b.prefix...)
-		out = append(out, b.tail[overlap:]...)
+		out = b.appendTail(out, overlap)
 		return out
 	}
-	out := make([]byte, 0, len(b.prefix)+len(b.tail)+1)
+	out := make([]byte, 0, len(b.prefix)+tailLen+1)
 	out = append(out, b.prefix...)
 	out = append(out, '\n')
-	out = append(out, b.tail...)
+	out = b.appendTail(out, 0)
 	return out
 }
 
