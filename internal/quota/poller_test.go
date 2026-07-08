@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -174,5 +175,95 @@ func TestRecordRefreshEventPersistsProbeDiagnostics(t *testing.T) {
 	got := store.events[0]
 	if got.ProbeHTTPStatus != http.StatusBadRequest || got.ProbeErrorClass != "api_call_bad_request" || got.APICallReachable != 1 {
 		t.Fatalf("event probe fields = %#v", got)
+	}
+}
+
+func TestPollerDoesNotProbeAtStartup(t *testing.T) {
+	var apiCallCount int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v0/management/api-call" {
+			atomic.AddInt32(&apiCallCount, 1)
+		}
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	client, err := cliproxy.NewClient(cliproxy.CLIProxyConfig{
+		BaseURL: server.URL + "/v0/management",
+		Key:     "management-key",
+		Timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	p := NewPoller(client, &fakeQuotaStore{}, hash.NewWithSalt("test-salt"), config.QuotaConfig{
+		Enabled:             true,
+		Providers:           []string{"claude"},
+		CacheTTL:            5 * time.Minute,
+		MinRefreshInterval:  0, // no debounce so Refresh fires immediately
+		DiagnosticRetention: 1 * time.Hour,
+	})
+	p.Start()
+	defer p.Stop()
+
+	// Wait a bit to ensure the loop goroutine is running. No api-call should
+	// be made during startup.
+	time.Sleep(100 * time.Millisecond)
+	if got := atomic.LoadInt32(&apiCallCount); got != 0 {
+		t.Fatalf("startup made %d api-call requests, want 0 (manual refresh only)", got)
+	}
+
+	// Explicit Refresh should trigger an api-call probe.
+	p.Refresh()
+	time.Sleep(200 * time.Millisecond)
+	if got := atomic.LoadInt32(&apiCallCount); got == 0 {
+		t.Fatal("Refresh did not trigger any api-call request")
+	}
+}
+
+func TestRefreshDebouncesByMinRefreshInterval(t *testing.T) {
+	var apiCallCount int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v0/management/api-call" {
+			atomic.AddInt32(&apiCallCount, 1)
+		}
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	client, err := cliproxy.NewClient(cliproxy.CLIProxyConfig{
+		BaseURL: server.URL + "/v0/management",
+		Key:     "management-key",
+		Timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	p := NewPoller(client, &fakeQuotaStore{}, hash.NewWithSalt("test-salt"), config.QuotaConfig{
+		Enabled:             true,
+		Providers:           []string{"claude"},
+		CacheTTL:            5 * time.Minute,
+		MinRefreshInterval:  10 * time.Second,
+		DiagnosticRetention: 1 * time.Hour,
+	})
+	p.Start()
+	defer p.Stop()
+
+	// First Refresh fires.
+	p.Refresh()
+	time.Sleep(200 * time.Millisecond)
+	first := atomic.LoadInt32(&apiCallCount)
+	if first == 0 {
+		t.Fatal("first Refresh did not trigger api-call")
+	}
+
+	// Second Refresh immediately after should be debounced.
+	p.Refresh()
+	time.Sleep(200 * time.Millisecond)
+	second := atomic.LoadInt32(&apiCallCount)
+	if second != first {
+		t.Fatalf("debounced Refresh triggered %d new api-calls, want 0 (MinRefreshInterval not elapsed)", second-first)
 	}
 }

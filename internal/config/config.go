@@ -106,6 +106,13 @@ type QuotaConfig struct {
 	WarningThreshold    float64       `yaml:"warning_threshold"`
 	RetryMinInterval    time.Duration `yaml:"retry_min_interval"`
 	RetryMaxInterval    time.Duration `yaml:"retry_max_interval"`
+	// MinRefreshInterval debounces manual refresh calls so rapid WebUI clicks
+	// do not flood CPA with /api-call requests. Default 60s.
+	MinRefreshInterval time.Duration `yaml:"min_refresh_interval"`
+	// RefreshMode controls whether the poller runs in the background.
+	// "manual" (default) means refresh only on explicit POST; no background
+	// polling. "scheduled" is reserved for a future explicit background mode.
+	RefreshMode string `yaml:"refresh_mode"`
 }
 
 const (
@@ -342,6 +349,16 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.CLIProxyManagement.Quota.RetryMaxInterval <= 0 {
 		cfg.CLIProxyManagement.Quota.RetryMaxInterval = 10 * time.Minute
+	}
+	if cfg.CLIProxyManagement.Quota.MinRefreshInterval <= 0 {
+		cfg.CLIProxyManagement.Quota.MinRefreshInterval = 60 * time.Second
+	}
+	cfg.CLIProxyManagement.Quota.RefreshMode = strings.ToLower(strings.TrimSpace(cfg.CLIProxyManagement.Quota.RefreshMode))
+	if cfg.CLIProxyManagement.Quota.RefreshMode == "" {
+		cfg.CLIProxyManagement.Quota.RefreshMode = "manual"
+	}
+	if cfg.CLIProxyManagement.Quota.RefreshMode != "manual" && cfg.CLIProxyManagement.Quota.RefreshMode != "scheduled" {
+		return nil, fmt.Errorf("cliproxy_management.quota.refresh_mode must be manual or scheduled")
 	}
 	if cfg.CLIProxyManagement.Enabled {
 		if err := validateCLIProxyManagement(cfg.CLIProxyManagement); err != nil {

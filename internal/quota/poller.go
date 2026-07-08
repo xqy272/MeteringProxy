@@ -44,6 +44,13 @@ type Poller struct {
 	stopCh        chan struct{}
 	doneCh        chan struct{}
 	refreshCh     chan struct{}
+
+	// refreshMu serializes manual refresh calls (singleflight). refreshInFlight
+	// prevents concurrent CPA /api-call probes; lastRefresh gates calls by
+	// MinRefreshInterval so rapid WebUI clicks do not flood CPA logs.
+	refreshMu        sync.Mutex
+	refreshInFlight  bool
+	lastRefresh      time.Time
 }
 
 func NewPoller(client *cliproxy.Client, database store.QuotaStore, hasher *hash.Hasher, cfg config.QuotaConfig) *Poller {
@@ -59,7 +66,7 @@ func NewPoller(client *cliproxy.Client, database store.QuotaStore, hasher *hash.
 }
 
 func (p *Poller) Start() {
-	go p.probeAndLoop()
+	go p.loop()
 }
 
 func (p *Poller) Stop() {
@@ -67,25 +74,18 @@ func (p *Poller) Stop() {
 	<-p.doneCh
 }
 
-func (p *Poller) probeAndLoop() {
+// loop is the background goroutine. It does NOT probe or poll at startup;
+// quota refresh is manual-only (refresh_mode "manual", the default). The loop
+// only runs retention cleanup and serves explicit Refresh signals so that
+// startup and WebUI-open never trigger CPA /api-call traffic.
+func (p *Poller) loop() {
 	defer close(p.doneCh)
-	p.probeAPICall()
-	p.poll()
 	cleanupTicker := time.NewTicker(p.cfg.DiagnosticRetention)
-	ticker := time.NewTicker(p.cfg.CacheTTL)
-	defer ticker.Stop()
 	defer cleanupTicker.Stop()
-	probeTicker := time.NewTicker(p.cfg.CacheTTL * 2)
-	defer probeTicker.Stop()
 	for {
 		select {
-		case <-ticker.C:
-			p.poll()
 		case <-p.refreshCh:
-			p.probeAPICall()
-			p.poll()
-		case <-probeTicker.C:
-			p.probeAPICall()
+			p.doRefresh()
 		case <-cleanupTicker.C:
 			p.cleanup()
 		case <-p.stopCh:
@@ -543,11 +543,40 @@ func (p *Poller) Snapshot() ([]db.QuotaCurrentRow, time.Time, bool) {
 	return out, p.lastAt, p.apiCallAvail
 }
 
+// Refresh triggers a manual quota refresh. It is debounced by MinRefreshInterval
+// and serialized via singleflight so concurrent WebUI clicks do not flood CPA.
+// The call returns immediately; the refresh runs asynchronously in the loop
+// goroutine.
 func (p *Poller) Refresh() {
+	p.refreshMu.Lock()
+	if p.refreshInFlight {
+		p.refreshMu.Unlock()
+		return
+	}
+	if min := p.cfg.MinRefreshInterval; min > 0 && time.Since(p.lastRefresh) < min {
+		p.refreshMu.Unlock()
+		return
+	}
+	p.refreshInFlight = true
+	p.lastRefresh = time.Now()
+	p.refreshMu.Unlock()
+
 	select {
 	case p.refreshCh <- struct{}{}:
 	default:
 	}
+}
+
+// doRefresh runs the actual probe + poll. It is only called from the loop
+// goroutine in response to a Refresh signal, never at startup.
+func (p *Poller) doRefresh() {
+	defer func() {
+		p.refreshMu.Lock()
+		p.refreshInFlight = false
+		p.refreshMu.Unlock()
+	}()
+	p.probeAPICall()
+	p.poll()
 }
 
 func jsonString(m map[string]interface{}, key string) string {
