@@ -45,6 +45,8 @@ docker network connect ai-gateway <cli-proxy-container-name>
 ```
 
 > 将 `<cli-proxy-container-name>` 替换为 CLIProxyAPI 容器的实际名称（通过 `docker ps --format '{{.Names}}'` 查看）。容器间通信走 Docker 内部网络，不受 `-p` 绑定地址影响。
+>
+> **常见坑**：如果 MeteringProxy 和 CPA 各自用 `docker compose` 启动，默认会被分到不同网络（如 `ai-gateway` vs `ai-gateway_default`），导致 DNS 无法解析。用上述 `docker network create` / `docker network connect` 统一加入同一网络即可。
 
 ### 3. 准备主机目录
 
@@ -529,15 +531,85 @@ gzip "$backup_file"
 
 ## 运维
 
-常用检查命令：
+### 日常检查
 
 ```bash
-docker logs metering-proxy
-docker exec metering-proxy wget -qO- http://127.0.0.1:8320/metering/api/health
+# 容器状态
+docker ps --filter name=metering-proxy
+docker ps --filter name=cli-proxy-api
+
+# 日志
+docker logs metering-proxy --tail 50
+docker logs metering-proxy -f        # 实时跟踪
+
+# 健康检查
+curl -s http://127.0.0.1:8320/metering/api/health
+curl -s http://127.0.0.1:8320/metrics | head -30
+
+# 数据库文件
 ls -lh /opt/ai-gateway/metering/usage.sqlite*
 ```
 
-上线后关注指标：
+### 容器网络排错
+
+```bash
+# 查看容器在哪些 Docker 网络上
+docker inspect metering-proxy --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}'
+docker inspect cli-proxy-api   --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}'
+
+# 两容器不在同一网络 → DNS 无法互相解析，502 proxy_dns_error
+# 修复：把它们加入同一网络
+docker network connect <network-name> <container-name>
+
+# 验证容器内 DNS 解析
+docker exec metering-proxy sh -c "nslookup cli-proxy-api 2>/dev/null || cat /etc/hosts"
+
+# 查看容器 DNS 配置
+docker exec metering-proxy cat /etc/resolv.conf
+
+# 查看所有 Docker 网络
+docker network ls
+
+# 查看某网络的成员
+docker network inspect ai-gateway --format '{{range .Containers}}{{.Name}} {{end}}'
+
+# 测试容器到上游的连通性
+docker exec metering-proxy wget -qO- http://cli-proxy-api:8317/v1/models
+# 返回 401 {"error":"Missing API key"} 即表示连通正常
+```
+
+### 服务重启
+
+```bash
+# MeteringProxy
+docker restart metering-proxy
+
+# CLIProxyAPI
+docker restart cli-proxy-api
+
+# Caddy 热重载
+docker exec caddy caddy reload --config /etc/caddy/Caddyfile
+
+# systemd 服务重启（非容器场景）
+systemctl restart sing-box
+systemctl status sing-box
+journalctl -u sing-box --since "5 min ago" --no-pager
+```
+
+### 快速诊断 502
+
+502 响应头中有诊断信息：
+
+| 响应头 | 含义 |
+|---|---|
+| `x-metering-proxy-error-class: proxy_dns_error` | MeteringProxy 无法解析上游域名，查容器网络 |
+| `x-metering-proxy-error-class: proxy_connection_refused` | 上游端口未监听或防火墙拒绝 |
+| `x-metering-proxy-error-class: proxy_timeout` | 上游连接超时，返回 504 |
+| `x-metering-proxy-error-class: proxy_upstream_error` | 其他上游传输错误 |
+
+没有 `x-metering-proxy` 头 = 问题在 Caddy 或 CPA 自身。
+
+### 上线后关注指标
 
 - 队列深度通常应回归为零
 - 正常负载下丢弃事件和数据库写入错误应保持为零
@@ -547,17 +619,25 @@ ls -lh /opt/ai-gateway/metering/usage.sqlite*
 ## 附录
 
 <details>
-<summary><b>附录 A：裸机 CLIProxyAPI</b></summary>
+<summary><b>附录 A：CPA 在宿主机裸跑</b></summary>
 
-如果你的 CLIProxyAPI 不在 Docker 中而是直接跑在宿主机上：
+如果你的 CLIProxyAPI 不在 Docker 中而是直接跑在宿主机上，容器内需能访问宿主机的 `8317` 端口：
 
-**config.yaml：**
+**方案一：使用 `--network host`（最简单）**
 
-```yaml
-upstream: "http://host.docker.internal:8317"
+```bash
+docker run -d \
+  --name metering-proxy \
+  --restart unless-stopped \
+  --network host \
+  -v /opt/ai-gateway/metering:/data \
+  ghcr.io/xqy272/ai-gateway-metering-proxy:v0.4.0 \
+  -config /data/config.yaml
 ```
 
-**docker run：**
+此时 `config.yaml` 中 upstream 用 `127.0.0.1:8317`。
+
+**方案二：桥接网络 + `host-gateway`（Docker 20.10+）**
 
 ```bash
 docker run -d \
@@ -570,7 +650,9 @@ docker run -d \
   -config /data/config.yaml
 ```
 
-`--add-host host.docker.internal:host-gateway` 在容器 `/etc/hosts` 中添加一条记录，将 `host.docker.internal` 解析到宿主机 IP。
+此时 `config.yaml` 中 upstream 用 `http://host.docker.internal:8317`。`host-gateway` 会自动解析到 Docker 网桥网关 IP。
+
+> **注意**：如果 CPA 也是 Docker 容器（常见情况），不要用 `host.docker.internal`，直接用 Docker 服务名（如 `http://cli-proxy-api:8317`）并确保两容器在同一网络。`host.docker.internal` 仅用于 CPA 直接在宿主机上跑的场景。
 
 </details>
 

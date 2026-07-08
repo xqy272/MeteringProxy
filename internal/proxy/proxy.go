@@ -39,7 +39,7 @@ type Proxy struct {
 	maxSample         int64
 	meteringEnabled   atomic.Bool
 	registry          *profile.Registry
-	transport         *http.Transport
+	transport         http.RoundTripper
 	reqMeta           config.RequestMetadataConfig
 	correlationMode   string
 	correlationHeader string
@@ -118,6 +118,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if !p.meteringEnabled.Load() || !prof.IsMetered() {
 		p.forwardTransparent(w, r)
+		return
+	}
+	if prof.CaptureMode == event.CaptureRequestOnly {
+		p.forwardRequestOnly(w, r, start, prof, endpoint)
 		return
 	}
 
@@ -262,22 +266,105 @@ func (p *Proxy) forwardTransparent(w http.ResponseWriter, r *http.Request) {
 }
 
 func copyAndFlush(w http.ResponseWriter, r io.Reader) {
+	_, _ = copyAndFlushCount(w, r)
+}
+
+func copyAndFlushCount(w http.ResponseWriter, r io.Reader) (int64, error) {
 	flusher, _ := w.(http.Flusher)
 	buf := make([]byte, 32*1024)
+	var total int64
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
-			if _, werr := w.Write(buf[:n]); werr != nil {
-				return
+			wn, werr := w.Write(buf[:n])
+			total += int64(wn)
+			if werr != nil {
+				return total, werr
 			}
 			if flusher != nil {
 				flusher.Flush()
 			}
 		}
 		if err != nil {
-			return
+			if err == io.EOF {
+				return total, nil
+			}
+			return total, err
 		}
 	}
+}
+
+func (p *Proxy) forwardRequestOnly(w http.ResponseWriter, r *http.Request, start time.Time, prof *profile.EndpointProfile, endpoint string) {
+	clientIPHash := p.hasher.Hash(clientIPFromRequest(r))
+	apiKeyHash := p.hasher.Hash(apiKeyToken(r))
+
+	var cr *countingReader
+	var body io.Reader
+	if r.Body != nil {
+		cr = &countingReader{r: r.Body}
+		body = cr
+	}
+
+	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, p.upstream+r.URL.RequestURI(), body)
+	if err != nil {
+		p.writeError(w, start, 0, prof, endpoint, r.Method, clientIPHash, apiKeyHash, "", requestUsageMetadata{}, requestBytesFromReader(cr), 502, err)
+		return
+	}
+	upstreamReq.ContentLength = r.ContentLength
+	for k, vs := range r.Header {
+		for _, v := range vs {
+			upstreamReq.Header.Add(k, v)
+		}
+	}
+	if p.correlationMode == "inject_if_missing" && p.requestIDFromRequestHeaders(upstreamReq.Header) == "" {
+		upstreamReq.Header.Set(p.correlationHeader, newCorrelationID())
+	}
+
+	resp, err := p.transport.RoundTrip(upstreamReq)
+	ttfb := time.Since(start)
+	if err != nil {
+		p.writeError(w, start, ttfb, prof, endpoint, r.Method, clientIPHash, apiKeyHash, "", requestUsageMetadata{}, requestBytesFromReader(cr), 502, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	status := resp.StatusCode
+	if status == 0 {
+		status = http.StatusOK
+	}
+	isStream := responseIndicatesStream(resp.Header.Get("Content-Type"), isSSEMediaType(r.Header.Get("Accept")))
+	requestID := p.requestIDFromHeaders(resp.Header, upstreamReq.Header)
+
+	for k, vs := range resp.Header {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.Header().Set("X-Metering-Proxy", "1")
+	w.WriteHeader(status)
+
+	var written int64
+	var copyErr error
+	if isStream {
+		written, copyErr = copyAndFlushCount(w, resp.Body)
+	} else {
+		written, copyErr = io.Copy(w, resp.Body)
+	}
+	errStr := ""
+	if copyErr != nil {
+		errStr = safeOperationalError(copyErr)
+	}
+
+	p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, isStream,
+		clientIPHash, apiKeyHash, "", requestUsageMetadata{}, nil, requestBytesFromReader(cr), written, errStr,
+		event.OutcomeCaptured, event.ReasonRequestOnlyProfile, nil, "", "", "", "")
+}
+
+func requestBytesFromReader(cr *countingReader) int64 {
+	if cr == nil {
+		return 0
+	}
+	return cr.bytesRead
 }
 
 // ---------- countingReader ----------

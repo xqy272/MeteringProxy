@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1242,6 +1243,110 @@ func TestPassthroughProfile_NoMetering(t *testing.T) {
 		t.Errorf("expected 0 events for passthrough, got %d", len(rw.events))
 	}
 }
+
+func TestRequestOnlyProfile_DoesNotReadBodyBeforeRoundTrip(t *testing.T) {
+	body := strings.Repeat("x", 128*1024)
+	var reads atomic.Int64
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if got := reads.Load(); got != 0 {
+			t.Fatalf("request-only body was read before RoundTrip: %d reads", got)
+		}
+		gotBody, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatalf("read upstream request body: %v", err)
+		}
+		if string(gotBody) != body {
+			t.Fatalf("upstream body length = %d, want %d", len(gotBody), len(body))
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			Request:    req,
+		}, nil
+	})
+
+	rw := &testRW{}
+	p := New("http://request-only-upstream", hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: true})
+	p.transport = rt
+
+	reqBody := &countingTestReadCloser{reader: strings.NewReader(body), reads: &reads}
+	req := httptest.NewRequest("POST", "/v1/audio/transcriptions", reqBody)
+	req.Header.Set("Content-Type", "application/octet-stream")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if rec.Body.String() != `{"ok":true}` {
+		t.Fatalf("response body = %q", rec.Body.String())
+	}
+	if len(rw.events) != 1 {
+		t.Fatalf("events = %d, want 1 request-only event", len(rw.events))
+	}
+	ev := lastEvent(rw)
+	if ev.EndpointProfile != "openai_audio" || ev.CaptureMode != event.CaptureRequestOnly || ev.CaptureReason != event.ReasonRequestOnlyProfile {
+		t.Fatalf("event profile/mode/reason = %q/%q/%q", ev.EndpointProfile, ev.CaptureMode, ev.CaptureReason)
+	}
+	if ev.RequestBytes != int64(len(body)) {
+		t.Fatalf("request_bytes = %d, want %d", ev.RequestBytes, len(body))
+	}
+	if ev.ModelRequested != "" || ev.InputTokens != 0 || ev.OutputTokens != 0 || ev.TotalTokens != 0 {
+		t.Fatalf("request-only event should not extract model/tokens: %+v", ev)
+	}
+}
+
+func TestRequestOnlyProfile_StreamStillFlushes(t *testing.T) {
+	streamBody := "data: {\"progress\":1}\n\ndata: {\"progress\":2}\n\n"
+	rw := &testRW{}
+	p := New("http://request-only-upstream", hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
+	p.transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(streamBody)),
+			Request:    req,
+		}, nil
+	})
+
+	req := httptest.NewRequest("GET", "/v1/videos/video_123", nil)
+	req.Header.Set("Accept", "text/event-stream")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Body.String() != streamBody {
+		t.Fatalf("stream body modified: got %q", rec.Body.String())
+	}
+	if !rec.Flushed {
+		t.Fatal("request-only stream response was not flushed")
+	}
+	if len(rw.events) != 1 {
+		t.Fatalf("events = %d, want 1 request-only event", len(rw.events))
+	}
+	ev := lastEvent(rw)
+	if !ev.Stream || ev.ResponseBytes != int64(len(streamBody)) || ev.CaptureReason != event.ReasonRequestOnlyProfile {
+		t.Fatalf("stream request-only event = %+v", ev)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type countingTestReadCloser struct {
+	reader *strings.Reader
+	reads  *atomic.Int64
+}
+
+func (r *countingTestReadCloser) Read(p []byte) (int, error) {
+	r.reads.Add(1)
+	return r.reader.Read(p)
+}
+
+func (r *countingTestReadCloser) Close() error { return nil }
 
 func TestCaptureOutcome_Failed_OnParseError(t *testing.T) {
 	// Non-streaming response with broken JSON within sample limit.
