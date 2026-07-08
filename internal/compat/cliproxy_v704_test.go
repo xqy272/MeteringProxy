@@ -121,7 +121,7 @@ func TestCLIProxyAPIv704ProxyMetersCodexDirectResponses(t *testing.T) {
 		InitialBytes:      4096,
 		MaxBytes:          65536,
 		ExtendedModelScan: true,
-	})
+	}, config.ProxyTransportConfig{})
 	req := httptest.NewRequest(http.MethodPost, "/backend-api/codex/responses", bytes.NewReader([]byte(`{"model":"gpt-5.4-mini"}`)))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()

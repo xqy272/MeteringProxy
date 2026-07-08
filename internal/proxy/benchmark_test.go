@@ -368,7 +368,12 @@ func benchmarkPreRoundTripOnly(b *testing.B, method, path, body string, reqMeta 
 }
 
 func newBenchmarkProxy(rw RecordWriter, reqMeta config.RequestMetadataConfig) *Proxy {
-	return New("http://benchmark-upstream", hash.NewWithSalt("benchmark-salt"), rw, 2*1024*1024, reqMeta)
+	return New("http://benchmark-upstream", hash.NewWithSalt("benchmark-salt"), rw, 2*1024*1024, reqMeta, config.ProxyTransportConfig{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 20,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+	})
 }
 
 func benchmarkRequestMetadata(extendedScan bool) config.RequestMetadataConfig {

@@ -17,6 +17,10 @@ func resetForTest() {
 	atomic.StoreInt64(&ttfbSum, 0)
 	atomic.StoreInt64(&ttfbCount, 0)
 	atomic.StoreInt64(&meteringEnabled, 0)
+	atomic.StoreInt64(&transportConns, 0)
+	atomic.StoreInt64(&transportDialErr, 0)
+	atomic.StoreInt64(&transportDNSErr, 0)
+	atomic.StoreInt64(&transportClosed, 0)
 }
 
 func TestPrometheusMetricsIncludeLatencyTTFBAndKillSwitchState(t *testing.T) {
@@ -35,6 +39,29 @@ func TestPrometheusMetricsIncludeLatencyTTFBAndKillSwitchState(t *testing.T) {
 		"request_ttfb_ms_count 1",
 		"metering_enabled 0",
 		"capture_disabled 1",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("metrics output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestPrometheusMetricsIncludeTransportCounters(t *testing.T) {
+	resetForTest()
+	AddTransportConns(3)
+	AddTransportDialErrs(2)
+	AddTransportDNSErrs(1)
+	AddTransportClosed(4)
+
+	var b strings.Builder
+	writePrometheus(&b)
+	out := b.String()
+
+	for _, want := range []string{
+		"metering_proxy_transport_conns_created_total 3",
+		"metering_proxy_transport_conns_closed_total 4",
+		"metering_proxy_transport_dial_errors_total 2",
+		"metering_proxy_transport_dns_errors_total 1",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("metrics output missing %q:\n%s", want, out)

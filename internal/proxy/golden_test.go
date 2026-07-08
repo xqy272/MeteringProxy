@@ -69,7 +69,7 @@ func TestGolden_ChatCompletionsStream_ByteTransparent(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &goldenTestRW{}
-	p := New(upstream.URL, hash.NewWithSalt("golden-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
+	p := New(upstream.URL, hash.NewWithSalt("golden-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false}, config.ProxyTransportConfig{})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"test"}]}`))
@@ -122,7 +122,7 @@ func TestGolden_ChatCompletionsNonStream_ByteTransparent(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &goldenTestRW{}
-	p := New(upstream.URL, hash.NewWithSalt("golden-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
+	p := New(upstream.URL, hash.NewWithSalt("golden-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false}, config.ProxyTransportConfig{})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"gpt-4o","messages":[{"role":"user","content":"test"}]}`))
@@ -161,7 +161,7 @@ func TestGolden_ResponsesStream_ByteTransparent(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &goldenTestRW{}
-	p := New(upstream.URL, hash.NewWithSalt("golden-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
+	p := New(upstream.URL, hash.NewWithSalt("golden-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false}, config.ProxyTransportConfig{})
 
 	req := httptest.NewRequest("POST", "/v1/responses",
 		strings.NewReader(`{"model":"gpt-5.4-mini","stream":true}`))
@@ -207,7 +207,7 @@ func TestGolden_ResponsesNonStream_ByteTransparent(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &goldenTestRW{}
-	p := New(upstream.URL, hash.NewWithSalt("golden-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
+	p := New(upstream.URL, hash.NewWithSalt("golden-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false}, config.ProxyTransportConfig{})
 
 	req := httptest.NewRequest("POST", "/v1/responses",
 		strings.NewReader(`{"model":"gpt-5.4-mini"}`))
@@ -255,7 +255,7 @@ func TestGolden_SSEAcrossChunks_UsageInFinalChunk(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &goldenTestRW{}
-	p := New(upstream.URL, hash.NewWithSalt("golden-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
+	p := New(upstream.URL, hash.NewWithSalt("golden-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false}, config.ProxyTransportConfig{})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"test"}]}`))
@@ -291,7 +291,7 @@ func TestGolden_NonStreamReadWhileWrite(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &goldenTestRW{}
-	p := New(upstream.URL, hash.NewWithSalt("golden-salt"), rw, 1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
+	p := New(upstream.URL, hash.NewWithSalt("golden-salt"), rw, 1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false}, config.ProxyTransportConfig{})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader("{}"))
 	rec := httptest.NewRecorder()
@@ -325,7 +325,7 @@ func TestGolden_DroppedEventDoesNotBreakResponse(t *testing.T) {
 	defer upstream.Close()
 
 	dropRW := &droppingWriter{}
-	p := New(upstream.URL, hash.NewWithSalt("golden-salt"), dropRW, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
+	p := New(upstream.URL, hash.NewWithSalt("golden-salt"), dropRW, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false}, config.ProxyTransportConfig{})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
 	rec := httptest.NewRecorder()
@@ -353,7 +353,7 @@ func BenchmarkGolden_StreamForwarding(b *testing.B) {
 	defer upstream.Close()
 
 	rw := &goldenTestRW{}
-	p := New(upstream.URL, hash.NewWithSalt("bench-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
+	p := New(upstream.URL, hash.NewWithSalt("bench-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false}, config.ProxyTransportConfig{})
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

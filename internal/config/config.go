@@ -23,6 +23,7 @@ type Config struct {
 	WebUI                   WebUIConfig              `yaml:"webui"`
 	PricingFile             string                   `yaml:"pricing_file"`
 	RequestMetadata         RequestMetadataConfig    `yaml:"request_metadata"`
+	ProxyTransport          ProxyTransportConfig     `yaml:"proxy_transport"`
 	Observability           ObservabilityConfig      `yaml:"observability"`
 	CLIProxyManagement      CLIProxyManagementConfig `yaml:"cliproxy_management"`
 }
@@ -36,6 +37,20 @@ type RequestMetadataConfig struct {
 	InitialBytes      int64 `yaml:"initial_bytes"`
 	MaxBytes          int64 `yaml:"max_bytes"`
 	ExtendedModelScan bool  `yaml:"extended_model_scan"`
+}
+
+// ProxyTransportConfig tunes the HTTP transport used to forward requests to
+// the upstream. Defaults preserve the previous hard-coded behavior; every
+// field is optional and clamped to a safe range in Load.
+type ProxyTransportConfig struct {
+	MaxIdleConns          int           `yaml:"max_idle_conns"`
+	MaxIdleConnsPerHost   int           `yaml:"max_idle_conns_per_host"`
+	IdleConnTimeout       time.Duration `yaml:"idle_conn_timeout"`
+	TLSHandshakeTimeout   time.Duration `yaml:"tls_handshake_timeout"`
+	ExpectContinueTimeout time.Duration `yaml:"expect_continue_timeout"`
+	ResponseHeaderTimeout time.Duration `yaml:"response_header_timeout"`
+	ForceHTTP2            bool          `yaml:"force_http2"`
+	WarmupOnStart         bool          `yaml:"warmup_on_start"`
 }
 
 type ObservabilityConfig struct {
@@ -101,6 +116,13 @@ const (
 	minNonstreamSampleBytes    = 1024
 	defaultNonstreamSampleSize = 2 * 1024 * 1024
 	maxNonstreamSampleBytes    = 64 * 1024 * 1024
+
+	minProxyIdleConns        = 0
+	maxProxyIdleConns        = 10_000
+	minProxyIdleConnsPerHost = 0
+	maxProxyIdleConnsPerHost = 10_000
+	maxProxyIdleTimeout      = 1 * time.Hour
+	maxProxyHandshakeTimeout = 5 * time.Minute
 )
 
 func Load(path string) (*Config, error) {
@@ -127,6 +149,16 @@ func Load(path string) (*Config, error) {
 			InitialBytes:      4096,
 			MaxBytes:          65536,
 			ExtendedModelScan: false,
+		},
+		ProxyTransport: ProxyTransportConfig{
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   20,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			ResponseHeaderTimeout: 0,
+			ForceHTTP2:            false,
+			WarmupOnStart:         false,
 		},
 		Observability: ObservabilityConfig{
 			Correlation: CorrelationConfig{
@@ -227,6 +259,7 @@ func Load(path string) (*Config, error) {
 	if cfg.RequestMetadata.MaxBytes > 65536 {
 		cfg.RequestMetadata.MaxBytes = 65536
 	}
+	clampProxyTransport(&cfg.ProxyTransport)
 	if cfg.Observability.Correlation.Mode == "" {
 		cfg.Observability.Correlation.Mode = "passive"
 	}
@@ -333,6 +366,45 @@ func validateUpstream(raw string) error {
 		return fmt.Errorf("upstream URL must not include query or fragment")
 	}
 	return nil
+}
+
+// ClampProxyTransport fills missing fields with defaults and clamps configured
+// values to safe ranges. Zero-value fields inherit the previous hard-coded
+// behavior so existing deployments are unchanged.
+func ClampProxyTransport(t *ProxyTransportConfig) {
+	clampProxyTransport(t)
+}
+
+// clampProxyTransport fills missing fields with defaults and clamps configured
+// values to safe ranges. Zero-value fields inherit the previous hard-coded
+// behavior so existing deployments are unchanged.
+func clampProxyTransport(t *ProxyTransportConfig) {
+	if t.MaxIdleConns < minProxyIdleConns {
+		t.MaxIdleConns = 100
+	} else if t.MaxIdleConns > maxProxyIdleConns {
+		t.MaxIdleConns = maxProxyIdleConns
+	}
+	if t.MaxIdleConnsPerHost < minProxyIdleConnsPerHost {
+		t.MaxIdleConnsPerHost = 20
+	} else if t.MaxIdleConnsPerHost > maxProxyIdleConnsPerHost {
+		t.MaxIdleConnsPerHost = maxProxyIdleConnsPerHost
+	}
+	if t.IdleConnTimeout <= 0 {
+		t.IdleConnTimeout = 90 * time.Second
+	} else if t.IdleConnTimeout > maxProxyIdleTimeout {
+		t.IdleConnTimeout = maxProxyIdleTimeout
+	}
+	if t.TLSHandshakeTimeout <= 0 {
+		t.TLSHandshakeTimeout = 10 * time.Second
+	} else if t.TLSHandshakeTimeout > maxProxyHandshakeTimeout {
+		t.TLSHandshakeTimeout = maxProxyHandshakeTimeout
+	}
+	if t.ExpectContinueTimeout < 0 {
+		t.ExpectContinueTimeout = 1 * time.Second
+	}
+	if t.ResponseHeaderTimeout < 0 {
+		t.ResponseHeaderTimeout = 0
+	}
 }
 
 func validateCLIProxyManagement(cfg CLIProxyManagementConfig) error {

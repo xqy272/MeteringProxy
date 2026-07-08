@@ -144,9 +144,20 @@ func main() {
 	defer close(stopHealth)
 
 	// Create proxy handler.
-	proxyHandler := proxy.New(cfg.Upstream, hasher, batchWriter, cfg.MaxNonstreamSampleBytes, cfg.RequestMetadata)
+	proxyHandler := proxy.New(cfg.Upstream, hasher, batchWriter, cfg.MaxNonstreamSampleBytes, cfg.RequestMetadata, cfg.ProxyTransport)
 	proxyHandler.SetCorrelation(cfg.Observability.Correlation.Mode, cfg.Observability.Correlation.Header)
 	proxyHandler.SetMeteringEnabled(cfg.MeteringEnabled)
+
+	// Opt-in connection warmup. Default is off to avoid probing CPA on start.
+	if cfg.ProxyTransport.WarmupOnStart {
+		go func() {
+			warmupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := proxyHandler.WarmupConnection(warmupCtx); err != nil {
+				log.Printf("transport warmup failed (non-fatal): %v", err)
+			}
+		}()
+	}
 
 	// CLIProxyAPI management client and pollers.
 	var credPoller *credential.Poller

@@ -23,7 +23,7 @@ func TestProxyNonStreaming_ErrorFieldsRecorded(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false}, config.ProxyTransportConfig{})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
 	rec := httptest.NewRecorder()
@@ -63,7 +63,7 @@ func TestProxyStreaming_ErrorFieldsRecorded(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false}, config.ProxyTransportConfig{})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o","stream":true}`))
 	req.Header.Set("Accept", "text/event-stream")
@@ -84,7 +84,7 @@ func TestProxyStreaming_ErrorFieldsRecorded(t *testing.T) {
 
 func TestProxyRequest_UpstreamErrorSetsErrorClass(t *testing.T) {
 	rw := &testRW{}
-	p := New("http://127.0.0.1:1", hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
+	p := New("http://127.0.0.1:1", hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false}, config.ProxyTransportConfig{})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
 	rec := httptest.NewRecorder()
@@ -129,7 +129,7 @@ func TestProxyRequest_UpstreamErrorSetsErrorClass(t *testing.T) {
 
 func TestForwardTransparentErrorSetsMeteringHeader(t *testing.T) {
 	rw := &testRW{}
-	p := New("http://127.0.0.1:1", hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
+	p := New("http://127.0.0.1:1", hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false}, config.ProxyTransportConfig{})
 
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	rec := httptest.NewRecorder()
@@ -215,7 +215,7 @@ func TestProxyStreaming_SSEErrorSamplingOverflow(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false}, config.ProxyTransportConfig{})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o","stream":true}`))
 	req.Header.Set("Accept", "text/event-stream")
@@ -244,7 +244,7 @@ func TestProxyNonStreaming_ErrorResponseByteTransparent(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false}, config.ProxyTransportConfig{})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
 	rec := httptest.NewRecorder()
@@ -266,7 +266,7 @@ func TestProxyNonStreaming_ParseErrorDoesNotBlockForwarding(t *testing.T) {
 	defer upstream.Close()
 
 	rw := &testRW{}
-	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
+	p := New(upstream.URL, hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false}, config.ProxyTransportConfig{})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
 	rec := httptest.NewRecorder()

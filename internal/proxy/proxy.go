@@ -54,26 +54,87 @@ type requestUsageMetadata struct {
 	HasMask         bool
 }
 
-func New(upstream string, hasher *hash.Hasher, rw RecordWriter, maxSample int64, reqMeta config.RequestMetadataConfig) *Proxy {
+func New(upstream string, hasher *hash.Hasher, rw RecordWriter, maxSample int64, reqMeta config.RequestMetadataConfig, transportCfg config.ProxyTransportConfig) *Proxy {
 	p := &Proxy{
 		upstream:  upstream,
 		hasher:    hasher,
 		writer:    rw,
 		maxSample: maxSample,
 		registry:  profile.NewRegistry(),
-		transport: &http.Transport{
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 20,
-			IdleConnTimeout:     90 * time.Second,
-			DisableCompression:  true,
-			TLSHandshakeTimeout: 10 * time.Second,
-		},
+		transport: buildTransport(transportCfg),
 		reqMeta:           reqMeta,
 		correlationMode:   "passive",
 		correlationHeader: "X-Request-ID",
 	}
 	p.meteringEnabled.Store(true)
 	return p
+}
+
+// buildTransport constructs the HTTP transport used to forward requests to
+// the upstream. DisableCompression stays true so the transport never adds
+// Accept-Encoding or transparently decompresses responses (invariant #3).
+// A wrapped DialContext records connection and dial-error counters via
+// lock-free atomics; it runs only when a new connection is created, never
+// on the per-request hot path.
+func buildTransport(cfg config.ProxyTransportConfig) *http.Transport {
+	config.ClampProxyTransport(&cfg)
+	dialer := &net.Dialer{}
+	return &http.Transport{
+		MaxIdleConns:          cfg.MaxIdleConns,
+		MaxIdleConnsPerHost:   cfg.MaxIdleConnsPerHost,
+		IdleConnTimeout:       cfg.IdleConnTimeout,
+		DisableCompression:    true,
+		ForceAttemptHTTP2:     cfg.ForceHTTP2,
+		TLSHandshakeTimeout:   cfg.TLSHandshakeTimeout,
+		ExpectContinueTimeout: cfg.ExpectContinueTimeout,
+		ResponseHeaderTimeout: cfg.ResponseHeaderTimeout,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			conn, err := dialer.DialContext(ctx, network, addr)
+			if err != nil {
+				var dnsErr *net.DNSError
+				if errors.As(err, &dnsErr) {
+					metrics.AddTransportDNSErrs(1)
+				} else {
+					metrics.AddTransportDialErrs(1)
+				}
+				return nil, err
+			}
+			metrics.AddTransportConns(1)
+			return &countingConn{Conn: conn}, nil
+		},
+	}
+}
+
+// countingConn wraps a net.Conn to count closed connections for transport
+// observability. The Close call is the only instrumented hot path, and it
+// uses a single atomic add.
+type countingConn struct {
+	net.Conn
+	closed uint32
+}
+
+func (c *countingConn) Close() error {
+	if atomic.CompareAndSwapUint32(&c.closed, 0, 1) {
+		metrics.AddTransportClosed(1)
+	}
+	return c.Conn.Close()
+}
+
+// WarmupConnection issues a single GET to the upstream /v1/models endpoint to
+// pre-fill the connection pool. It is opt-in (proxy_transport.warmup_on_start)
+// and must never block or fail LLM traffic. Errors are logged but not returned
+// to the caller; the caller decides whether to log them.
+func (p *Proxy) WarmupConnection(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.upstream+"/v1/models", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := p.transport.RoundTrip(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
 }
 
 func (p *Proxy) SetMeteringEnabled(enabled bool) {

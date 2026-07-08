@@ -93,6 +93,109 @@ max_nonstream_sample_bytes: 999999999
 	}
 }
 
+func TestLoadProxyTransportDefaultsPreserveBehavior(t *testing.T) {
+	path := writeConfig(t, `
+upstream: "http://127.0.0.1:8317"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	pt := cfg.ProxyTransport
+	if pt.MaxIdleConns != 100 {
+		t.Errorf("MaxIdleConns = %d, want 100", pt.MaxIdleConns)
+	}
+	if pt.MaxIdleConnsPerHost != 20 {
+		t.Errorf("MaxIdleConnsPerHost = %d, want 20", pt.MaxIdleConnsPerHost)
+	}
+	if pt.IdleConnTimeout != 90*time.Second {
+		t.Errorf("IdleConnTimeout = %v, want 90s", pt.IdleConnTimeout)
+	}
+	if pt.TLSHandshakeTimeout != 10*time.Second {
+		t.Errorf("TLSHandshakeTimeout = %v, want 10s", pt.TLSHandshakeTimeout)
+	}
+	if pt.ExpectContinueTimeout != 1*time.Second {
+		t.Errorf("ExpectContinueTimeout = %v, want 1s", pt.ExpectContinueTimeout)
+	}
+	if pt.ResponseHeaderTimeout != 0 {
+		t.Errorf("ResponseHeaderTimeout = %v, want 0 (streaming-safe)", pt.ResponseHeaderTimeout)
+	}
+	if pt.ForceHTTP2 {
+		t.Errorf("ForceHTTP2 = true, want false (preserve current behavior)")
+	}
+	if pt.WarmupOnStart {
+		t.Errorf("WarmupOnStart = true, want false (opt-in only)")
+	}
+}
+
+func TestLoadProxyTransportClamps(t *testing.T) {
+	path := writeConfig(t, `
+upstream: "http://127.0.0.1:8317"
+proxy_transport:
+  max_idle_conns: 999999
+  max_idle_conns_per_host: 999999
+  idle_conn_timeout: 24h
+  tls_handshake_timeout: 2h
+  expect_continue_timeout: -5s
+  response_header_timeout: -5s
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	pt := cfg.ProxyTransport
+	if pt.MaxIdleConns != maxProxyIdleConns {
+		t.Errorf("MaxIdleConns = %d, want %d", pt.MaxIdleConns, maxProxyIdleConns)
+	}
+	if pt.MaxIdleConnsPerHost != maxProxyIdleConnsPerHost {
+		t.Errorf("MaxIdleConnsPerHost = %d, want %d", pt.MaxIdleConnsPerHost, maxProxyIdleConnsPerHost)
+	}
+	if pt.IdleConnTimeout != maxProxyIdleTimeout {
+		t.Errorf("IdleConnTimeout = %v, want %v", pt.IdleConnTimeout, maxProxyIdleTimeout)
+	}
+	if pt.TLSHandshakeTimeout != maxProxyHandshakeTimeout {
+		t.Errorf("TLSHandshakeTimeout = %v, want %v", pt.TLSHandshakeTimeout, maxProxyHandshakeTimeout)
+	}
+	if pt.ExpectContinueTimeout != 1*time.Second {
+		t.Errorf("ExpectContinueTimeout = %v, want 1s (negative clamped to default)", pt.ExpectContinueTimeout)
+	}
+	if pt.ResponseHeaderTimeout != 0 {
+		t.Errorf("ResponseHeaderTimeout = %v, want 0 (negative clamped to 0)", pt.ResponseHeaderTimeout)
+	}
+}
+
+func TestLoadProxyTransportAcceptsExplicitValues(t *testing.T) {
+	path := writeConfig(t, `
+upstream: "http://127.0.0.1:8317"
+proxy_transport:
+  max_idle_conns: 200
+  max_idle_conns_per_host: 32
+  idle_conn_timeout: 120s
+  force_http2: true
+  warmup_on_start: true
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	pt := cfg.ProxyTransport
+	if pt.MaxIdleConns != 200 {
+		t.Errorf("MaxIdleConns = %d, want 200", pt.MaxIdleConns)
+	}
+	if pt.MaxIdleConnsPerHost != 32 {
+		t.Errorf("MaxIdleConnsPerHost = %d, want 32", pt.MaxIdleConnsPerHost)
+	}
+	if pt.IdleConnTimeout != 120*time.Second {
+		t.Errorf("IdleConnTimeout = %v, want 120s", pt.IdleConnTimeout)
+	}
+	if !pt.ForceHTTP2 {
+		t.Errorf("ForceHTTP2 = false, want true")
+	}
+	if !pt.WarmupOnStart {
+		t.Errorf("WarmupOnStart = false, want true")
+	}
+}
+
 func TestLoadAllowsInjectIfMissingCorrelationMode(t *testing.T) {
 	path := writeConfig(t, `
 upstream: "http://127.0.0.1:8317"

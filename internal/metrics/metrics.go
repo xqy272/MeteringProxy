@@ -10,16 +10,20 @@ import (
 // Counters shared across the process. The writer and proxy update these
 // via the exported Set* functions so that /metrics reflects live state.
 var (
-	sseLineSkips    int64
-	queueDepth      int64
-	droppedEvents   int64
-	parseErrors     int64
-	dbWriteErrors   int64
-	latencySum      int64
-	latencyCount    int64
-	ttfbSum         int64
-	ttfbCount       int64
-	meteringEnabled int64
+	sseLineSkips      int64
+	queueDepth        int64
+	droppedEvents     int64
+	parseErrors       int64
+	dbWriteErrors     int64
+	latencySum        int64
+	latencyCount      int64
+	ttfbSum           int64
+	ttfbCount         int64
+	meteringEnabled   int64
+	transportConns    int64
+	transportDialErr  int64
+	transportDNSErr   int64
+	transportClosed   int64
 )
 
 func SetQueueDepth(v int64)    { atomic.StoreInt64(&queueDepth, v) }
@@ -41,6 +45,13 @@ func ObserveRequest(latencyMs, ttfbMs int64) {
 	atomic.AddInt64(&ttfbSum, ttfbMs)
 	atomic.AddInt64(&ttfbCount, 1)
 }
+
+// Transport counters are updated only when a connection is created or fails
+// to dial — never on the per-request hot path — so they use lock-free atomics.
+func AddTransportConns(n int64)   { atomic.AddInt64(&transportConns, n) }
+func AddTransportDialErrs(n int64) { atomic.AddInt64(&transportDialErr, n) }
+func AddTransportDNSErrs(n int64)  { atomic.AddInt64(&transportDNSErr, n) }
+func AddTransportClosed(n int64)   { atomic.AddInt64(&transportClosed, n) }
 
 // Handler returns an HTTP handler that serves Prometheus text metrics.
 func Handler() http.Handler {
@@ -100,4 +111,25 @@ func writePrometheus(w io.Writer) {
 	fmt.Fprintf(w, "# HELP capture_disabled Whether capture is disabled by kill switch\n")
 	fmt.Fprintf(w, "# TYPE capture_disabled gauge\n")
 	fmt.Fprintf(w, "capture_disabled %d\n", 1-metering)
+
+	tConns := atomic.LoadInt64(&transportConns)
+	tDial := atomic.LoadInt64(&transportDialErr)
+	tDNS := atomic.LoadInt64(&transportDNSErr)
+	tClosed := atomic.LoadInt64(&transportClosed)
+
+	fmt.Fprintf(w, "# HELP metering_proxy_transport_conns_created_total Total upstream connections established by the proxy transport\n")
+	fmt.Fprintf(w, "# TYPE metering_proxy_transport_conns_created_total counter\n")
+	fmt.Fprintf(w, "metering_proxy_transport_conns_created_total %d\n", tConns)
+
+	fmt.Fprintf(w, "# HELP metering_proxy_transport_conns_closed_total Total upstream connections closed by the proxy transport\n")
+	fmt.Fprintf(w, "# TYPE metering_proxy_transport_conns_closed_total counter\n")
+	fmt.Fprintf(w, "metering_proxy_transport_conns_closed_total %d\n", tClosed)
+
+	fmt.Fprintf(w, "# HELP metering_proxy_transport_dial_errors_total Total upstream dial failures (connection refused, timeout, etc.)\n")
+	fmt.Fprintf(w, "# TYPE metering_proxy_transport_dial_errors_total counter\n")
+	fmt.Fprintf(w, "metering_proxy_transport_dial_errors_total %d\n", tDial)
+
+	fmt.Fprintf(w, "# HELP metering_proxy_transport_dns_errors_total Total upstream DNS resolution failures\n")
+	fmt.Fprintf(w, "# TYPE metering_proxy_transport_dns_errors_total counter\n")
+	fmt.Fprintf(w, "metering_proxy_transport_dns_errors_total %d\n", tDNS)
 }
