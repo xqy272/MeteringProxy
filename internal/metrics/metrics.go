@@ -25,6 +25,10 @@ var (
 	transportDNSErr   int64
 	transportClosed   int64
 	compressedStreams int64
+	downstreamWriteErr int64
+	streamFlushes     int64
+	requestSampleBytes  int64
+	responseSampleBytes int64
 )
 
 func SetQueueDepth(v int64)    { atomic.StoreInt64(&queueDepth, v) }
@@ -54,6 +58,10 @@ func AddTransportDialErrs(n int64) { atomic.AddInt64(&transportDialErr, n) }
 func AddTransportDNSErrs(n int64)  { atomic.AddInt64(&transportDNSErr, n) }
 func AddTransportClosed(n int64)   { atomic.AddInt64(&transportClosed, n) }
 func AddCompressedStream(n int64)  { atomic.AddInt64(&compressedStreams, n) }
+func AddDownstreamWriteErr(n int64) { atomic.AddInt64(&downstreamWriteErr, n) }
+func AddStreamFlushes(n int64)     { atomic.AddInt64(&streamFlushes, n) }
+func AddRequestSampleBytes(n int64) { atomic.AddInt64(&requestSampleBytes, n) }
+func AddResponseSampleBytes(n int64) { atomic.AddInt64(&responseSampleBytes, n) }
 
 // Handler returns an HTTP handler that serves Prometheus text metrics.
 func Handler() http.Handler {
@@ -139,4 +147,24 @@ func writePrometheus(w io.Writer) {
 	fmt.Fprintf(w, "# HELP metering_proxy_compressed_streams_total Total SSE streams forwarded but not metered because the response was compressed\n")
 	fmt.Fprintf(w, "# TYPE metering_proxy_compressed_streams_total counter\n")
 	fmt.Fprintf(w, "metering_proxy_compressed_streams_total %d\n", cs)
+
+	dwe := atomic.LoadInt64(&downstreamWriteErr)
+	fmt.Fprintf(w, "# HELP metering_proxy_downstream_write_errors_total Total errors writing response bytes to the downstream client\n")
+	fmt.Fprintf(w, "# TYPE metering_proxy_downstream_write_errors_total counter\n")
+	fmt.Fprintf(w, "metering_proxy_downstream_write_errors_total %d\n", dwe)
+
+	sf := atomic.LoadInt64(&streamFlushes)
+	fmt.Fprintf(w, "# HELP metering_proxy_stream_flushes_total Total SSE flush calls to the downstream client\n")
+	fmt.Fprintf(w, "# TYPE metering_proxy_stream_flushes_total counter\n")
+	fmt.Fprintf(w, "metering_proxy_stream_flushes_total %d\n", sf)
+
+	rsb := atomic.LoadInt64(&requestSampleBytes)
+	fmt.Fprintf(w, "# HELP metering_proxy_request_sample_bytes_total Total request body bytes sampled for metering (prefix/tail)\n")
+	fmt.Fprintf(w, "# TYPE metering_proxy_request_sample_bytes_total counter\n")
+	fmt.Fprintf(w, "metering_proxy_request_sample_bytes_total %d\n", rsb)
+
+	psb := atomic.LoadInt64(&responseSampleBytes)
+	fmt.Fprintf(w, "# HELP metering_proxy_response_sample_bytes_total Total response body bytes sampled for metering\n")
+	fmt.Fprintf(w, "# TYPE metering_proxy_response_sample_bytes_total counter\n")
+	fmt.Fprintf(w, "metering_proxy_response_sample_bytes_total %d\n", psb)
 }

@@ -311,3 +311,48 @@ func TestFetchAuthFilesStillDecodesLegacyAuthFilesResponse(t *testing.T) {
 		t.Fatalf("entry = %#v", entry)
 	}
 }
+
+func TestManagementRequestsStampComponentHeaders(t *testing.T) {
+	var seenUserAgent, seenComponent string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenUserAgent = r.Header.Get("User-Agent")
+		seenComponent = r.Header.Get("X-Metering-Component")
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v0/management/auth-files":
+			_, _ = w.Write([]byte(`{"files":[]}`))
+		case "/v0/management/usage-queue":
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(CLIProxyConfig{
+		BaseURL:   server.URL + "/v0/management",
+		Key:       "secret",
+		Timeout:   time.Second,
+		Component: "credential_health",
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	if _, err := client.FetchAuthFiles(); err != nil {
+		t.Fatalf("FetchAuthFiles: %v", err)
+	}
+	if seenUserAgent != managementUserAgent {
+		t.Errorf("FetchAuthFiles User-Agent = %q, want %q", seenUserAgent, managementUserAgent)
+	}
+	if seenComponent != "credential_health" {
+		t.Errorf("FetchAuthFiles X-Metering-Component = %q, want credential_health", seenComponent)
+	}
+
+	if _, err := client.FetchUsageQueue(1); err != nil {
+		t.Fatalf("FetchUsageQueue: %v", err)
+	}
+	if seenComponent != "credential_health" {
+		t.Errorf("FetchUsageQueue X-Metering-Component = %q, want credential_health", seenComponent)
+	}
+}

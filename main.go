@@ -174,10 +174,11 @@ func main() {
 				cfg.Observability.Correlation.SideChannelMerge == "request_id" &&
 				cfg.CLIProxyManagement.UsageQueue.MergeMode == "request_id"
 			usageClient, err := cliproxy.NewClient(cliproxy.CLIProxyConfig{
-				Enabled: cfg.CLIProxyManagement.Enabled,
-				BaseURL: cfg.CLIProxyManagement.BaseURL,
-				Key:     managementKey,
-				Timeout: cfg.CLIProxyManagement.UsageQueue.Timeout,
+				Enabled:   cfg.CLIProxyManagement.Enabled,
+				BaseURL:   cfg.CLIProxyManagement.BaseURL,
+				Key:       managementKey,
+				Timeout:   cfg.CLIProxyManagement.UsageQueue.Timeout,
+				Component: "usage_queue",
 			})
 			if err != nil {
 				log.Fatalf("Failed to create CLIProxyAPI usage queue client: %v", err)
@@ -190,10 +191,11 @@ func main() {
 
 		if cfg.CLIProxyManagement.CredentialHealth.Enabled {
 			credClient, err := cliproxy.NewClient(cliproxy.CLIProxyConfig{
-				Enabled: cfg.CLIProxyManagement.Enabled,
-				BaseURL: cfg.CLIProxyManagement.BaseURL,
-				Key:     managementKey,
-				Timeout: cfg.CLIProxyManagement.CredentialHealth.Timeout,
+				Enabled:   cfg.CLIProxyManagement.Enabled,
+				BaseURL:   cfg.CLIProxyManagement.BaseURL,
+				Key:       managementKey,
+				Timeout:   cfg.CLIProxyManagement.CredentialHealth.Timeout,
+				Component: "credential_health",
 			})
 			if err != nil {
 				log.Fatalf("Failed to create CLIProxyAPI credential client: %v", err)
@@ -205,10 +207,11 @@ func main() {
 
 		if cfg.CLIProxyManagement.Quota.Enabled {
 			quotaClient, err := cliproxy.NewClient(cliproxy.CLIProxyConfig{
-				Enabled: cfg.CLIProxyManagement.Enabled,
-				BaseURL: cfg.CLIProxyManagement.BaseURL,
-				Key:     managementKey,
-				Timeout: cfg.CLIProxyManagement.Quota.Timeout,
+				Enabled:   cfg.CLIProxyManagement.Enabled,
+				BaseURL:   cfg.CLIProxyManagement.BaseURL,
+				Key:       managementKey,
+				Timeout:   cfg.CLIProxyManagement.Quota.Timeout,
+				Component: "quota_refresh",
 			})
 			if err != nil {
 				log.Fatalf("Failed to create CLIProxyAPI quota client: %v", err)

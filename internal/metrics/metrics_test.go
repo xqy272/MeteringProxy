@@ -22,6 +22,10 @@ func resetForTest() {
 	atomic.StoreInt64(&transportDNSErr, 0)
 	atomic.StoreInt64(&transportClosed, 0)
 	atomic.StoreInt64(&compressedStreams, 0)
+	atomic.StoreInt64(&downstreamWriteErr, 0)
+	atomic.StoreInt64(&streamFlushes, 0)
+	atomic.StoreInt64(&requestSampleBytes, 0)
+	atomic.StoreInt64(&responseSampleBytes, 0)
 }
 
 func TestPrometheusMetricsIncludeLatencyTTFBAndKillSwitchState(t *testing.T) {

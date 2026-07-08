@@ -514,6 +514,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 			if n > 0 {
 				compressedBytes += int64(n)
 				if _, werr := w.Write(cbuf[:n]); werr != nil {
+					metrics.AddDownstreamWriteErr(1)
 					finalModelRequested, finalRequestMeta := finalizeRequest()
 					p.recordUsage(start, ttfb, prof, endpoint, r.Method, requestID, status, true,
 						clientIPHash, apiKeyHash, finalModelRequested, finalRequestMeta, nil, cr.bytesRead, compressedBytes, safeOperationalError(werr),
@@ -521,6 +522,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 					return
 				}
 				flusher.Flush()
+				metrics.AddStreamFlushes(1)
 			}
 			if readErr != nil {
 				errStr := ""
@@ -647,6 +649,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 			totalBytes += int64(n)
 
 			if _, werr := w.Write(buf[:n]); werr != nil {
+				metrics.AddDownstreamWriteErr(1)
 				flushPendingEvent()
 				result := p.finalizeStreamUsage(lastUsage, responsesState, prof, sseParseErrs)
 				reportParseErrors()
@@ -657,6 +660,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 				return
 			}
 			flusher.Flush()
+			metrics.AddStreamFlushes(1)
 
 			chunk := buf[:n]
 			for len(chunk) > 0 {
@@ -1137,6 +1141,7 @@ func (p *requestBodyProbe) Write(data []byte) (int, error) {
 	if p == nil || p.buf == nil {
 		return len(data), nil
 	}
+	metrics.AddRequestSampleBytes(int64(len(data)))
 	return p.buf.Write(data)
 }
 
@@ -1200,6 +1205,9 @@ func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, resp *ht
 	captureReason := ""
 
 	sample := sampler.Bytes()
+	if len(sample) > 0 {
+		metrics.AddResponseSampleBytes(int64(len(sample)))
+	}
 	if prof != nil && prof.CaptureMode == event.CaptureRequestOnly {
 		captureOutcome = event.OutcomeCaptured
 		captureReason = event.ReasonRequestOnlyProfile

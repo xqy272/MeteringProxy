@@ -18,6 +18,7 @@ type Client struct {
 	baseURL    string
 	key        string
 	httpClient *http.Client
+	component  string
 }
 
 func NewClient(cfg CLIProxyConfig) (*Client, error) {
@@ -38,12 +39,22 @@ func NewClient(cfg CLIProxyConfig) (*Client, error) {
 		timeout = 10 * time.Second
 	}
 	return &Client{
-		baseURL: baseURL,
-		key:     key,
+		baseURL:   baseURL,
+		key:       key,
+		component: cfg.Component,
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
 	}, nil
+}
+
+// setManagementHeaders stamps User-Agent and X-Metering-Component on every
+// management request so CPA can distinguish them from LLM traffic (4.2.6).
+func (c *Client) setManagementHeaders(req *http.Request) {
+	req.Header.Set("User-Agent", managementUserAgent)
+	if c.component != "" {
+		req.Header.Set("X-Metering-Component", c.component)
+	}
 }
 
 func ReadKeyFile(path string) (string, error) {
@@ -86,7 +97,14 @@ type CLIProxyConfig struct {
 	KeyFile string        `yaml:"key_file"`
 	Key     string        `yaml:"-"`
 	Timeout time.Duration `yaml:"timeout"`
+	// Component identifies which subsystem owns this client. It is sent as
+	// X-Metering-Component on every management request so CPA logs can
+	// distinguish credential_health, usage_queue, and quota_refresh traffic
+	// from LLM request traffic. Empty means "unspecified".
+	Component string `yaml:"-"`
 }
+
+const managementUserAgent = "MeteringProxy/1.0 (management)"
 
 type AuthFileEntry struct {
 	ID                   string                    `json:"id"`
@@ -250,6 +268,7 @@ func (c *Client) FetchAuthFiles() (*AuthFilesResponse, error) {
 	if c.key != "" {
 		req.Header.Set("Authorization", "Bearer "+c.key)
 	}
+	c.setManagementHeaders(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch auth-files: %w", err)
@@ -275,6 +294,7 @@ func (c *Client) DoAPICall(method, path string, body io.Reader) ([]byte, int, er
 		req.Header.Set("Authorization", "Bearer "+c.key)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	c.setManagementHeaders(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, 0, fmt.Errorf("api-call %s %s: %w", method, path, err)
@@ -299,6 +319,7 @@ func (c *Client) FetchUsageQueue(count int) ([][]byte, error) {
 	if c.key != "" {
 		req.Header.Set("Authorization", "Bearer "+c.key)
 	}
+	c.setManagementHeaders(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch usage-queue: %w", err)
