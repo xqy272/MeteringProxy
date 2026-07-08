@@ -381,14 +381,19 @@ func benchmarkRequestMetadata(extendedScan bool) config.RequestMetadataConfig {
 
 func benchmarkResponse(req *http.Request, tc proxyBenchmarkCase, tracker *benchmarkSSELatency) *http.Response {
 	body := io.NopCloser(bytes.NewReader(tc.responseBody))
+	cl := int64(-1)
 	if len(tc.sseChunks) > 0 {
 		body = &benchmarkSSEBody{chunks: tc.sseChunks, tracker: tracker}
+		cl = -1 // streaming responses do not advertise a fixed Content-Length
+	} else {
+		cl = int64(len(tc.responseBody))
 	}
 	return &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{tc.responseContentType}},
-		Body:       body,
-		Request:    req,
+		StatusCode:     http.StatusOK,
+		Header:         http.Header{"Content-Type": []string{tc.responseContentType}},
+		Body:           body,
+		ContentLength:  cl,
+		Request:        req,
 	}
 }
 

@@ -863,6 +863,21 @@ type limitedBuffer struct {
 	overflow bool
 }
 
+// newLimitedBuffer creates a sample buffer capped at max bytes. When the
+// upstream advertises a Content-Length, the buffer is pre-sized to avoid
+// slice-growth reallocations while io.Copy forwards the response body.
+func newLimitedBuffer(max int, contentLength int64) *limitedBuffer {
+	lb := &limitedBuffer{max: max}
+	if contentLength > 0 {
+		hint := int(contentLength)
+		if hint > max {
+			hint = max
+		}
+		lb.buf = make([]byte, 0, hint)
+	}
+	return lb
+}
+
 func (lb *limitedBuffer) Write(p []byte) (int, error) {
 	origLen := len(p)
 	if lb.overflow {
@@ -1068,7 +1083,7 @@ func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, resp *ht
 		sampler = pt
 		overflow = pt.Overflow
 	} else {
-		lb := &limitedBuffer{max: int(p.maxSample)}
+		lb := newLimitedBuffer(int(p.maxSample), resp.ContentLength)
 		sampler = lb
 		overflow = func() bool { return lb.overflow }
 	}
