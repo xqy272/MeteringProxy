@@ -3,6 +3,7 @@ package webui
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"ai-gateway-metering-proxy/internal/db"
@@ -426,4 +427,81 @@ func (s *Server) handleProviderQuotaDiagnostics(w http.ResponseWriter, r *http.R
 		"enabled": s.quotaPoller != nil,
 		"events":  events,
 	})
+}
+
+// handleModelAssets returns a per-model view merging request_usage traffic with
+// pricing configuration. It helps discover used-but-unpriced models and
+// request-only models that should not be read as complete cost (4.5 节).
+func (s *Server) handleModelAssets(w http.ResponseWriter, r *http.Request) {
+	since, rangeKey := parseRange(r)
+	rows, err := s.db.ModelAssets(since)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+
+	report := &event.ModelAssetsReport{
+		Range: rangeKey,
+		Items: []event.ModelAssetItem{},
+	}
+
+	for _, row := range rows {
+		cost, known := s.pricing.CostWithCacheCreation(row.Model, row.InputTokens, row.OutputTokens, 0, 0, 0)
+
+		pricingSource := "unpriced"
+		if known {
+			pricingSource = "exact"
+		}
+
+		profiles := splitCSV(row.EndpointProfiles)
+		captureModes := splitCSV(row.CaptureModes)
+		captureMode := "unknown"
+		if len(captureModes) > 0 {
+			captureMode = captureModes[0]
+		}
+
+		sources := []string{"requested"}
+		if known {
+			sources = append(sources, "pricing")
+		}
+
+		report.Items = append(report.Items, event.ModelAssetItem{
+			Model:            row.Model,
+			Sources:          sources,
+			EndpointProfiles: profiles,
+			CaptureMode:      captureMode,
+			RequestCount:     row.RequestCount,
+			FailedCount:      row.FailedCount,
+			TotalTokens:      row.TotalTokens,
+			EstimatedCost:    cost,
+			CostKnown:        known,
+			PricingSource:    pricingSource,
+			LatestSeenAt:     row.LatestSeenAt,
+		})
+
+		report.Summary.ModelsTotal++
+		report.Summary.UsedModels++
+		if !known {
+			report.Summary.UnpricedUsedModels++
+		}
+		if captureMode == "request_only" {
+			report.Summary.RequestOnlyModels++
+		}
+	}
+
+	writeJSON(w, report)
+}
+
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

@@ -61,6 +61,7 @@ type ReportStore interface {
 	ImageModels(since time.Time) ([]db.ImageModelRow, error)
 	ImageRequests(limit int, since time.Time) ([]db.RequestRow, error)
 	GatewayCapabilities(since time.Time) ([]db.GatewayCapabilityRow, error)
+	ModelAssets(since time.Time) ([]db.ModelAssetRow, error)
 }
 
 // HealthWriter is the write-side interface for health metrics.

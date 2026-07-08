@@ -180,6 +180,8 @@ func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleObservability(w, r)
 	case strings.HasSuffix(path, "/api/gateway/capabilities"):
 		s.handleGatewayCapabilities(w, r)
+	case strings.HasSuffix(path, "/api/model-assets"):
+		s.handleModelAssets(w, r)
 	case strings.HasSuffix(path, "/api/cpa/auth"):
 		s.handleCPAAuth(w, r)
 	case strings.HasSuffix(path, "/api/cpa/auth/refresh"):

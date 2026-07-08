@@ -1376,3 +1376,105 @@ func TestProviderQuotaUnsupportedWhenNoAdapterRows(t *testing.T) {
 		t.Errorf("module_status = %v, want unsupported", resp["module_status"])
 	}
 }
+
+func TestModelAssets(t *testing.T) {
+	s, database := newTestServer(t, "/metering")
+	s.pricing.Models["gpt-4o"] = pricing.ModelPrice{InputPer1M: 2.5, OutputPer1M: 10.0}
+	now := time.Now().UTC().Truncate(time.Second)
+
+	records := []db.UsageRecord{
+		{
+			CreatedAt: now.Add(-10 * time.Minute).Format(time.RFC3339),
+			Endpoint:  "/v1/chat/completions", Method: "POST", Status: 200,
+			EndpointProfile: "chat_completions", CaptureMode: "usage_metered",
+			ModelRequested: "gpt-4o", ModelReturned: "gpt-4o",
+			InputTokens: 100, OutputTokens: 50, TotalTokens: 150,
+		},
+		{
+			CreatedAt: now.Add(-8 * time.Minute).Format(time.RFC3339),
+			Endpoint:  "/v1/chat/completions", Method: "POST", Status: 500,
+			EndpointProfile: "chat_completions", CaptureMode: "usage_metered",
+			ModelRequested: "gpt-4o", ModelReturned: "gpt-4o",
+			InputTokens: 50, OutputTokens: 20, TotalTokens: 70,
+		},
+		{
+			CreatedAt: now.Add(-5 * time.Minute).Format(time.RFC3339),
+			Endpoint:  "/v1/audio/transcriptions", Method: "POST", Status: 200,
+			EndpointProfile: "openai_audio", CaptureMode: "request_only",
+			ModelRequested: "whisper-1",
+		},
+		{
+			CreatedAt: now.Add(-3 * time.Minute).Format(time.RFC3339),
+			Endpoint:  "/v1/chat/completions", Method: "POST", Status: 200,
+			EndpointProfile: "chat_completions", CaptureMode: "usage_metered",
+			ModelRequested: "unpriced-model", ModelReturned: "unpriced-model",
+			InputTokens: 10, OutputTokens: 5, TotalTokens: 15,
+		},
+	}
+	if err := database.InsertBatch(records); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/metering/api/model-assets?range=24h", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var report event.ModelAssetsReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &report); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	byModel := make(map[string]event.ModelAssetItem, len(report.Items))
+	for _, item := range report.Items {
+		byModel[item.Model] = item
+	}
+
+	gpt, ok := byModel["gpt-4o"]
+	if !ok {
+		t.Fatal("missing gpt-4o")
+	}
+	if gpt.RequestCount != 2 {
+		t.Errorf("gpt-4o request_count = %d, want 2", gpt.RequestCount)
+	}
+	if gpt.FailedCount != 1 {
+		t.Errorf("gpt-4o failed_count = %d, want 1", gpt.FailedCount)
+	}
+	if !gpt.CostKnown {
+		t.Error("gpt-4o should be priced (cost_known=true)")
+	}
+	if gpt.PricingSource != "exact" {
+		t.Errorf("gpt-4o pricing_source = %q, want exact", gpt.PricingSource)
+	}
+	if gpt.EstimatedCost <= 0 {
+		t.Errorf("gpt-4o estimated_cost = %v, want > 0", gpt.EstimatedCost)
+	}
+
+	unpriced, ok := byModel["unpriced-model"]
+	if !ok {
+		t.Fatal("missing unpriced-model")
+	}
+	if unpriced.CostKnown {
+		t.Error("unpriced-model should not be priced")
+	}
+
+	whisper, ok := byModel["whisper-1"]
+	if !ok {
+		t.Fatal("missing whisper-1")
+	}
+	if whisper.CaptureMode != "request_only" {
+		t.Errorf("whisper-1 capture_mode = %q, want request_only", whisper.CaptureMode)
+	}
+
+	if report.Summary.UsedModels != 3 {
+		t.Errorf("summary used_models = %d, want 3", report.Summary.UsedModels)
+	}
+	if report.Summary.UnpricedUsedModels != 2 {
+		t.Errorf("summary unpriced_used_models = %d, want 2 (whisper-1 + unpriced-model)", report.Summary.UnpricedUsedModels)
+	}
+	if report.Summary.RequestOnlyModels != 1 {
+		t.Errorf("summary request_only_models = %d, want 1", report.Summary.RequestOnlyModels)
+	}
+}
