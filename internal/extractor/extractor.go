@@ -34,8 +34,11 @@ type UsageInfo struct {
 
 // ExtractChatUsage parses an SSE "data:" line from a chat completions stream.
 func ExtractChatUsage(data []byte) (*UsageInfo, error) {
-	text := stripSSEPrefix(string(data))
-	if text == "" {
+	data = stripSSEPrefixBytes(data)
+	if len(data) == 0 {
+		return nil, nil
+	}
+	if !bytes.Contains(data, []byte("usage")) && !bytes.Contains(data, []byte(`\u`)) && jsonObjectValid(data) {
 		return nil, nil
 	}
 
@@ -43,7 +46,7 @@ func ExtractChatUsage(data []byte) (*UsageInfo, error) {
 		Model string          `json:"model"`
 		Usage json.RawMessage `json:"usage"`
 	}
-	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, err
 	}
 	if len(resp.Usage) == 0 {
@@ -576,6 +579,22 @@ func stripSSEPrefix(text string) string {
 		return ""
 	}
 	return text
+}
+
+func stripSSEPrefixBytes(data []byte) []byte {
+	data = bytes.TrimSpace(data)
+	for bytes.HasPrefix(data, []byte("data:")) {
+		data = bytes.TrimSpace(data[len("data:"):])
+	}
+	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+		return nil
+	}
+	return data
+}
+
+func jsonObjectValid(data []byte) bool {
+	data = bytes.TrimSpace(data)
+	return len(data) > 0 && data[0] == '{' && json.Valid(data)
 }
 
 func rawUsageString(raw json.RawMessage) string {

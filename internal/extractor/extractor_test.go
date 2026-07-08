@@ -44,6 +44,17 @@ func TestExtractChatUsage_NilWhenNoUsage(t *testing.T) {
 	}
 }
 
+func TestExtractChatUsage_ErrorWhenMalformedNoUsage(t *testing.T) {
+	input := []byte(`data: {broken json here`)
+	u, err := ExtractChatUsage(input)
+	if err == nil {
+		t.Fatal("expected parse error for malformed SSE event without usage")
+	}
+	if u != nil {
+		t.Fatalf("usage = %+v, want nil on parse error", u)
+	}
+}
+
 func TestExtractChatUsage_NilWhenDone(t *testing.T) {
 	u, err := ExtractChatUsage([]byte("data: [DONE]"))
 	if err != nil {
@@ -51,6 +62,20 @@ func TestExtractChatUsage_NilWhenDone(t *testing.T) {
 	}
 	if u != nil {
 		t.Error("expected nil for [DONE]")
+	}
+}
+
+func TestExtractChatUsage_EscapedUsageKey(t *testing.T) {
+	input := []byte(`data: {"model":"gpt-4o","us\u0061ge":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`)
+	u, err := ExtractChatUsage(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u == nil {
+		t.Fatal("expected usage from escaped usage key")
+	}
+	if u.InputTokens != 3 || u.OutputTokens != 4 || u.TotalTokens != 7 {
+		t.Fatalf("usage = %+v, want 3/4/7", u)
 	}
 }
 

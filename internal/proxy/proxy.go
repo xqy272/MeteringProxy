@@ -512,12 +512,12 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, resp *http.
 		}
 	}
 	processPhysicalLine := func(line []byte) {
-		events, skipped := assembler.addLine(line)
+		event, skipped := assembler.addLine(line)
 		if skipped {
 			recordLineSkip()
 		}
-		for _, eventLine := range events {
-			processSSEEvent(eventLine)
+		if len(event) > 0 {
+			processSSEEvent(event)
 		}
 	}
 	flushPendingEvent := func() {
@@ -650,13 +650,15 @@ func newSSEEventAssembler(maxBytes int) *sseEventAssembler {
 	return &sseEventAssembler{maxBytes: maxBytes}
 }
 
-func (a *sseEventAssembler) addLine(line []byte) ([][]byte, bool) {
+// addLine returns an event slice for immediate synchronous consumption.
+// The returned slice may alias the current read buffer and must not be retained.
+func (a *sseEventAssembler) addLine(line []byte) ([]byte, bool) {
 	if len(line) == 0 {
 		event, skipped := a.flush()
 		if len(event) == 0 {
 			return nil, skipped
 		}
-		return [][]byte{event}, skipped
+		return event, skipped
 	}
 	trimmed := bytes.TrimLeft(line, " \t")
 	if !bytes.HasPrefix(trimmed, []byte("data:")) {
@@ -669,27 +671,30 @@ func (a *sseEventAssembler) addLine(line []byte) ([][]byte, bool) {
 	if len(data) > 0 && data[0] == ' ' {
 		data = data[1:]
 	}
-	var events [][]byte
+	var event []byte
 	if len(a.data) > 0 && a.pendingPayloadComplete() {
-		event, skipped := a.flush()
+		flushed, skipped := a.flush()
 		if skipped {
 			return nil, true
 		}
-		if len(event) > 0 {
-			events = append(events, event)
+		if len(flushed) > 0 {
+			event = flushed
 		}
+	}
+	if event == nil && a.singleLinePayloadComplete(data) {
+		return trimmed, false
 	}
 	a.size += len(data) + 1
 	if a.size > a.maxBytes {
 		a.data = nil
 		a.size = 0
 		a.overflow = true
-		return events, true
+		return event, true
 	}
 	copied := make([]byte, len(data))
 	copy(copied, data)
 	a.data = append(a.data, copied)
-	return events, false
+	return event, false
 }
 
 func (a *sseEventAssembler) flush() ([]byte, bool) {
@@ -726,6 +731,17 @@ func (a *sseEventAssembler) pendingPayloadComplete() bool {
 	}
 	payload := a.pendingPayload()
 	trimmed := bytes.TrimSpace(payload)
+	if bytes.Equal(trimmed, []byte("[DONE]")) {
+		return true
+	}
+	return json.Valid(trimmed)
+}
+
+func (a *sseEventAssembler) singleLinePayloadComplete(payload []byte) bool {
+	trimmed := bytes.TrimSpace(payload)
+	if len(trimmed) == 0 {
+		return true
+	}
 	if bytes.Equal(trimmed, []byte("[DONE]")) {
 		return true
 	}

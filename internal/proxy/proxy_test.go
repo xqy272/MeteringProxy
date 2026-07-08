@@ -635,6 +635,54 @@ func TestProxyStreaming_LongLineAcrossChunksCountsOneSkip(t *testing.T) {
 	}
 }
 
+func TestSSEEventAssemblerSingleLineCompleteReturnsView(t *testing.T) {
+	assembler := newSSEEventAssembler(256 * 1024)
+	line := []byte(`data: {"choices":[{"delta":{"content":"hello"}}]}`)
+
+	event, skipped := assembler.addLine(line)
+	if skipped {
+		t.Fatal("skipped = true, want false")
+	}
+	if !bytes.Equal(event, line) {
+		t.Fatalf("event = %q, want original line", event)
+	}
+	if len(assembler.data) != 0 {
+		t.Fatalf("assembler retained %d data parts, want 0 for complete single-line event", len(assembler.data))
+	}
+
+	line[6] = 'X'
+	if event[6] != 'X' {
+		t.Fatal("event does not alias input line; expected synchronous zero-copy view")
+	}
+}
+
+func TestSSEEventAssemblerFlushesPendingAndQueuesCurrentLine(t *testing.T) {
+	assembler := newSSEEventAssembler(256 * 1024)
+
+	if event, skipped := assembler.addLine([]byte(`data: {"a":`)); skipped || len(event) != 0 {
+		t.Fatalf("first line event=%q skipped=%v, want pending", event, skipped)
+	}
+	if event, skipped := assembler.addLine([]byte(`data: 1}`)); skipped || len(event) != 0 {
+		t.Fatalf("second line event=%q skipped=%v, want pending", event, skipped)
+	}
+
+	event, skipped := assembler.addLine([]byte(`data: {"b":2}`))
+	if skipped {
+		t.Fatal("third line skipped = true, want false")
+	}
+	if !bytes.Equal(event, []byte("data: {\"a\":\n1}")) {
+		t.Fatalf("flushed event = %q, want completed pending event", event)
+	}
+
+	event, skipped = assembler.addLine(nil)
+	if skipped {
+		t.Fatal("blank line skipped = true, want false")
+	}
+	if !bytes.Equal(event, []byte(`data: {"b":2}`)) {
+		t.Fatalf("queued current event = %q, want third line event", event)
+	}
+}
+
 func TestProxyRequest_UpstreamError(t *testing.T) {
 	rw := &testRW{}
 	p := New("http://127.0.0.1:1", hash.NewWithSalt("test-salt"), rw, 2*1024*1024, config.RequestMetadataConfig{InitialBytes: 4096, MaxBytes: 65536, ExtendedModelScan: false})
