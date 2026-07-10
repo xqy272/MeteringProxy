@@ -45,13 +45,13 @@ pricing:
     reasoning_per_1m: 1.00
   # DeepSeek models
   deepseek-v4-flash:
-    input_per_1m: 1.00
-    cached_input_per_1m: 0.02
-    output_per_1m: 2.00
+    input_per_1m: 0.14
+    cached_input_per_1m: 0.0028
+    output_per_1m: 0.28
   deepseek-v4-pro:
-    input_per_1m: 3.00
-    cached_input_per_1m: 0.025
-    output_per_1m: 6.00
+    input_per_1m: 0.435
+    cached_input_per_1m: 0.003625
+    output_per_1m: 0.87
   # Google Gemini models (Standard tier; thinking tokens are included in output price)
   gemini-3.5-flash:
     input_per_1m: 1.50
