@@ -12,6 +12,18 @@ pricing:
     input_per_1m: 5.00
     cached_input_per_1m: 0.50
     output_per_1m: 30.00
+  gpt-5.6-sol:
+    input_per_1m: 5.00
+    cached_input_per_1m: 0.50
+    output_per_1m: 30.00
+  gpt-5.6-terra:
+    input_per_1m: 2.50
+    cached_input_per_1m: 0.25
+    output_per_1m: 15.00
+  gpt-5.6-luna:
+    input_per_1m: 1.00
+    cached_input_per_1m: 0.10
+    output_per_1m: 6.00
   # Anthropic models
   claude-sonnet-4-6:
     input_per_1m: 3.00
@@ -40,6 +52,38 @@ pricing:
     input_per_1m: 3.00
     cached_input_per_1m: 0.025
     output_per_1m: 6.00
+  # Google Gemini models (Standard tier; thinking tokens are included in output price)
+  gemini-3.5-flash:
+    input_per_1m: 1.50
+    cached_input_per_1m: 0.15
+    output_per_1m: 9.00
+  gemini-3.1-flash-lite:
+    input_per_1m: 0.25
+    cached_input_per_1m: 0.025
+    output_per_1m: 1.50
+  gemini-3.1-pro-preview:
+    # Standard tier for prompts <= 200k. Prompts > 200k are priced higher
+    # (input $4.00, cached $0.40, output $18.00) but pricing.yaml has no tier support.
+    input_per_1m: 2.00
+    cached_input_per_1m: 0.20
+    output_per_1m: 12.00
+    aliases:
+      - gemini-3.1-pro-preview-customtools
+  gemini-3.1-flash-image:
+    # Image output is $60/1M tokens but Gemini usageMetadata lumps text+image output
+    # into candidatesTokenCount, so image tokens cannot be priced separately here.
+    input_per_1m: 0.50
+    output_per_1m: 3.00
+  # Moonshot Kimi models
+  kimi-k2.6:
+    input_per_1m: 0.95
+    cached_input_per_1m: 0.16
+    output_per_1m: 4.00
+  # Zhipu GLM models (official CNY prices converted to USD at ~7.15)
+  glm-5.2:
+    input_per_1m: 1.12
+    cached_input_per_1m: 0.28
+    output_per_1m: 3.92
 
 multimodal_pricing:
   # OpenAI multimodal models
