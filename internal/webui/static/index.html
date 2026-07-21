@@ -188,17 +188,163 @@
         <div class="card-desc" id="keys-summary">-</div>
       </div>
     </div>
-    <div class="table-wrap">
-      <table>
+    <div class="table-wrap keys-table-wrap">
+      <table class="keys-table" aria-label="API keys" data-i18n-aria="panel.api_keys">
         <thead><tr>
-          <th data-i18n="table.key_hash">Key Hash</th>
+          <th data-i18n="table.label_key">Label / Key</th>
           <th class="numeric" data-i18n="table.requests">Requests</th>
-          <th class="numeric" data-i18n="table.failed">Failed</th>
-          <th class="numeric" data-i18n="table.failure_rate">Fail %</th>
+          <th class="numeric" data-i18n="table.failure_rate_short">Fail %</th>
           <th class="numeric" data-i18n="table.tokens">Tokens</th>
+          <th class="numeric" data-i18n="table.est_cost">Est. Cost</th>
+          <th data-i18n="table.cost_state">Cost state</th>
+          <th data-i18n="table.latest_seen">Latest seen</th>
         </tr></thead>
-        <tbody id="keys-table"><tr><td colspan="5" class="empty-state" data-i18n="state.loading">Loading...</td></tr></tbody>
+        <tbody id="keys-table"><tr><td colspan="7" class="empty-state" data-i18n="state.loading">Loading...</td></tr></tbody>
       </table>
+    </div>
+
+    <div id="key-detail" class="key-detail hidden" hidden aria-live="polite">
+      <div class="key-detail-head">
+        <div class="key-detail-identity">
+          <div class="key-detail-title-row">
+            <div class="key-detail-label" id="key-detail-label">-</div>
+            <span class="badge neutral" id="key-detail-cost-badge">-</span>
+          </div>
+          <div class="key-detail-hash-row">
+            <code id="key-detail-short-hash" class="key-detail-short-hash">-</code>
+            <code id="key-detail-full-hash" class="key-detail-full-hash mono" title="">-</code>
+          </div>
+          <div class="key-detail-actions">
+            <button type="button" class="ctrl-btn" id="key-detail-copy" data-i18n="action.copy_full_hash" data-i18n-aria="action.copy_full_hash" aria-label="Copy full hash">Copy full hash</button>
+            <span class="key-detail-copy-status" id="key-detail-copy-status" role="status" aria-live="polite"></span>
+          </div>
+        </div>
+        <button type="button" class="ctrl-btn" id="key-detail-close" data-i18n="action.close_key_detail" data-i18n-aria="action.close_key_detail" aria-label="Close key detail">Close</button>
+      </div>
+
+      <div id="key-detail-empty" class="key-detail-empty hidden" hidden>
+        <div class="empty-state">
+          <strong data-i18n="key_detail.empty_title">No usage for this key in the selected range</strong>
+          <span data-i18n="key_detail.empty_detail">Selection is kept. Try another range or wait for new traffic.</span>
+        </div>
+      </div>
+
+      <div id="key-detail-body" class="key-detail-body">
+        <div class="key-detail-summary rh-grid" id="key-detail-summary">
+          <div class="rh-card">
+            <div class="rh-label" data-i18n="metric.requests">Requests</div>
+            <div class="rh-value mono" id="kd-requests">-</div>
+            <div class="rh-detail" id="kd-requests-detail">-</div>
+          </div>
+          <div class="rh-card">
+            <div class="rh-label" data-i18n="metric.failure_rate">Failure Rate</div>
+            <div class="rh-value mono" id="kd-failure">-</div>
+            <div class="rh-detail" id="kd-failure-detail">-</div>
+          </div>
+          <div class="rh-card">
+            <div class="rh-label" data-i18n="metric.tokens">Tokens</div>
+            <div class="rh-value mono" id="kd-tokens">-</div>
+            <div class="rh-detail" id="kd-tokens-detail">-</div>
+          </div>
+          <div class="rh-card">
+            <div class="rh-label" data-i18n="metric.estimated_cost">Estimated Cost</div>
+            <div class="rh-value mono" id="kd-cost">-</div>
+            <div class="rh-detail" id="kd-cost-detail">-</div>
+          </div>
+          <div class="rh-card">
+            <div class="rh-label" data-i18n="metric.latency_ttfb">Latency / TTFB</div>
+            <div class="rh-value mono" id="kd-latency">-</div>
+            <div class="rh-detail" id="kd-latency-detail">-</div>
+          </div>
+          <div class="rh-card">
+            <div class="rh-label" data-i18n="metric.latest_seen">Latest seen</div>
+            <div class="rh-value mono" id="kd-latest">-</div>
+            <div class="rh-detail" id="kd-models-detail">-</div>
+          </div>
+        </div>
+
+        <div class="key-detail-meta-grid">
+          <div class="key-detail-panel">
+            <div class="section-label" data-i18n="key_detail.usage_confidence">Usage confidence</div>
+            <div class="key-detail-confidence" id="kd-confidence">-</div>
+          </div>
+          <div class="key-detail-panel">
+            <div class="section-label" data-i18n="key_detail.partial_reasons">Partial reasons</div>
+            <div class="key-detail-reasons" id="kd-partial-reasons">-</div>
+          </div>
+        </div>
+
+        <div class="key-detail-trend-panel">
+          <div class="key-detail-trend-head">
+            <div>
+              <div class="section-label" data-i18n="key_detail.trend">Key trend</div>
+              <div class="card-desc" id="kd-trend-summary">-</div>
+            </div>
+            <div class="usage-tabs key-detail-usage-tabs" role="tablist" aria-label="Key trend mode" data-i18n-aria="key_detail.trend_mode">
+              <button class="usage-tab active" type="button" role="tab" aria-selected="true" data-key-usage-mode="cost" data-i18n="usage.mode.cost">Cost</button>
+              <button class="usage-tab" type="button" role="tab" aria-selected="false" data-key-usage-mode="tokens" data-i18n="usage.mode.tokens">Token Usage</button>
+              <button class="usage-tab" type="button" role="tab" aria-selected="false" data-key-usage-mode="requests" data-i18n="usage.mode.requests">Requests</button>
+            </div>
+          </div>
+          <div class="chart-area chart-container key-detail-chart" id="kd-trend-chart"></div>
+          <div class="chart-footer">
+            <span id="kd-trend-left">-</span>
+            <span id="kd-trend-right">-</span>
+          </div>
+        </div>
+
+        <div class="key-detail-sections">
+          <div class="key-detail-panel">
+            <div class="subsection-head">
+              <div class="section-label" data-i18n="key_detail.models">Models</div>
+              <div class="card-desc" id="kd-models-summary">-</div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr>
+                  <th data-i18n="table.model">Model</th>
+                  <th class="numeric" data-i18n="table.requests">Requests</th>
+                  <th class="numeric" data-i18n="table.failed">Failed</th>
+                  <th class="numeric" data-i18n="table.tokens">Tokens</th>
+                  <th class="numeric" data-i18n="table.est_cost">Est. Cost</th>
+                  <th data-i18n="table.cost_state">Cost state</th>
+                </tr></thead>
+                <tbody id="kd-models-table"><tr><td colspan="6" class="empty-state" data-i18n="state.loading">Loading...</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="key-detail-panel">
+            <div class="subsection-head">
+              <div class="section-label" data-i18n="key_detail.issues">Issues</div>
+              <div class="card-desc" id="kd-issues-summary">-</div>
+            </div>
+            <div id="kd-issues-list" class="key-detail-issues"><div class="empty-state" data-i18n="state.loading">Loading...</div></div>
+          </div>
+
+          <div class="key-detail-panel key-detail-requests-panel">
+            <div class="subsection-head">
+              <div class="section-label" data-i18n="key_detail.requests">Recent requests</div>
+              <div class="card-desc" id="kd-requests-summary">-</div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr>
+                  <th data-i18n="table.time">Time</th>
+                  <th data-i18n="table.status">Status</th>
+                  <th data-i18n="table.model">Model</th>
+                  <th data-i18n="table.endpoint">Endpoint</th>
+                  <th class="numeric" data-i18n="table.tokens">Tokens</th>
+                  <th class="numeric" data-i18n="table.latency">Latency</th>
+                  <th class="numeric" data-i18n="table.ttfb">TTFB</th>
+                  <th data-i18n="table.request_id">Request ID</th>
+                </tr></thead>
+                <tbody id="kd-requests-table"><tr><td colspan="8" class="empty-state" data-i18n="state.loading">Loading...</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </section>
 

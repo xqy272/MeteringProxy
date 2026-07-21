@@ -37,6 +37,15 @@ let latestActivity = null;
 let latestQuota = null;
 let latestObservability = null;
 let latestQuotaDiagnostics = null;
+let selectedKeyHash = null;
+let latestKeysRows = [];
+let selectedKeySnapshot = null;
+let keyDetailGeneration = 0;
+let keyDetailAbort = null;
+let keyDetailUsageMode = 'cost';
+let lastKeyTSRows = [];
+let lastKeyTSBucket = '';
+let keyDetailBound = false;
 let selectedIssueSeverity = '';
 let currentIssueClassFilter = '';
 let statusHideTimer = null;
@@ -168,7 +177,70 @@ function fmtMDHM(v) {
   const p=n=>String(n).padStart(2,'0');
   return `${p(d.getMonth()+1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
-function shortHash(h) { return h ? String(h).slice(0,10)+'...' : '-'; }
+function shortHash(h) {
+  if(!h) return '-';
+  const s=String(h);
+  if(s === 'unknown') return 'unknown';
+  if(s.length <= 12) return s;
+  return s.slice(0,10)+'...';
+}
+function keyLabelText(row) {
+  if(!row) return t('key_detail.unknown_key');
+  const label=String(row.label||'').trim();
+  if(label) return label;
+  if(String(row.key_hash||'') === 'unknown') return t('key_detail.unknown_key');
+  return shortHash(row.key_hash);
+}
+function costStateOf(row) {
+  if(!row) return 'unavailable';
+  const state=String(row.cost_state||'').toLowerCase();
+  if(state === 'complete' || state === 'partial' || state === 'unavailable') return state;
+  if(row.cost_known === true) return 'complete';
+  if(row.cost_known === false) return 'partial';
+  return 'unavailable';
+}
+function costAmountOf(row) {
+  if(!row) return 0;
+  if(row.estimated_cost != null) return Number(row.estimated_cost||0);
+  return Number(row.cost||0);
+}
+function fmtCostDisplay(row) {
+  const state=costStateOf(row);
+  if(state === 'unavailable') return t('cost.unavailable_value');
+  const amount=costAmountOf(row);
+  if(state === 'partial') {
+    if(!(Number(amount) > 0)) return t('cost.partial_unknown');
+    return fmtCost(amount);
+  }
+  if(row && row.cost_known === false && !(Number(amount) > 0)) return t('cost.partial_unknown');
+  return fmtCost(amount);
+}
+function costStateBadgeHTML(row) {
+  const state=costStateOf(row);
+  const cls=state==='complete'?'ok':(state==='partial'?'warn':'err');
+  return `<span class="badge ${cls}">${esc(t('cost.state.'+state))}</span>`;
+}
+function partialReasonsList(row) {
+  const reasons=Array.isArray(row && row.partial_reasons) ? row.partial_reasons : [];
+  return reasons.map(r=>String(r||'').trim()).filter(Boolean);
+}
+function confidenceCounts(row) {
+  const c=(row && row.usage_confidence_counts) || {};
+  return {
+    observed:Number(c.observed||0),
+    side_channel:Number(c.side_channel||0),
+    request_only:Number(c.request_only||0),
+    missing_usage:Number(c.missing_usage||0),
+    unsupported:Number(c.unsupported||0),
+    conflict:Number(c.conflict||0)
+  };
+}
+function isAbortError(err) {
+  return !!(err && (err.name === 'AbortError' || /abort/i.test(String(err.message||''))));
+}
+async function fetchJSONSignal(path, signal) {
+  return fetchJSON(path, signal ? { signal } : undefined);
+}
 function quotaCredentialLabel(value) {
   const s=String(value||'');
   if(!s) return '-';
@@ -844,17 +916,526 @@ async function loadModels() {
 }
 
 /* --- Keys -------------------------------------------------- */
-async function loadKeys() {
-  const data = await fetchJSON('keys?range='+encodeURIComponent(getRange()));
-  const rows=Array.isArray(data)?data:[];
+function bindKeyDetailControls() {
+  if(keyDetailBound) return;
+  keyDetailBound = true;
   const tbody=$('keys-table');
-  setText('keys-summary',t('summary.keys',{count:rows.length}));
-  if(!rows.length){tbody.innerHTML=emptyRow(5,t('state.no_key_data'),t('state.key_hint'));return;}
+  if(tbody){
+    tbody.addEventListener('click', e=>{
+      const row=e.target.closest('tr[data-key-hash]');
+      if(!row) return;
+      selectKey(row.dataset.keyHash);
+    });
+    tbody.addEventListener('keydown', e=>{
+      if(e.key!=='Enter' && e.key!==' ') return;
+      const row=e.target.closest('tr[data-key-hash]');
+      if(!row) return;
+      e.preventDefault();
+      selectKey(row.dataset.keyHash);
+    });
+  }
+  const closeBtn=$('key-detail-close');
+  if(closeBtn) closeBtn.addEventListener('click', clearKeySelection);
+  const copyBtn=$('key-detail-copy');
+  if(copyBtn) copyBtn.addEventListener('click', copySelectedKeyHash);
+  document.querySelectorAll('[data-key-usage-mode]').forEach(btn=>{
+    btn.addEventListener('click', ()=>setKeyDetailUsageMode(btn.dataset.keyUsageMode));
+  });
+}
+
+function clearKeySelection() {
+  selectedKeyHash = null;
+  selectedKeySnapshot = null;
+  lastKeyTSRows = [];
+  lastKeyTSBucket = '';
+  if(keyDetailAbort){
+    try { keyDetailAbort.abort(); } catch (_) {}
+    keyDetailAbort = null;
+  }
+  keyDetailGeneration += 1;
+  renderKeysTable();
+  hideKeyDetail();
+}
+
+function selectKey(keyHash) {
+  const hash=String(keyHash||'');
+  if(!hash) return;
+  if(selectedKeyHash === hash){
+    // re-open/refresh same selection
+    loadKeyDetail();
+    return;
+  }
+  selectedKeyHash = hash;
+  const found=(latestKeysRows||[]).find(r=>String(r.key_hash||'')===hash);
+  if(found) selectedKeySnapshot = found;
+  renderKeysTable();
+  loadKeyDetail();
+  const detail=$('key-detail');
+  if(detail) detail.scrollIntoView({block:'nearest', behavior:'smooth'});
+}
+
+function hideKeyDetail() {
+  const detail=$('key-detail');
+  if(!detail) return;
+  detail.classList.add('hidden');
+  detail.hidden = true;
+  const empty=$('key-detail-empty');
+  const body=$('key-detail-body');
+  if(empty){ empty.classList.add('hidden'); empty.hidden=true; }
+  if(body){ body.classList.add('hidden'); body.hidden=true; }
+}
+
+function showKeyDetailShell() {
+  const detail=$('key-detail');
+  if(!detail) return;
+  detail.classList.remove('hidden');
+  detail.hidden = false;
+}
+
+function setKeyDetailUsageMode(mode) {
+  if(mode!=='cost' && mode!=='tokens' && mode!=='requests') return;
+  keyDetailUsageMode = mode;
+  document.querySelectorAll('[data-key-usage-mode]').forEach(btn=>{
+    const active=btn.dataset.keyUsageMode===keyDetailUsageMode;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', active?'true':'false');
+  });
+  renderKeyTrend(lastKeyTSRows, lastKeyTSBucket);
+}
+
+function renderKeysTable() {
+  const tbody=$('keys-table');
+  if(!tbody) return;
+  const rows=Array.isArray(latestKeysRows)?latestKeysRows:[];
+  setText('keys-summary', t('summary.keys',{count:rows.length})+(selectedKeyHash?` · ${t('key_detail.selected')}`:''));
+  if(!rows.length){
+    tbody.innerHTML=emptyRow(7,t('state.no_key_data'),t('state.key_hint'));
+    return;
+  }
   tbody.innerHTML=rows.map(r=>{
-    const c=Number(r.request_count||0),f=Number(r.failed_count||0);
-    return `<tr><td><code>${esc(shortHash(r.key_hash))}</code></td><td class="numeric mono">${fmtFull(c)}</td><td class="numeric mono">${fmtFull(f)}</td><td class="numeric mono">${fmtPct(f,c)}</td><td class="numeric mono">${fmtNum(r.total_tokens)}</td></tr>`;
+    const hash=String(r.key_hash||'');
+    const selected=selectedKeyHash!=null && selectedKeyHash===hash;
+    const req=Number(r.request_count||0);
+    const fail=Number(r.failed_count||0);
+    const failPct=req>0 ? ((fail/req)*100).toFixed(1)+'%' : '0%';
+    const label=keyLabelText(r);
+    const short=shortHash(hash);
+    return `<tr class="key-row${selected?' is-selected':''}" data-key-hash="${esc(hash)}" tabindex="0" role="button" aria-selected="${selected?'true':'false'}" aria-label="${esc(t('key_detail.open_aria',{label}))}">
+      <td>
+        <div class="key-label-cell">
+          <div class="key-label-primary" title="${esc(label)}">${esc(label)}</div>
+          <div class="key-label-secondary mono"><code>${esc(short)}</code></div>
+        </div>
+      </td>
+      <td class="numeric mono">${fmtFull(req)}</td>
+      <td class="numeric mono">${esc(failPct)}</td>
+      <td class="numeric mono">${fmtNum(r.total_tokens)}</td>
+      <td class="numeric mono">${esc(fmtCostDisplay(r))}</td>
+      <td>${costStateBadgeHTML(r)}</td>
+      <td class="mono">${esc(fmtShort(r.latest_seen_at))}</td>
+    </tr>`;
   }).join('');
 }
+
+async function loadKeys() {
+  const data = await fetchJSON('keys?range='+encodeURIComponent(getRange()));
+  latestKeysRows = Array.isArray(data)?data:[];
+  if(selectedKeyHash){
+    const found=latestKeysRows.find(r=>String(r.key_hash||'')===selectedKeyHash);
+    if(found) selectedKeySnapshot = found;
+  }
+  renderKeysTable();
+  if(selectedKeyHash) await loadKeyDetail();
+  else hideKeyDetail();
+}
+
+async function copySelectedKeyHash() {
+  const status=$('key-detail-copy-status');
+  const hash=String(selectedKeyHash||'');
+  if(!hash || hash==='unknown'){
+    if(status) status.textContent = t('key_detail.copy_unavailable');
+    return;
+  }
+  try {
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      await navigator.clipboard.writeText(hash);
+    } else {
+      const ta=document.createElement('textarea');
+      ta.value=hash;
+      ta.setAttribute('readonly','');
+      ta.style.position='fixed';
+      ta.style.left='-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      if(!document.execCommand('copy')) throw new Error('copy failed');
+      document.body.removeChild(ta);
+    }
+    if(status) status.textContent = t('key_detail.copy_ok');
+  } catch (_) {
+    if(status) status.textContent = t('key_detail.copy_failed');
+  }
+}
+
+function renderKeyDetailHeader(row) {
+  const hash=String((row && row.key_hash) || selectedKeyHash || '');
+  const label=keyLabelText(row || {key_hash:hash, label:''});
+  setText('key-detail-label', label);
+  const badge=$('key-detail-cost-badge');
+  if(badge){
+    if(row){
+      badge.className = 'badge ' + (costStateOf(row)==='complete'?'ok':(costStateOf(row)==='partial'?'warn':'err'));
+      badge.textContent = t('cost.state.'+costStateOf(row));
+    } else {
+      badge.className = 'badge neutral';
+      badge.textContent = t('key_detail.no_range_data');
+    }
+  }
+  setText('key-detail-short-hash', shortHash(hash));
+  const full=$('key-detail-full-hash');
+  if(full){
+    full.textContent = hash || '-';
+    full.title = hash || '';
+  }
+  const copyBtn=$('key-detail-copy');
+  if(copyBtn){
+    const disabled = !hash || hash==='unknown';
+    copyBtn.disabled = disabled;
+    copyBtn.setAttribute('aria-disabled', disabled?'true':'false');
+  }
+  const status=$('key-detail-copy-status');
+  if(status) status.textContent = '';
+}
+
+function renderKeySummary(row, activity) {
+  const req=Number(row.request_count||0);
+  const fail=Number(row.failed_count||0);
+  const rate = row.failure_rate!=null ? Number(row.failure_rate) : (req>0?fail/req:0);
+  setText('kd-requests', fmtFull(req));
+  setText('kd-requests-detail', t('metric.failed_count',{count:fmtFull(fail)}));
+  setText('kd-failure', (rate*100).toFixed(1)+'%');
+  setText('kd-failure-detail', t('metric.failed_of_total',{failed:fmtFull(fail),total:fmtFull(req)}));
+  setText('kd-tokens', fmtNum(row.total_tokens||0));
+  setText('kd-tokens-detail', t('metric.token_mix',{
+    input:fmtNum(row.input_tokens||0),
+    output:fmtNum(row.output_tokens||0),
+    cached:fmtNum(row.cached_tokens||0),
+    reasoning:fmtNum(row.reasoning_tokens||0)
+  }) + (Number(row.cache_creation_tokens||0)?` / ${t('metric.cache_creation',{count:fmtNum(row.cache_creation_tokens||0)})}`:''));
+  setText('kd-cost', fmtCostDisplay(row));
+  const reasons=partialReasonsList(row);
+  const costDetailParts=[t('cost.state.'+costStateOf(row))];
+  if(Number(row.unpriced_models||0)>0) costDetailParts.push(t('metric.unpriced_models',{count:fmtFull(row.unpriced_models||0)}));
+  if(reasons.length) costDetailParts.push(reasons.map(r=>t('cost.reason.'+r)!==('cost.reason.'+r)?t('cost.reason.'+r):r).join(', '));
+  setText('kd-cost-detail', costDetailParts.join(' · '));
+  const avgLat=fmtLat(row.avg_latency_ms||0);
+  const avgTtfb=fmtLat(row.avg_ttfb_ms||0);
+  const p95Lat=activity ? fmtLat(activity.p95_latency_ms||0) : '-';
+  const p95Ttfb=activity ? fmtLat(activity.p95_ttfb_ms||0) : '-';
+  setText('kd-latency', `${avgLat} / ${avgTtfb}`);
+  setText('kd-latency-detail', t('key_detail.latency_detail',{avg_lat:avgLat,avg_ttfb:avgTtfb,p95_lat:p95Lat,p95_ttfb:p95Ttfb}));
+  setText('kd-latest', fmtTime(row.latest_seen_at));
+  setText('kd-models-detail', t('key_detail.model_count',{count:fmtFull(row.model_count||0)}));
+
+  const conf=confidenceCounts(row);
+  const confEl=$('kd-confidence');
+  if(confEl){
+    const parts=[
+      ['observed',conf.observed],
+      ['side_channel',conf.side_channel],
+      ['request_only',conf.request_only],
+      ['missing_usage',conf.missing_usage],
+      ['unsupported',conf.unsupported],
+      ['conflict',conf.conflict]
+    ].filter(([,n])=>n>0);
+    if(!parts.length){
+      confEl.innerHTML=`<span class="key-chip">${esc(t('key_detail.confidence_empty'))}</span>`;
+    } else {
+      confEl.innerHTML=parts.map(([k,n])=>`<span class="key-chip"><span class="key-chip-label">${esc(t('confidence.'+k))}</span><span class="mono">${esc(fmtFull(n))}</span></span>`).join('');
+    }
+  }
+  const reasonsEl=$('kd-partial-reasons');
+  if(reasonsEl){
+    if(costStateOf(row)==='complete' && !reasons.length){
+      reasonsEl.innerHTML=`<span class="key-chip ok">${esc(t('cost.no_partial_reasons'))}</span>`;
+    } else if(!reasons.length && costStateOf(row)==='unavailable'){
+      reasonsEl.innerHTML=`<span class="key-chip err">${esc(t('cost.state.unavailable'))}</span>`;
+    } else if(!reasons.length){
+      reasonsEl.innerHTML=`<span class="key-chip">${esc(t('cost.no_partial_reasons'))}</span>`;
+    } else {
+      reasonsEl.innerHTML=reasons.map(r=>{
+        const label=t('cost.reason.'+r);
+        return `<span class="key-chip warn">${esc(label===('cost.reason.'+r)?r:label)}</span>`;
+      }).join('');
+    }
+  }
+}
+
+function renderKeyModels(rows, err) {
+  const tbody=$('kd-models-table');
+  if(!tbody) return;
+  if(err){
+    tbody.innerHTML=errorRow(6, err.message||String(err));
+    setText('kd-models-summary', t('key_detail.section_unavailable'));
+    return;
+  }
+  const list=Array.isArray(rows)?rows:[];
+  if(!list.length){
+    tbody.innerHTML=emptyRow(6,t('state.no_model_data'),t('state.model_hint'));
+    setText('kd-models-summary', t('summary.zero_models'));
+    return;
+  }
+  const unpriced=list.filter(r=>costStateOf(r)!=='complete').length;
+  setText('kd-models-summary', t('summary.models',{count:list.length,unknown:unpriced}));
+  tbody.innerHTML=list.map(r=>{
+    return `<tr>
+      <td><div class="model-name" title="${esc(modelName(r.model))}">${esc(modelName(r.model))}</div></td>
+      <td class="numeric mono">${fmtFull(r.request_count||0)}</td>
+      <td class="numeric mono">${fmtFull(r.failed_count||0)}</td>
+      <td class="numeric mono">${fmtNum(r.total_tokens||0)}</td>
+      <td class="numeric mono">${esc(fmtCostDisplay(r))}</td>
+      <td>${costStateBadgeHTML(r)}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderKeyIssues(data, err) {
+  const list=$('kd-issues-list');
+  if(!list) return;
+  if(err){
+    list.innerHTML=`<div class="empty-state error-text">${esc(err.message||String(err))}</div>`;
+    setText('kd-issues-summary', t('key_detail.section_unavailable'));
+    return;
+  }
+  const items=Array.isArray(data && data.items)?data.items:[];
+  const partial=!!(data && data.partial);
+  const source=data && data.sources ? data.sources.request_usage : '';
+  const sourceNote=source?t('key_detail.issue_source',{source:source}):'';
+  setText('kd-issues-summary', items.length
+    ? t('key_detail.issues_summary',{count:fmtFull(items.length)})+(partial?` · ${t('status.partial')}`:'')+(sourceNote?` · ${sourceNote}`:'')
+    : t('issues.empty'));
+  if(!items.length){
+    list.innerHTML=`<div class="empty-state"><strong>${esc(t('issues.empty'))}</strong><span>${esc(t('key_detail.issues_empty_detail'))}</span></div>`;
+    return;
+  }
+  list.innerHTML=items.map(item=>{
+    const sev=item.severity||'info';
+    const label=issueClassLabel(item.class, item.label||item.class);
+    const bits=[item.error_code||item.error_type, item.model?modelName(item.model):'', item.endpoint||'', item.request_id||''].filter(Boolean);
+    return `<div class="key-issue-item">
+      <span class="issue-sev ${esc(sev)}"></span>
+      <div class="key-issue-body">
+        <div class="key-issue-top">
+          <span class="issue-label">${esc(label)}</span>
+          <span class="issue-count mono">${esc(fmtFull(item.count||0))}</span>
+        </div>
+        <div class="key-issue-meta">${esc([fmtShort(item.latest_at), bits.join(' / ')].filter(Boolean).join(' · ')||'-')}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderKeyRequests(rows, err) {
+  const tbody=$('kd-requests-table');
+  if(!tbody) return;
+  if(err){
+    tbody.innerHTML=errorRow(8, err.message||String(err));
+    setText('kd-requests-summary', t('key_detail.section_unavailable'));
+    return;
+  }
+  const list=Array.isArray(rows)?rows:[];
+  setText('kd-requests-summary', t('key_detail.requests_summary',{count:fmtFull(list.length)}));
+  if(!list.length){
+    tbody.innerHTML=emptyRow(8,t('state.no_matching_requests'),t('key_detail.requests_empty_detail'));
+    return;
+  }
+  tbody.innerHTML=list.map(r=>{
+    const sc=r.status<400?'ok':r.status<500?'warn':'err';
+    const md=modelName(r.model_returned||r.model_requested||'unidentified');
+    const rid=r.request_id?String(r.request_id):'-';
+    const ridShort=rid.length>18?rid.slice(0,12)+'...':rid;
+    return `<tr>
+      <td class="mono">${esc(fmtTime(r.created_at))}</td>
+      <td><span class="badge ${sc}">${esc(r.status)}</span></td>
+      <td><div class="model-name" title="${esc(md)}">${esc(md)}</div></td>
+      <td>${esc(r.endpoint||'-')}</td>
+      <td class="numeric mono">${fmtNum(r.total_tokens||0)}</td>
+      <td class="numeric mono">${fmtLat(r.latency_ms)}</td>
+      <td class="numeric mono">${fmtLat(r.ttfb_ms)}</td>
+      <td><code title="${esc(rid)}">${esc(ridShort)}</code></td>
+    </tr>`;
+  }).join('');
+}
+
+function keyUsageMeta(mode=keyDetailUsageMode) {
+  if(mode==='tokens') return {
+    mode, label:t('usage.mode.tokens'),
+    value:r=>Number(r.total_tokens||0),
+    fmt:fmtNum, fmtFull:fmtFull, empty:t('state.no_token_data')
+  };
+  if(mode==='requests') return {
+    mode, label:t('usage.mode.requests'),
+    value:r=>Number(r.count||0),
+    fmt:fmtNum, fmtFull:fmtFull, empty:t('state.no_request_data')
+  };
+  return {
+    mode:'cost', label:t('usage.mode.cost'),
+    value:r=>{
+      const state=costStateOf(r);
+      if(state==='unavailable') return 0;
+      return Number(r.cost||0);
+    },
+    fmt:fmtCost, fmtFull:fmtCost, empty:t('state.no_cost_data')
+  };
+}
+
+function renderKeyTrend(rows, bucket, err) {
+  const el=$('kd-trend-chart');
+  if(!el) return;
+  document.querySelectorAll('[data-key-usage-mode]').forEach(btn=>{
+    const active=btn.dataset.keyUsageMode===keyDetailUsageMode;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', active?'true':'false');
+  });
+  if(err){
+    el.innerHTML=`<div class="empty-state error-text">${esc(err.message||String(err))}</div>`;
+    setText('kd-trend-summary', t('key_detail.section_unavailable'));
+    setText('kd-trend-left','-');
+    setText('kd-trend-right','-');
+    return;
+  }
+  const list=Array.isArray(rows)?rows:[];
+  const meta=keyUsageMeta();
+  if(!list.length){
+    el.innerHTML=emptyChart(meta.empty);
+    setText('kd-trend-summary','');
+    setText('kd-trend-left','-');
+    setText('kd-trend-right','-');
+    return;
+  }
+  const dims=chartDims(el);
+  const pW=dims.w-dims.l-dims.r, pH=dims.h-dims.t-dims.b;
+  const values=list.map(meta.value);
+  const maxV=Math.max(...values,1);
+  const total=values.reduce((s,v)=>s+v,0);
+  const slot=pW/list.length;
+  const barW=Math.max(2,Math.min(28,slot*.6));
+  const yFor=v=>dims.h-dims.b-pH*Number(v||0)/maxV;
+  const bars=list.map((r,i)=>{
+    const cx=dims.l+slot*(i+.5), x=cx-barW/2, v=values[i];
+    const y=yFor(v), h=Math.max(0,dims.h-dims.b-y);
+    const state=costStateOf(r);
+    const partialMark = keyDetailUsageMode==='cost' && state!=='complete';
+    const cls = partialMark ? 'chart-bar chart-bar-rect is-partial' : 'chart-bar chart-bar-rect';
+    const tipRows=[
+      [keyDetailUsageMode, meta.label, keyDetailUsageMode==='cost' ? (state==='unavailable'?t('cost.unavailable_value'):meta.fmtFull(v)) : meta.fmtFull(v)],
+      ['tokens', t('tooltip.tokens'), fmtFull(r.total_tokens||0)]
+    ];
+    if(keyDetailUsageMode==='cost' && state!=='complete'){
+      tipRows.push(['state', t('table.cost_state'), t('cost.state.'+state)]);
+    }
+    const tt=ttHtml(fmtShort(r.timestamp),'',tipRows);
+    return `<g class="chart-hover-group" tabindex="0" data-tooltip="${esc(tt)}">
+      <rect class="chart-hover-band" x="${(dims.l+slot*i).toFixed(1)}" y="${dims.t}" width="${slot.toFixed(1)}" height="${pH}"/>
+      <line class="chart-hover-ruler" x1="${cx.toFixed(1)}" y1="${dims.t}" x2="${cx.toFixed(1)}" y2="${dims.h-dims.b}"/>
+      ${h>0?`<rect class="${cls}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" ${partialMark?'opacity="0.55" stroke-dasharray="3 2"':''}/>`:''}
+    </g>`;
+  }).join('');
+  el.innerHTML=`<svg viewBox="0 0 ${dims.w} ${dims.h}" role="img" aria-label="${esc(meta.label)}">
+    ${gridLines(maxV,dims,meta.fmt)}
+    <line stroke="var(--chart-grid)" stroke-width="1" x1="${dims.l}" y1="${dims.h-dims.b}" x2="${dims.w-dims.r}" y2="${dims.h-dims.b}"/>
+    ${bars}
+  </svg>`;
+  attachTT(el);
+  const partialBuckets = keyDetailUsageMode==='cost' ? list.filter(r=>costStateOf(r)!=='complete').length : 0;
+  setText('kd-trend-summary', t('key_detail.trend_summary',{
+    count:list.length,
+    bucket:bucket||'-',
+    value:meta.fmtFull(total),
+    partial:fmtFull(partialBuckets)
+  }));
+  setText('kd-trend-left', fmtShort(list[0].timestamp));
+  setText('kd-trend-right', meta.fmtFull(total));
+}
+
+async function loadKeyDetail() {
+  if(!selectedKeyHash){
+    hideKeyDetail();
+    return;
+  }
+  showKeyDetailShell();
+  const gen = ++keyDetailGeneration;
+  if(keyDetailAbort){
+    try { keyDetailAbort.abort(); } catch (_) {}
+  }
+  const controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  keyDetailAbort = controller;
+  const signal = controller ? controller.signal : undefined;
+  const hash = selectedKeyHash;
+  const range = getRange();
+  const bucket = bucketFor(range);
+  const keyParam = 'key_hash='+encodeURIComponent(hash);
+
+  const row = (latestKeysRows||[]).find(r=>String(r.key_hash||'')===hash) || null;
+  const emptyEl=$('key-detail-empty');
+  const bodyEl=$('key-detail-body');
+
+  if(!row){
+    renderKeyDetailHeader(selectedKeySnapshot || {key_hash:hash,label:''});
+    if(emptyEl){ emptyEl.classList.remove('hidden'); emptyEl.hidden=false; }
+    if(bodyEl){ bodyEl.classList.add('hidden'); bodyEl.hidden=true; }
+    // still clear stale section bodies
+    lastKeyTSRows=[]; lastKeyTSBucket='';
+    return;
+  }
+
+  selectedKeySnapshot = row;
+  renderKeyDetailHeader(row);
+  if(emptyEl){ emptyEl.classList.add('hidden'); emptyEl.hidden=true; }
+  if(bodyEl){ bodyEl.classList.remove('hidden'); bodyEl.hidden=false; }
+  // provisional summary before scoped fetches complete
+  renderKeySummary(row, null);
+  setText('kd-models-summary', t('state.loading'));
+  setText('kd-issues-summary', t('state.loading'));
+  setText('kd-requests-summary', t('state.loading'));
+  setText('kd-trend-summary', t('state.loading'));
+  const modelsBody=$('kd-models-table'); if(modelsBody) modelsBody.innerHTML=emptyRow(6,t('state.loading'));
+  const reqBody=$('kd-requests-table'); if(reqBody) reqBody.innerHTML=emptyRow(8,t('state.loading'));
+  const issuesList=$('kd-issues-list'); if(issuesList) issuesList.innerHTML=`<div class="empty-state">${esc(t('state.loading'))}</div>`;
+  const trendEl=$('kd-trend-chart'); if(trendEl) trendEl.innerHTML=`<div class="empty-state">${esc(t('state.loading'))}</div>`;
+
+  const tasks = {
+    models: fetchJSONSignal('models?range='+encodeURIComponent(range)+'&'+keyParam, signal),
+    timeseries: fetchJSONSignal('timeseries?range='+encodeURIComponent(range)+'&bucket='+encodeURIComponent(bucket)+'&'+keyParam, signal),
+    activity: fetchJSONSignal('activity?range='+encodeURIComponent(range)+'&'+keyParam, signal),
+    issues: fetchJSONSignal('issues?range='+encodeURIComponent(range)+'&limit=20&'+keyParam, signal),
+    requests: fetchJSONSignal('requests?range='+encodeURIComponent(range)+'&limit=100&'+keyParam, signal)
+  };
+  const entries = Object.entries(tasks);
+  const settled = await Promise.all(entries.map(async ([name, promise])=>{
+    try { return [name, {ok:true, value:await promise}]; }
+    catch(err){ return [name, {ok:false, error:err}]; }
+  }));
+  if(gen !== keyDetailGeneration || selectedKeyHash !== hash) return;
+
+  const results = Object.fromEntries(settled);
+  const activity = results.activity.ok ? results.activity.value : null;
+  renderKeySummary(row, activity);
+  if(!results.activity.ok && !isAbortError(results.activity.error)){
+    setText('kd-latency-detail', t('key_detail.activity_unavailable'));
+  }
+  renderKeyModels(results.models.ok ? results.models.value : null, results.models.ok ? null : results.models.error);
+  if(results.timeseries.ok){
+    lastKeyTSRows = Array.isArray(results.timeseries.value)?results.timeseries.value:[];
+    lastKeyTSBucket = bucket;
+    renderKeyTrend(lastKeyTSRows, lastKeyTSBucket, null);
+  } else if(!isAbortError(results.timeseries.error)){
+    lastKeyTSRows=[]; lastKeyTSBucket='';
+    renderKeyTrend([], bucket, results.timeseries.error);
+  }
+  renderKeyIssues(results.issues.ok ? results.issues.value : null, results.issues.ok ? null : results.issues.error);
+  renderKeyRequests(results.requests.ok ? results.requests.value : null, results.requests.ok ? null : results.requests.error);
+}
+
 
 async function loadImages() {
   const [summaryResp, modelResp] = await Promise.all([
@@ -1571,7 +2152,7 @@ function markFailed(failures) {
   const fm=new Map(failures.map(f=>[f.name,f.error]));
   if(fm.has('models')){const mt=$('models-table');if(mt)mt.innerHTML=errorRow(7,fm.get('models').message);const dc=$('model-distribution-chart');if(dc)dc.innerHTML=`<div class="empty-state error-text">${esc(fm.get('models').message)}</div>`;}
   if(fm.has('images')){const it=$('images-models-table');if(it)it.innerHTML=errorRow(9,fm.get('images').message);setText('images-summary',fm.get('images').message);}
-  if(fm.has('keys'))$('keys-table').innerHTML=errorRow(5,fm.get('keys').message);
+  if(fm.has('keys'))$('keys-table').innerHTML=errorRow(7,fm.get('keys').message);
   if(fm.has('requests'))$('requests-table').innerHTML=errorRow(11,fm.get('requests').message);
   if(fm.has('issues')){$('issues-state').classList.remove('hidden');$('issues-state').innerHTML=`<div class="issues-empty error-text">${esc(fm.get('issues').message)}</div>`;const io=$('issues-overview');if(io)io.innerHTML='';$('issues-list').innerHTML=`<div class="issue-class-placeholder">${esc(t('issues.select_severity_hint'))}</div>`;}
   if(fm.has('timeseries')){const el=$('usage-trend-chart');if(el)el.innerHTML=`<div class="empty-state error-text">${esc(fm.get('timeseries').message)}</div>`;}
@@ -1636,7 +2217,7 @@ function configAutoRefresh() {
   if($('auto-refresh').checked) autoRefreshTimer=setInterval(refresh,30000);
 }
 function debounce(fn,ms){let t;return()=>{clearTimeout(t);t=setTimeout(fn,ms);};}
-function rerenderCharts(){renderUsagePanel();}
+function rerenderCharts(){renderUsagePanel(); const kdBody=$('key-detail-body'); if(selectedKeyHash && kdBody && !kdBody.hidden) renderKeyTrend(lastKeyTSRows,lastKeyTSBucket);}
 
 /* --- Init -------------------------------------------------- */
 document.addEventListener('DOMContentLoaded', async ()=>{
@@ -1660,5 +2241,6 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   window.addEventListener('focus',debounce(()=>{if(Date.now()-lastRefreshAt<10000)return;refresh();},2000));
   window.addEventListener('resize',debounce(rerenderCharts,160));
   bindNav();
+  bindKeyDetailControls();
   await refresh();
 });

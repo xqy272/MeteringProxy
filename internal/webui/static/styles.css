@@ -982,7 +982,7 @@ img { display: block; }
 }
 table { width: 100%; border-collapse: collapse; }
 .request-workbench table { min-width: 1080px; }
-#keys table { min-width: 640px; }
+#keys table { min-width: 920px; }
 #diagnostics table { min-width: 680px; }
 #observability table { min-width: 860px; }
 th, td {
@@ -1794,6 +1794,234 @@ code {
 #observability .diag-tile .dt-unit {
   margin-top: 4px;
   font-size: 10px;
+}
+
+
+/* --- Key detail -------------------------------------------- */
+#keys table { min-width: 920px; }
+.keys-table-wrap { margin-bottom: 0; }
+tbody tr.key-row {
+  cursor: pointer;
+}
+tbody tr.key-row:hover {
+  background: color-mix(in srgb, var(--surface-hover) 88%, transparent);
+}
+tbody tr.key-row.is-selected {
+  background: color-mix(in srgb, var(--accent-muted) 72%, var(--surface));
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+tbody tr.key-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.key-label-cell { min-width: 140px; max-width: 280px; }
+.key-label-primary {
+  font-weight: 700;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.key-label-secondary {
+  margin-top: 3px;
+  color: var(--text-4);
+}
+.key-label-secondary code {
+  font-size: 11px;
+}
+
+.key-detail {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-subtle);
+}
+.key-detail.hidden,
+.key-detail-empty.hidden,
+.key-detail-body.hidden { display: none !important; }
+
+.key-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.key-detail-identity { min-width: 0; flex: 1 1 auto; }
+.key-detail-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.key-detail-label {
+  font-size: 18px;
+  font-weight: 820;
+  color: var(--text);
+  line-height: 1.2;
+  word-break: break-word;
+}
+.key-detail-hash-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+.key-detail-full-hash {
+  max-width: min(100%, 520px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+}
+.key-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+.key-detail-copy-status {
+  font-size: 12px;
+  color: var(--text-4);
+}
+.key-detail-empty { margin-top: 4px; }
+.key-detail-body { display: flex; flex-direction: column; gap: 16px; }
+#keys .key-detail-summary {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.key-detail-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.key-detail-panel {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface-inset) 42%, var(--surface));
+  padding: 14px;
+  box-shadow: var(--shadow-xs);
+  min-width: 0;
+}
+.key-detail-panel .subsection-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: baseline;
+  margin-bottom: 10px;
+}
+.key-detail-confidence,
+.key-detail-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.key-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--surface) 80%, transparent);
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 650;
+}
+.key-chip .key-chip-label { color: var(--text-4); }
+.key-chip.ok {
+  color: var(--green);
+  background: var(--green-muted);
+  border-color: color-mix(in srgb, var(--green) 24%, transparent);
+}
+.key-chip.warn {
+  color: var(--amber);
+  background: var(--amber-muted);
+  border-color: color-mix(in srgb, var(--amber) 24%, transparent);
+}
+.key-chip.err {
+  color: var(--red);
+  background: var(--red-muted);
+  border-color: color-mix(in srgb, var(--red) 24%, transparent);
+}
+.key-detail-trend-panel {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface-inset) 42%, var(--surface));
+  padding: 14px;
+  box-shadow: var(--shadow-xs);
+}
+.key-detail-trend-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.key-detail-usage-tabs {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.key-detail-chart {
+  height: 220px;
+}
+.chart-bar.is-partial {
+  fill: color-mix(in srgb, var(--amber) 70%, var(--accent));
+}
+.key-detail-sections {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+.key-detail-issues {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 72px;
+}
+.key-issue-item {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+}
+.key-issue-body { min-width: 0; flex: 1 1 auto; }
+.key-issue-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+}
+.key-issue-meta {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-4);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#keys .key-detail-requests-panel table { min-width: 860px; }
+#keys .key-detail-panel table { min-width: 640px; }
+
+@media (max-width: 1024px) {
+  #keys .key-detail-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .key-detail-meta-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 768px) {
+  .key-detail-head { flex-direction: column; align-items: stretch; }
+  .key-detail-full-hash { max-width: 100%; }
+  #keys .key-detail-summary { grid-template-columns: 1fr 1fr; }
+  .key-detail-chart { height: 200px; }
+  .key-detail-trend-head { flex-direction: column; }
+}
+@media (max-width: 480px) {
+  #keys .key-detail-summary { grid-template-columns: 1fr; }
 }
 
 /* --- Responsive -------------------------------------------- */
