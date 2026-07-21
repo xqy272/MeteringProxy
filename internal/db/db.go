@@ -1298,33 +1298,33 @@ func (db *DB) Models(since time.Time) ([]ModelRow, error) {
 }
 
 func (db *DB) ModelsContext(ctx context.Context, since time.Time) ([]ModelRow, error) {
-	return queryModelAggregates(ctx, db.read, since)
+	return queryModelAggregates(ctx, db.read, ReportScope{Since: since})
 }
 
 // ModelsReportSnapshot loads model aggregates and both source breakdowns inside
 // one read-only transaction so all three set-based queries share a consistent
 // SQLite snapshot. Rows are closed sequentially to avoid deadlocking the single
 // read connection.
-func (db *DB) ModelsReportSnapshot(ctx context.Context, since time.Time) (*ModelsReportData, error) {
+func (db *DB) ModelsReportSnapshot(ctx context.Context, scope ReportScope) (*ModelsReportData, error) {
 	tx, err := db.read.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	models, err := queryModelAggregates(ctx, tx, since)
+	models, err := queryModelAggregates(ctx, tx, scope)
 	if err != nil {
 		return nil, err
 	}
-	modelReturned, err := queryModelReturnedSourceCounts(ctx, tx, since)
+	modelReturned, err := queryModelReturnedSourceCounts(ctx, tx, scope)
 	if err != nil {
 		return nil, err
 	}
-	usage, err := queryUsageSourceCounts(ctx, tx, since)
+	usage, err := queryUsageSourceCounts(ctx, tx, scope)
 	if err != nil {
 		return nil, err
 	}
-	textCost, imageCost, err := queryCostBuckets(ctx, tx, CostBucketFilter{Since: since})
+	textCost, imageCost, err := queryCostBuckets(ctx, tx, CostBucketFilter{Since: scope.Since, KeyHash: scope.KeyHash})
 	if err != nil {
 		return nil, err
 	}
@@ -1344,7 +1344,8 @@ type modelQueryContext interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
-func queryModelAggregates(ctx context.Context, q modelQueryContext, since time.Time) ([]ModelRow, error) {
+func queryModelAggregates(ctx context.Context, q modelQueryContext, scope ReportScope) ([]ModelRow, error) {
+	where, args := reportScopeWhere(scope)
 	rows, err := q.QueryContext(ctx, `
 		SELECT
 			`+effectiveModelExpr+`,
@@ -1359,9 +1360,9 @@ func queryModelAggregates(ctx context.Context, q modelQueryContext, since time.T
 			COALESCE(SUM(total_tokens), 0),
 			COUNT(CASE WHEN capture_outcome = 'captured' AND (`+modelReturnedSourceCompatExpr+`) != 'none' THEN 1 END),
 			COUNT(CASE WHEN capture_outcome NOT IN ('captured', '') THEN 1 END)
-		FROM request_usage WHERE created_at_unix >= ?
+		FROM request_usage WHERE `+where+`
 		GROUP BY 1 ORDER BY COUNT(*) DESC
-	`, since.Unix())
+	`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1381,16 +1382,17 @@ func queryModelAggregates(ctx context.Context, q modelQueryContext, since time.T
 	return result, rows.Err()
 }
 
-func queryModelReturnedSourceCounts(ctx context.Context, q modelQueryContext, since time.Time) (map[string]map[string]int64, error) {
+func queryModelReturnedSourceCounts(ctx context.Context, q modelQueryContext, scope ReportScope) (map[string]map[string]int64, error) {
+	where, args := reportScopeWhere(scope)
 	rows, err := q.QueryContext(ctx, `
 		SELECT
 			`+effectiveModelExpr+`,
 			`+modelReturnedSourceCompatExpr+`,
 			COUNT(*)
 		FROM request_usage
-		WHERE created_at_unix >= ?
+		WHERE `+where+`
 		GROUP BY 1, 2
-	`, since.Unix())
+	`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1413,16 +1415,17 @@ func queryModelReturnedSourceCounts(ctx context.Context, q modelQueryContext, si
 	return out, rows.Err()
 }
 
-func queryUsageSourceCounts(ctx context.Context, q modelQueryContext, since time.Time) (map[string]map[string]int64, error) {
+func queryUsageSourceCounts(ctx context.Context, q modelQueryContext, scope ReportScope) (map[string]map[string]int64, error) {
+	where, args := reportScopeWhere(scope)
 	rows, err := q.QueryContext(ctx, `
 		SELECT
 			`+effectiveModelExpr+`,
 			`+usageSourceCompatExpr+`,
 			COUNT(*)
 		FROM request_usage
-		WHERE created_at_unix >= ?
+		WHERE `+where+`
 		GROUP BY 1, 2
-	`, since.Unix())
+	`, args...)
 	if err != nil {
 		return nil, err
 	}

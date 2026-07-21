@@ -3,6 +3,8 @@ package report
 import (
 	"context"
 	"fmt"
+
+	"ai-gateway-metering-proxy/internal/db"
 )
 
 func (s *Service) Summary(ctx context.Context, filter SummaryFilter) (SummaryReport, error) {
@@ -31,7 +33,7 @@ func (s *Service) Timeseries(ctx context.Context, filter TimeseriesFilter) ([]Ti
 	if s == nil {
 		return nil, fmt.Errorf("report service is not configured")
 	}
-	snapshot, err := s.timeseries.TimeseriesReportSnapshot(ctx, filter.Since, filter.BucketMin)
+	snapshot, err := s.timeseries.TimeseriesReportSnapshot(ctx, db.ReportScope{Since: filter.Since, KeyHash: filter.KeyHash}, filter.BucketMin)
 	if err != nil {
 		return nil, err
 	}

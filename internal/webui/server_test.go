@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -1719,6 +1720,20 @@ func TestCoreReporterIsExplicitlyInjected(t *testing.T) {
 		t.Fatalf("rows = %+v, want injected reporter payload", rows)
 	}
 
+	validKey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	req = httptest.NewRequest("GET", "/metering/api/models?range=24h&key_hash="+validKey, nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 || stub.calls != 2 || stub.filter.KeyHash != validKey {
+		t.Fatalf("key-scoped models status=%d calls=%d filter=%+v", rec.Code, stub.calls, stub.filter)
+	}
+	req = httptest.NewRequest("GET", "/metering/api/models?range=24h&key_hash=0123456789abcdef", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || stub.calls != 2 {
+		t.Fatalf("invalid key models status=%d calls=%d", rec.Code, stub.calls)
+	}
+
 	req = httptest.NewRequest("GET", "/metering/api/summary?range=24h", nil)
 	rec = httptest.NewRecorder()
 	s.ServeHTTP(rec, req)
@@ -1733,6 +1748,12 @@ func TestCoreReporterIsExplicitlyInjected(t *testing.T) {
 	var series []report.TimeseriesReport
 	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &series) != nil || len(series) != 1 || series[0].Count != 13 || stub.timeseriesCalls != 1 || stub.timeseriesFilter.BucketMin != 1440 {
 		t.Fatalf("timeseries status=%d payload=%+v calls=%d filter=%+v", rec.Code, series, stub.timeseriesCalls, stub.timeseriesFilter)
+	}
+	req = httptest.NewRequest("GET", "/metering/api/timeseries?range=24h&bucket=1h&key_hash=unknown", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 || stub.timeseriesCalls != 2 || stub.timeseriesFilter.KeyHash != "unknown" {
+		t.Fatalf("unknown-key timeseries status=%d calls=%d filter=%+v", rec.Code, stub.timeseriesCalls, stub.timeseriesFilter)
 	}
 
 	req = httptest.NewRequest("GET", "/metering/api/images/summary?range=24h", nil)

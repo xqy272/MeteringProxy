@@ -236,6 +236,14 @@ func parseRange(r *http.Request) (time.Time, string) {
 	}
 }
 
+func parseKeyHashFilter(r *http.Request) (string, error) {
+	value := r.URL.Query().Get("key_hash")
+	if err := report.ValidateKeyHashFilter(value); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
 func writeJSON(w http.ResponseWriter, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
@@ -266,6 +274,11 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTimeseries(w http.ResponseWriter, r *http.Request) {
 	since, _ := parseRange(r)
+	keyHash, err := parseKeyHashFilter(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	bucketStr := r.URL.Query().Get("bucket")
 	bucketMin := 60
 	switch bucketStr {
@@ -274,7 +287,7 @@ func (s *Server) handleTimeseries(w http.ResponseWriter, r *http.Request) {
 	case "1d":
 		bucketMin = 1440
 	}
-	rows, err := s.reports.Timeseries(r.Context(), report.TimeseriesFilter{Since: since, BucketMin: bucketMin})
+	rows, err := s.reports.Timeseries(r.Context(), report.TimeseriesFilter{Since: since, BucketMin: bucketMin, KeyHash: keyHash})
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -297,7 +310,12 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	since, _ := parseRange(r)
-	models, err := s.reports.Models(r.Context(), report.ModelsFilter{Since: since})
+	keyHash, err := parseKeyHashFilter(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	models, err := s.reports.Models(r.Context(), report.ModelsFilter{Since: since, KeyHash: keyHash})
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return

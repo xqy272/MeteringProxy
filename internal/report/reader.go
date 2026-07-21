@@ -13,7 +13,7 @@ import (
 // Implementations must load model aggregates and both source breakdowns from one
 // consistent read snapshot (for example a single SQLite read-only transaction).
 type ModelsReader interface {
-	ModelsReportSnapshot(ctx context.Context, since time.Time) (*db.ModelsReportData, error)
+	ModelsReportSnapshot(ctx context.Context, scope db.ReportScope) (*db.ModelsReportData, error)
 }
 
 type SummaryReader interface {
@@ -21,7 +21,7 @@ type SummaryReader interface {
 }
 
 type TimeseriesReader interface {
-	TimeseriesReportSnapshot(ctx context.Context, since time.Time, bucketMin int) (*db.TimeseriesReportData, error)
+	TimeseriesReportSnapshot(ctx context.Context, scope db.ReportScope, bucketMin int) (*db.TimeseriesReportData, error)
 }
 
 type ImagesReader interface {

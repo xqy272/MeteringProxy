@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"ai-gateway-metering-proxy/internal/db"
 )
 
 // Service orchestrates read-side report assembly for WebUI handlers.
@@ -73,7 +75,7 @@ func (s *Service) Models(ctx context.Context, filter ModelsFilter) ([]ModelRepor
 		return nil, fmt.Errorf("report service is not configured")
 	}
 
-	snapshot, err := s.models.ModelsReportSnapshot(ctx, filter.Since)
+	snapshot, err := s.models.ModelsReportSnapshot(ctx, db.ReportScope{Since: filter.Since, KeyHash: filter.KeyHash})
 	if err != nil {
 		return nil, err
 	}

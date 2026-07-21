@@ -48,7 +48,7 @@ func (db *DB) SummaryReportSnapshot(ctx context.Context, since time.Time) (*Summ
 	return &SummaryReportData{Summary: summary, TextCostBuckets: textCost, ImageCostBuckets: imageCost}, nil
 }
 
-func (db *DB) TimeseriesReportSnapshot(ctx context.Context, since time.Time, bucketMin int) (*TimeseriesReportData, error) {
+func (db *DB) TimeseriesReportSnapshot(ctx context.Context, scope ReportScope, bucketMin int) (*TimeseriesReportData, error) {
 	if bucketMin <= 0 {
 		bucketMin = 10
 	}
@@ -58,12 +58,12 @@ func (db *DB) TimeseriesReportSnapshot(ctx context.Context, since time.Time, buc
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	rows, err := queryTimeseriesAggregates(ctx, tx, since, bucketMin)
+	rows, err := queryTimeseriesAggregates(ctx, tx, scope, bucketMin)
 	if err != nil {
 		return nil, err
 	}
 	textCost, imageCost, err := queryCostBuckets(ctx, tx, CostBucketFilter{
-		Since: since, BucketSeconds: int64(bucketMin) * 60,
+		Since: scope.Since, KeyHash: scope.KeyHash, BucketSeconds: int64(bucketMin) * 60,
 	})
 	if err != nil {
 		return nil, err
@@ -94,12 +94,13 @@ func querySummaryAggregate(ctx context.Context, q reportQueryContext, since time
 	return row, err
 }
 
-func queryTimeseriesAggregates(ctx context.Context, q modelQueryContext, since time.Time, bucketMin int) ([]TimeseriesRow, error) {
+func queryTimeseriesAggregates(ctx context.Context, q modelQueryContext, scope ReportScope, bucketMin int) ([]TimeseriesRow, error) {
 	bucketSec := int64(bucketMin) * 60
 	bucketExpr := fmt.Sprintf(
 		`strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', (created_at_unix / %d) * %d, 'unixepoch')`,
 		bucketSec, bucketSec,
 	)
+	where, args := reportScopeWhere(scope)
 	rows, err := q.QueryContext(ctx, `
 		SELECT
 			`+bucketExpr+`,
@@ -113,9 +114,9 @@ func queryTimeseriesAggregates(ctx context.Context, q modelQueryContext, since t
 			COALESCE(SUM(total_tokens), 0),
 			COALESCE(CAST(ROUND(AVG(CASE WHEN latency_ms > 0 THEN latency_ms END)) AS INTEGER), 0),
 			COALESCE(CAST(ROUND(AVG(CASE WHEN ttfb_ms > 0 THEN ttfb_ms END)) AS INTEGER), 0)
-		FROM request_usage WHERE created_at_unix >= ?
+		FROM request_usage WHERE `+where+`
 		GROUP BY 1 ORDER BY 1 ASC
-	`, since.Unix())
+	`, args...)
 	if err != nil {
 		return nil, err
 	}

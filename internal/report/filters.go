@@ -1,11 +1,15 @@
 package report
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // ModelsFilter is the typed read filter for the models report.
 // Key filtering is intentionally out of scope for this vertical slice.
 type ModelsFilter struct {
-	Since time.Time
+	Since   time.Time
+	KeyHash string
 }
 
 type SummaryFilter struct {
@@ -15,6 +19,23 @@ type SummaryFilter struct {
 type TimeseriesFilter struct {
 	Since     time.Time
 	BucketMin int
+	KeyHash   string
+}
+
+func ValidateKeyHashFilter(value string) error {
+	if value == "" || value == "unknown" {
+		return nil
+	}
+	if len(value) != 64 {
+		return fmt.Errorf("key_hash must be a 64-character lowercase hex value or unknown")
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return fmt.Errorf("key_hash must be a 64-character lowercase hex value or unknown")
+		}
+	}
+	return nil
 }
 
 type ImagesFilter struct {

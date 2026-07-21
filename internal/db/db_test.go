@@ -1310,7 +1310,7 @@ func TestModelsReportSnapshotMultipleModels(t *testing.T) {
 	}
 
 	since := now.Add(-time.Hour)
-	snapshot, err := d.ModelsReportSnapshot(context.Background(), since)
+	snapshot, err := d.ModelsReportSnapshot(context.Background(), ReportScope{Since: since})
 	if err != nil {
 		t.Fatalf("ModelsReportSnapshot: %v", err)
 	}
@@ -1349,7 +1349,7 @@ func TestModelsReportSnapshotMultipleModels(t *testing.T) {
 
 func TestModelsReportSnapshotEmpty(t *testing.T) {
 	d := newTestDB(t)
-	snapshot, err := d.ModelsReportSnapshot(context.Background(), time.Now().Add(-time.Hour))
+	snapshot, err := d.ModelsReportSnapshot(context.Background(), ReportScope{Since: time.Now().Add(-time.Hour)})
 	if err != nil {
 		t.Fatalf("ModelsReportSnapshot: %v", err)
 	}
@@ -1379,7 +1379,7 @@ func TestModelsContextCanceled(t *testing.T) {
 		t.Fatalf("ModelsContext err = %v, want context.Canceled", err)
 	}
 
-	_, err = d.ModelsReportSnapshot(ctx, time.Now().Add(-time.Hour))
+	_, err = d.ModelsReportSnapshot(ctx, ReportScope{Since: time.Now().Add(-time.Hour)})
 	if err == nil {
 		t.Fatal("expected canceled error from ModelsReportSnapshot")
 	}
@@ -1394,7 +1394,7 @@ func TestModelsReportSnapshotReleasesReadConnection(t *testing.T) {
 	since := time.Now().Add(-time.Hour)
 
 	for i := 0; i < 3; i++ {
-		snapshot, err := d.ModelsReportSnapshot(context.Background(), since)
+		snapshot, err := d.ModelsReportSnapshot(context.Background(), ReportScope{Since: since})
 		if err != nil {
 			t.Fatalf("snapshot %d: %v", i, err)
 		}
@@ -1509,7 +1509,7 @@ func TestModelsReportSnapshotConsistentUnderConcurrentWrites(t *testing.T) {
 			t.Fatalf("writer failed during snapshot loop: %v", err)
 		default:
 		}
-		snapshot, err := d.ModelsReportSnapshot(context.Background(), since)
+		snapshot, err := d.ModelsReportSnapshot(context.Background(), ReportScope{Since: since})
 		if err != nil {
 			t.Fatalf("snapshot loop %d: %v", n, err)
 		}

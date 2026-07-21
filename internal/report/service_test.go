@@ -39,11 +39,13 @@ type stubModelsReader struct {
 	calls               int
 	lastSince           time.Time
 	lastDone            bool
+	lastKeyHash         string
 }
 
-func (s *stubModelsReader) ModelsReportSnapshot(ctx context.Context, since time.Time) (*db.ModelsReportData, error) {
+func (s *stubModelsReader) ModelsReportSnapshot(ctx context.Context, scope db.ReportScope) (*db.ModelsReportData, error) {
 	s.calls++
-	s.lastSince = since
+	s.lastSince = scope.Since
+	s.lastKeyHash = scope.KeyHash
 	s.lastDone = ctx.Err() != nil
 	if s.err != nil {
 		return nil, s.err
@@ -64,8 +66,9 @@ func (s *stubModelsReader) SummaryReportSnapshot(ctx context.Context, since time
 	return s.summarySnapshot, nil
 }
 
-func (s *stubModelsReader) TimeseriesReportSnapshot(ctx context.Context, since time.Time, bucketMin int) (*db.TimeseriesReportData, error) {
+func (s *stubModelsReader) TimeseriesReportSnapshot(ctx context.Context, scope db.ReportScope, bucketMin int) (*db.TimeseriesReportData, error) {
 	s.lastBucketMin = bucketMin
+	s.lastKeyHash = scope.KeyHash
 	if s.timeseriesErr != nil {
 		return nil, s.timeseriesErr
 	}
@@ -199,7 +202,7 @@ func TestModelsMapsAndMergesSources(t *testing.T) {
 	svc := NewService(testDependencies(reader), cost)
 
 	since := time.Now().Add(-time.Hour)
-	got, err := svc.Models(context.Background(), ModelsFilter{Since: since})
+	got, err := svc.Models(context.Background(), ModelsFilter{Since: since, KeyHash: "unknown"})
 	if err != nil {
 		t.Fatalf("Models: %v", err)
 	}
@@ -230,6 +233,9 @@ func TestModelsMapsAndMergesSources(t *testing.T) {
 	}
 	if !reader.lastSince.Equal(since) {
 		t.Fatalf("filter not forwarded: %v", reader.lastSince)
+	}
+	if reader.lastKeyHash != "unknown" {
+		t.Fatalf("key filter not forwarded: %q", reader.lastKeyHash)
 	}
 	if cost.calls != 1 || cost.model != "gpt-4o" {
 		t.Fatalf("cost calls=%d model=%q", cost.calls, cost.model)
