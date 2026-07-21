@@ -22,6 +22,7 @@ import (
 	"ai-gateway-metering-proxy/internal/pricing"
 	"ai-gateway-metering-proxy/internal/proxy"
 	"ai-gateway-metering-proxy/internal/quota"
+	"ai-gateway-metering-proxy/internal/report"
 	"ai-gateway-metering-proxy/internal/store"
 	"ai-gateway-metering-proxy/internal/usagequeue"
 	"ai-gateway-metering-proxy/internal/webui"
@@ -236,11 +237,12 @@ func main() {
 	mux.Handle("/metrics", metrics.Handler())
 
 	if cfg.WebUI.Enabled {
+		modelsReporter := report.NewService(database, pricingData)
 		var webuiServer *webui.Server
 		if *devStatic {
-			webuiServer = webui.NewWithStaticFS(reportStore, pricingData, batchWriter, proxyHandler.Registry(), cfg.WebUI.BasePath, os.DirFS("internal/webui/static"))
+			webuiServer = webui.NewWithStaticFS(reportStore, modelsReporter, pricingData, batchWriter, proxyHandler.Registry(), cfg.WebUI.BasePath, os.DirFS("internal/webui/static"))
 		} else {
-			webuiServer = webui.New(reportStore, pricingData, batchWriter, proxyHandler.Registry(), cfg.WebUI.BasePath)
+			webuiServer = webui.New(reportStore, modelsReporter, pricingData, batchWriter, proxyHandler.Registry(), cfg.WebUI.BasePath)
 		}
 		webuiServer.SetMeteringEnabledFunc(func() bool { return cfg.MeteringEnabled })
 		webuiServer.SetCorrelationMode(cfg.Observability.Correlation.SideChannelMerge)

@@ -1,7 +1,9 @@
 package webui
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"ai-gateway-metering-proxy/internal/event"
 	"ai-gateway-metering-proxy/internal/pricing"
 	"ai-gateway-metering-proxy/internal/profile"
+	"ai-gateway-metering-proxy/internal/report"
 	"ai-gateway-metering-proxy/internal/store"
 	"ai-gateway-metering-proxy/internal/writer"
 )
@@ -32,9 +35,28 @@ func newTestServer(t *testing.T, basePath string) (*Server, *db.DB) {
 	t.Cleanup(func() { bw.Stop() })
 
 	registry := profile.NewRegistry()
+	modelsReporter := report.NewService(database, pricingData)
 
-	s := New(database, pricingData, bw, registry, basePath)
+	s := New(database, modelsReporter, pricingData, bw, registry, basePath)
 	return s, database
+}
+
+type stubModelsReporter struct {
+	calls  int
+	filter report.ModelsFilter
+	ctxErr error
+	out    []report.ModelReport
+	err    error
+}
+
+func (s *stubModelsReporter) Models(ctx context.Context, filter report.ModelsFilter) ([]report.ModelReport, error) {
+	s.calls++
+	s.filter = filter
+	s.ctxErr = ctx.Err()
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.out, nil
 }
 
 func TestNewDoesNotPanic(t *testing.T) {
@@ -67,7 +89,7 @@ func TestNewWithStaticFS_ServesIndexFromInjectedFS(t *testing.T) {
 		},
 	}
 
-	s := NewWithStaticFS(database, pricingData, bw, registry, "/metering", staticFS)
+	s := NewWithStaticFS(database, report.NewService(database, pricingData), pricingData, bw, registry, "/metering", staticFS)
 
 	// Index: placeholder injection.
 	req := httptest.NewRequest("GET", "/metering", nil)
@@ -185,7 +207,7 @@ func TestAPIModelsCostIncludesCacheCreationTokens(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("GET /metering/api/models: status %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	var rows []event.ModelReport
+	var rows []report.ModelReport
 	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
 		t.Fatalf("unmarshal models: %v", err)
 	}
@@ -225,7 +247,7 @@ func TestAPIModelsDoesNotMarkZeroTokenUnknownModelUnpriced(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("GET /metering/api/models: status %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	var rows []event.ModelReport
+	var rows []report.ModelReport
 	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
 		t.Fatalf("unmarshal models: %v", err)
 	}
@@ -1526,5 +1548,208 @@ func TestPricingStub(t *testing.T) {
 	// All prices should be zero (stub does not guess prices).
 	if strings.Contains(body, ": 0") {
 		// has zero-valued entries, which is expected
+	}
+}
+
+func TestNewRequiresModelsReporter(t *testing.T) {
+	database, err := db.Open(t.TempDir() + "/test.sqlite")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+	pricingData := pricing.NewPricing()
+	bw := writer.New(store.NewEventSink(database), 100, 10, time.Nanosecond)
+	bw.Start()
+	t.Cleanup(func() { bw.Stop() })
+	registry := profile.NewRegistry()
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic when models reporter is nil")
+		}
+	}()
+	_ = New(database, nil, pricingData, bw, registry, "/metering")
+}
+
+func TestModelsReporterIsExplicitlyInjected(t *testing.T) {
+	database, err := db.Open(t.TempDir() + "/test.sqlite")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+	// DB intentionally empty; response must come from injected reporter only.
+	pricingData := pricing.NewPricing()
+	bw := writer.New(store.NewEventSink(database), 100, 10, time.Nanosecond)
+	bw.Start()
+	t.Cleanup(func() { bw.Stop() })
+	registry := profile.NewRegistry()
+
+	stub := &stubModelsReporter{
+		out: []report.ModelReport{{
+			Model:        "from-injected-reporter",
+			RequestCount: 7,
+			CostKnown:    true,
+		}},
+	}
+	s := New(database, stub, pricingData, bw, registry, "/metering")
+
+	req := httptest.NewRequest("GET", "/metering/api/models?range=24h", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if stub.calls != 1 {
+		t.Fatalf("reporter calls = %d, want 1", stub.calls)
+	}
+	var rows []report.ModelReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Model != "from-injected-reporter" || rows[0].RequestCount != 7 {
+		t.Fatalf("rows = %+v, want injected reporter payload", rows)
+	}
+}
+
+func TestAPIModelsUsesReportBoundaryAndSourceCounts(t *testing.T) {
+	s, database := newTestServer(t, "/metering")
+	s.pricing.Models["gpt-4o"] = pricing.ModelPrice{
+		InputPer1M:  1.00,
+		OutputPer1M: 2.00,
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := database.InsertBatch([]db.UsageRecord{
+		{
+			CreatedAt:           now.Add(-15 * time.Minute).Format(time.RFC3339),
+			Endpoint:            "/v1/chat/completions",
+			Method:              "POST",
+			Status:              200,
+			LatencyMs:           50,
+			ModelReturned:       "gpt-4o",
+			InputTokens:         1000,
+			OutputTokens:        500,
+			TotalTokens:         1500,
+			ModelReturnedSource: "response_body",
+			UsageSource:         "http_response",
+			CaptureOutcome:      "captured",
+		},
+		{
+			CreatedAt:           now.Add(-10 * time.Minute).Format(time.RFC3339),
+			Endpoint:            "/v1/chat/completions",
+			Method:              "POST",
+			Status:              500,
+			LatencyMs:           20,
+			ModelReturned:       "gpt-4o",
+			InputTokens:         100,
+			OutputTokens:        0,
+			TotalTokens:         100,
+			ModelReturnedSource: "response_body",
+			UsageSource:         "http_response",
+			CaptureOutcome:      "captured",
+		},
+		{
+			CreatedAt:           now.Add(-5 * time.Minute).Format(time.RFC3339),
+			Endpoint:            "/v1/messages",
+			Method:              "POST",
+			Status:              200,
+			LatencyMs:           30,
+			ModelReturned:       "claude-sonnet-4-6",
+			InputTokens:         10,
+			OutputTokens:        5,
+			TotalTokens:         15,
+			ModelReturnedSource: "sse_event",
+			UsageSource:         "http_response",
+			CaptureOutcome:      "captured",
+		},
+	}); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/metering/api/models?range=24h", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("GET /metering/api/models: status %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var rows []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %+v, want 2 models", rows)
+	}
+
+	byModel := map[string]map[string]any{}
+	for _, row := range rows {
+		name, _ := row["model"].(string)
+		byModel[name] = row
+	}
+	gpt, ok := byModel["gpt-4o"]
+	if !ok {
+		t.Fatalf("missing gpt-4o in %+v", rows)
+	}
+	if int64(gpt["request_count"].(float64)) != 2 {
+		t.Fatalf("gpt request_count = %v", gpt["request_count"])
+	}
+	if int64(gpt["failed_count"].(float64)) != 1 {
+		t.Fatalf("gpt failed_count = %v", gpt["failed_count"])
+	}
+	expectedCost := 1100/1_000_000.0*1.00 + 500/1_000_000.0*2.00
+	if diff := gpt["cost"].(float64) - expectedCost; diff < -0.0001 || diff > 0.0001 {
+		t.Fatalf("gpt cost = %v, want %v", gpt["cost"], expectedCost)
+	}
+	if known, _ := gpt["cost_known"].(bool); !known {
+		t.Fatal("gpt cost_known = false")
+	}
+	returned, ok := gpt["model_returned_source_counts"].(map[string]any)
+	if !ok || int64(returned["response_body"].(float64)) != 2 {
+		t.Fatalf("gpt returned sources = %#v", gpt["model_returned_source_counts"])
+	}
+	usage, ok := gpt["usage_source_counts"].(map[string]any)
+	if !ok || int64(usage["http_response"].(float64)) != 2 {
+		t.Fatalf("gpt usage sources = %#v", gpt["usage_source_counts"])
+	}
+
+	// JSON field compatibility: required keys present on every row.
+	required := []string{
+		"model", "model_source", "request_count", "failed_count",
+		"input_tokens", "output_tokens", "reasoning_tokens", "cached_tokens",
+		"cache_creation_tokens", "total_tokens", "cost", "cost_known", "missing_usage_count",
+	}
+	for _, row := range rows {
+		for _, key := range required {
+			if _, ok := row[key]; !ok {
+				t.Fatalf("missing required field %q in %#v", key, row)
+			}
+		}
+	}
+}
+
+func TestAPIModelsReporterErrorIsNonSuccessWithoutBodyContract(t *testing.T) {
+	database, err := db.Open(t.TempDir() + "/test.sqlite")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+	pricingData := pricing.NewPricing()
+	bw := writer.New(store.NewEventSink(database), 100, 10, time.Nanosecond)
+	bw.Start()
+	t.Cleanup(func() { bw.Stop() })
+	registry := profile.NewRegistry()
+
+	// Force a reporter failure. Do not assert raw internal error text; that is
+	// not part of the public API contract for this slice.
+	stub := &stubModelsReporter{err: errors.New("internal boom must not become a contract")}
+	s := New(database, stub, pricingData, bw, registry, "/metering")
+
+	req := httptest.NewRequest("GET", "/metering/api/models?range=24h", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code == 200 {
+		t.Fatalf("status = 200, want non-success on reporter error; body=%s", rec.Body.String())
+	}
+	if stub.calls != 1 {
+		t.Fatalf("reporter calls = %d, want 1", stub.calls)
 	}
 }

@@ -14,24 +14,6 @@ type SummaryReport struct {
 	TotalCost            float64 `json:"total_cost"`
 }
 
-type ModelReport struct {
-	Model                     string           `json:"model"`
-	ModelSource               string           `json:"model_source"`
-	RequestCount              int64            `json:"request_count"`
-	FailedCount               int64            `json:"failed_count"`
-	InputTokens               int64            `json:"input_tokens"`
-	OutputTokens              int64            `json:"output_tokens"`
-	ReasoningTokens           int64            `json:"reasoning_tokens"`
-	CachedTokens              int64            `json:"cached_tokens"`
-	CacheCreationTokens       int64            `json:"cache_creation_tokens"`
-	TotalTokens               int64            `json:"total_tokens"`
-	Cost                      float64          `json:"cost"`
-	CostKnown                 bool             `json:"cost_known"`
-	ModelReturnedSourceCounts map[string]int64 `json:"model_returned_source_counts,omitempty"`
-	UsageSourceCounts         map[string]int64 `json:"usage_source_counts,omitempty"`
-	MissingUsageCount         int64            `json:"missing_usage_count"`
-}
-
 type KeyReport struct {
 	KeyHash      string `json:"key_hash"`
 	RequestCount int64  `json:"request_count"`
@@ -232,12 +214,12 @@ type GatewayCapabilitiesReport struct {
 }
 
 type GatewayCapabilitySummary struct {
-	TotalRequests     int64 `json:"total_requests"`
-	UsageMeteredReqs  int64 `json:"usage_metered_requests"`
-	RequestOnlyReqs   int64 `json:"request_only_requests"`
-	PassthroughReqs   int64 `json:"passthrough_requests"`
-	StreamRequests    int64 `json:"stream_requests"`
-	MissingUsageReqs  int64 `json:"missing_usage_requests"`
+	TotalRequests    int64 `json:"total_requests"`
+	UsageMeteredReqs int64 `json:"usage_metered_requests"`
+	RequestOnlyReqs  int64 `json:"request_only_requests"`
+	PassthroughReqs  int64 `json:"passthrough_requests"`
+	StreamRequests   int64 `json:"stream_requests"`
+	MissingUsageReqs int64 `json:"missing_usage_requests"`
 }
 
 // GatewayCapabilityProfile describes one profile's capability and observed
@@ -257,8 +239,8 @@ type GatewayCapabilityProfile struct {
 // ModelAssetsReport merges request_usage model data with pricing
 // configuration so the UI can show which models are used, metered, and priced.
 type ModelAssetsReport struct {
-	Range   string           `json:"range"`
-	Items   []ModelAssetItem `json:"items"`
+	Range   string            `json:"range"`
+	Items   []ModelAssetItem  `json:"items"`
 	Summary ModelAssetSummary `json:"summary"`
 }
 
@@ -278,9 +260,9 @@ type ModelAssetItem struct {
 }
 
 type ModelAssetSummary struct {
-	ModelsTotal         int   `json:"models_total"`
-	UsedModels          int   `json:"used_models"`
-	UnpricedUsedModels  int   `json:"unpriced_used_models"`
-	RequestOnlyModels   int   `json:"request_only_models"`
-	CostPartial         bool  `json:"cost_partial"`
+	ModelsTotal        int  `json:"models_total"`
+	UsedModels         int  `json:"used_models"`
+	UnpricedUsedModels int  `json:"unpriced_used_models"`
+	RequestOnlyModels  int  `json:"request_only_models"`
+	CostPartial        bool `json:"cost_partial"`
 }

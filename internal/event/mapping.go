@@ -127,26 +127,6 @@ func SummaryFromDB(row *db.SummaryRow) SummaryReport {
 	}
 }
 
-// ModelsFromDB converts db.ModelRow slice to domain ModelReport slice.
-func ModelsFromDB(rows []db.ModelRow) []ModelReport {
-	result := make([]ModelReport, len(rows))
-	for i, r := range rows {
-		result[i] = ModelReport{
-			Model:               r.Model,
-			ModelSource:         r.ModelSource,
-			RequestCount:        r.RequestCount,
-			FailedCount:         r.FailedCount,
-			InputTokens:         r.InputTokens,
-			OutputTokens:        r.OutputTokens,
-			ReasoningTokens:     r.ReasoningTokens,
-			CachedTokens:        r.CachedTokens,
-			CacheCreationTokens: r.CacheCreationTokens,
-			TotalTokens:         r.TotalTokens,
-		}
-	}
-	return result
-}
-
 // KeysFromDB converts db.KeyRow slice to domain KeyReport slice.
 func KeysFromDB(rows []db.KeyRow) []KeyReport {
 	result := make([]KeyReport, len(rows))

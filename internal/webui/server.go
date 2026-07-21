@@ -15,6 +15,7 @@ import (
 	"ai-gateway-metering-proxy/internal/event"
 	"ai-gateway-metering-proxy/internal/pricing"
 	"ai-gateway-metering-proxy/internal/profile"
+	"ai-gateway-metering-proxy/internal/report"
 	"ai-gateway-metering-proxy/internal/store"
 	"ai-gateway-metering-proxy/internal/writer"
 )
@@ -24,6 +25,7 @@ var staticFiles embed.FS
 
 type Server struct {
 	db        store.ReportStore
+	models    report.ModelsReporter
 	pricing   *pricing.Pricing
 	writer    *writer.BatchWriter
 	registry  *profile.Registry
@@ -51,24 +53,29 @@ type Server struct {
 }
 
 // New creates a Server that serves static files from the embedded filesystem.
-func New(database store.ReportStore, pricingData *pricing.Pricing, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string) *Server {
+// models is required and must be wired by the composition root.
+func New(database store.ReportStore, models report.ModelsReporter, pricingData *pricing.Pricing, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string) *Server {
 	staticFS, _ := fs.Sub(staticFiles, "static")
-	return newServer(database, pricingData, batchWriter, registry, basePath, staticFS)
+	return newServer(database, models, pricingData, batchWriter, registry, basePath, staticFS)
 }
 
 // NewWithStaticFS creates a Server that serves static files from the given
 // filesystem. Use this for local development (os.DirFS on the static/ directory)
 // or testing with custom asset sets.
-func NewWithStaticFS(database store.ReportStore, pricingData *pricing.Pricing, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string, staticFS fs.FS) *Server {
-	return newServer(database, pricingData, batchWriter, registry, basePath, staticFS)
+func NewWithStaticFS(database store.ReportStore, models report.ModelsReporter, pricingData *pricing.Pricing, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string, staticFS fs.FS) *Server {
+	return newServer(database, models, pricingData, batchWriter, registry, basePath, staticFS)
 }
 
-func newServer(database store.ReportStore, pricingData *pricing.Pricing, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string, staticFS fs.FS) *Server {
+func newServer(database store.ReportStore, models report.ModelsReporter, pricingData *pricing.Pricing, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string, staticFS fs.FS) *Server {
+	if models == nil {
+		panic("webui: models reporter is required")
+	}
 	basePath = strings.TrimRight(basePath, "/")
 	apiPrefix := basePath + "/api/"
 
 	s := &Server{
 		db:              database,
+		models:          models,
 		pricing:         pricingData,
 		writer:          batchWriter,
 		registry:        registry,
@@ -346,31 +353,15 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	since, _ := parseRange(r)
-	rows, err := s.db.Models(since)
+	models, err := s.models.Models(r.Context(), report.ModelsFilter{Since: since})
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	report := event.ModelsFromDB(rows)
-	if report == nil {
-		report = []event.ModelReport{}
+	if models == nil {
+		models = []report.ModelReport{}
 	}
-	for i := range report {
-		cost, known := s.pricing.CostWithCacheCreation(report[i].Model, report[i].InputTokens, report[i].OutputTokens, report[i].ReasoningTokens, report[i].CachedTokens, report[i].CacheCreationTokens)
-		report[i].Cost = cost
-		report[i].CostKnown = known || !hasBillableTextUsage(rows[i])
-		if rows[i].MissingUsageCount > 0 || len(rows[i].ModelReturnedSourceCounts) > 0 || len(rows[i].UsageSourceCounts) > 0 {
-			report[i].MissingUsageCount = rows[i].MissingUsageCount
-		}
-	}
-	for i := range report {
-		srcCounts, usageCounts, err := s.db.ModelSourceCounts(since, report[i].Model)
-		if err == nil && (len(srcCounts) > 0 || len(usageCounts) > 0) {
-			report[i].ModelReturnedSourceCounts = srcCounts
-			report[i].UsageSourceCounts = usageCounts
-		}
-	}
-	writeJSON(w, report)
+	writeJSON(w, models)
 }
 
 func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {

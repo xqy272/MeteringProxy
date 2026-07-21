@@ -1,10 +1,14 @@
 package db
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -1295,5 +1299,286 @@ func TestSaltFingerprint_MismatchOnEmptyDBStillBinds(t *testing.T) {
 	// fingerprint is authoritative, so this must still fail.
 	if err := d.VerifySaltFingerprint("different-fp", "test.db", "test.salt"); err == nil {
 		t.Fatal("expected error when fingerprint mismatches stored value even on empty DB")
+	}
+}
+
+func TestModelsReportSnapshotMultipleModels(t *testing.T) {
+	d := newTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := d.InsertBatch([]UsageRecord{
+		{
+			CreatedAt:           now.Add(-30 * time.Minute).Format(time.RFC3339),
+			Endpoint:            "/v1/chat/completions",
+			Method:              "POST",
+			Status:              200,
+			LatencyMs:           10,
+			ModelReturned:       "gpt-4o",
+			InputTokens:         10,
+			OutputTokens:        5,
+			TotalTokens:         15,
+			ModelReturnedSource: "response_body",
+			UsageSource:         "http_response",
+			CaptureOutcome:      "captured",
+		},
+		{
+			CreatedAt:           now.Add(-20 * time.Minute).Format(time.RFC3339),
+			Endpoint:            "/v1/chat/completions",
+			Method:              "POST",
+			Status:              200,
+			LatencyMs:           10,
+			ModelReturned:       "gpt-4o",
+			InputTokens:         3,
+			OutputTokens:        2,
+			TotalTokens:         5,
+			ModelReturnedSource: "response_body",
+			UsageSource:         "http_response",
+			CaptureOutcome:      "captured",
+		},
+		{
+			CreatedAt:           now.Add(-10 * time.Minute).Format(time.RFC3339),
+			Endpoint:            "/v1/messages",
+			Method:              "POST",
+			Status:              200,
+			LatencyMs:           10,
+			ModelReturned:       "claude-sonnet-4-6",
+			InputTokens:         8,
+			OutputTokens:        4,
+			TotalTokens:         12,
+			ModelReturnedSource: "sse_event",
+			UsageSource:         "http_response",
+			CaptureOutcome:      "captured",
+		},
+		{
+			CreatedAt:      now.Add(-5 * time.Minute).Format(time.RFC3339),
+			Endpoint:       "/v1/chat/completions",
+			Method:         "POST",
+			Status:         200,
+			LatencyMs:      10,
+			ModelRequested: "deepseek-chat",
+			CaptureOutcome: "skipped",
+			CaptureReason:  "request_only_profile",
+		},
+	}); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	since := now.Add(-time.Hour)
+	models, returned, usage, err := d.ModelsReportSnapshot(context.Background(), since)
+	if err != nil {
+		t.Fatalf("ModelsReportSnapshot: %v", err)
+	}
+	if len(models) != 3 {
+		t.Fatalf("models = %+v, want 3", models)
+	}
+	if returned["gpt-4o"]["response_body"] != 2 {
+		t.Fatalf("gpt-4o returned sources = %+v", returned["gpt-4o"])
+	}
+	if returned["claude-sonnet-4-6"]["sse_event"] != 1 {
+		t.Fatalf("claude returned sources = %+v", returned["claude-sonnet-4-6"])
+	}
+	if usage["gpt-4o"]["http_response"] != 2 {
+		t.Fatalf("gpt-4o usage sources = %+v", usage["gpt-4o"])
+	}
+	if usage["deepseek-chat"]["none"] != 1 {
+		t.Fatalf("deepseek usage sources = %+v", usage["deepseek-chat"])
+	}
+	for _, m := range models {
+		var retSum, useSum int64
+		for _, c := range returned[m.Model] {
+			retSum += c
+		}
+		for _, c := range usage[m.Model] {
+			useSum += c
+		}
+		if retSum != m.RequestCount || useSum != m.RequestCount {
+			t.Fatalf("snapshot mismatch for %s: requests=%d returned=%d usage=%d", m.Model, m.RequestCount, retSum, useSum)
+		}
+	}
+}
+
+func TestModelsReportSnapshotEmpty(t *testing.T) {
+	d := newTestDB(t)
+	models, returned, usage, err := d.ModelsReportSnapshot(context.Background(), time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("ModelsReportSnapshot: %v", err)
+	}
+	if len(returned) != 0 || len(usage) != 0 {
+		t.Fatalf("expected empty maps, got returned=%+v usage=%+v", returned, usage)
+	}
+	if len(models) != 0 {
+		t.Fatalf("models = %+v, want empty", models)
+	}
+}
+
+func TestModelsContextCanceled(t *testing.T) {
+	d := newTestDB(t)
+	insertRecord(t, d, ts(-time.Minute), "/v1/chat/completions", 200, "gpt-4o", 1, 2, 3)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := d.ModelsContext(ctx, time.Now().Add(-time.Hour))
+	if err == nil {
+		t.Fatal("expected canceled error from ModelsContext")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ModelsContext err = %v, want context.Canceled", err)
+	}
+
+	_, _, _, err = d.ModelsReportSnapshot(ctx, time.Now().Add(-time.Hour))
+	if err == nil {
+		t.Fatal("expected canceled error from ModelsReportSnapshot")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ModelsReportSnapshot err = %v, want context.Canceled", err)
+	}
+}
+
+func TestModelsReportSnapshotReleasesReadConnection(t *testing.T) {
+	d := newTestDB(t)
+	insertRecord(t, d, ts(-time.Minute), "/v1/chat/completions", 200, "gpt-4o", 1, 2, 3)
+	since := time.Now().Add(-time.Hour)
+
+	for i := 0; i < 3; i++ {
+		models, returned, usage, err := d.ModelsReportSnapshot(context.Background(), since)
+		if err != nil {
+			t.Fatalf("snapshot %d: %v", i, err)
+		}
+		if len(models) != 1 || models[0].Model != "gpt-4o" {
+			t.Fatalf("snapshot %d models = %+v", i, models)
+		}
+		if returned["gpt-4o"] == nil || usage["gpt-4o"] == nil {
+			t.Fatalf("snapshot %d missing source maps: returned=%+v usage=%+v", i, returned, usage)
+		}
+	}
+
+	// Connection must remain usable for non-snapshot reads.
+	rows, err := d.ModelsContext(context.Background(), since)
+	if err != nil {
+		t.Fatalf("ModelsContext after snapshots: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("ModelsContext rows = %+v", rows)
+	}
+}
+
+func TestModelsReportSnapshotConsistentUnderConcurrentWrites(t *testing.T) {
+	d := newTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	seed := make([]UsageRecord, 0, 20)
+	for i := 0; i < 20; i++ {
+		seed = append(seed, UsageRecord{
+			CreatedAt:           now.Add(-time.Duration(i+1) * time.Minute).Format(time.RFC3339),
+			Endpoint:            "/v1/chat/completions",
+			Method:              "POST",
+			Status:              200,
+			LatencyMs:           10,
+			ModelReturned:       "gpt-4o",
+			InputTokens:         1,
+			OutputTokens:        1,
+			TotalTokens:         2,
+			ModelReturnedSource: "response_body",
+			UsageSource:         "http_response",
+			CaptureOutcome:      "captured",
+		})
+	}
+	if err := d.InsertBatch(seed); err != nil {
+		t.Fatalf("seed InsertBatch: %v", err)
+	}
+
+	const maxWriterInserts = 50
+	const snapshotLoops = 40
+
+	stop := make(chan struct{})
+	errCh := make(chan error, 1)
+	var inserted atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(2 * time.Millisecond)
+		defer ticker.Stop()
+		for i := 0; i < maxWriterInserts; i++ {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+			}
+			model := "gpt-4o"
+			if i%3 == 0 {
+				model = "claude-sonnet-4-6"
+			}
+			if err := d.InsertBatch([]UsageRecord{{
+				CreatedAt:           time.Now().UTC().Format(time.RFC3339),
+				Endpoint:            "/v1/chat/completions",
+				Method:              "POST",
+				Status:              200,
+				LatencyMs:           5,
+				ModelReturned:       model,
+				InputTokens:         1,
+				OutputTokens:        1,
+				TotalTokens:         2,
+				ModelReturnedSource: "response_body",
+				UsageSource:         "http_response",
+				CaptureOutcome:      "captured",
+			}}); err != nil {
+				select {
+				case errCh <- err:
+				default:
+				}
+				return
+			}
+			inserted.Add(1)
+		}
+	}()
+	// Prove the writer actually committed before asserting snapshot conservation.
+	deadline := time.Now().Add(2 * time.Second)
+	for inserted.Load() < 1 {
+		select {
+		case err := <-errCh:
+			t.Fatalf("writer failed before first successful insert: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("writer did not successfully insert any rows")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	since := now.Add(-2 * time.Hour)
+	for n := 0; n < snapshotLoops; n++ {
+		select {
+		case err := <-errCh:
+			t.Fatalf("writer failed during snapshot loop: %v", err)
+		default:
+		}
+		models, returned, usage, err := d.ModelsReportSnapshot(context.Background(), since)
+		if err != nil {
+			t.Fatalf("snapshot loop %d: %v", n, err)
+		}
+		for _, m := range models {
+			var retSum, useSum int64
+			for _, c := range returned[m.Model] {
+				retSum += c
+			}
+			for _, c := range usage[m.Model] {
+				useSum += c
+			}
+			if retSum != m.RequestCount || useSum != m.RequestCount {
+				t.Fatalf("inconsistent snapshot model=%s requests=%d returnedSum=%d usageSum=%d returned=%+v usage=%+v",
+					m.Model, m.RequestCount, retSum, useSum, returned[m.Model], usage[m.Model])
+			}
+		}
+	}
+
+	close(stop)
+	wg.Wait()
+	select {
+	case err := <-errCh:
+		t.Fatalf("writer failed: %v", err)
+	default:
+	}
+	if got := inserted.Load(); got < 1 {
+		t.Fatalf("writer successful inserts = %d, want >= 1", got)
 	}
 }

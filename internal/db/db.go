@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -1303,7 +1304,48 @@ func (db *DB) Summary(since time.Time) (*SummaryRow, error) {
 }
 
 func (db *DB) Models(since time.Time) ([]ModelRow, error) {
-	rows, err := db.read.Query(`
+	return db.ModelsContext(context.Background(), since)
+}
+
+func (db *DB) ModelsContext(ctx context.Context, since time.Time) ([]ModelRow, error) {
+	return queryModelAggregates(ctx, db.read, since)
+}
+
+// ModelsReportSnapshot loads model aggregates and both source breakdowns inside
+// one read-only transaction so all three set-based queries share a consistent
+// SQLite snapshot. Rows are closed sequentially to avoid deadlocking the single
+// read connection.
+func (db *DB) ModelsReportSnapshot(ctx context.Context, since time.Time) ([]ModelRow, map[string]map[string]int64, map[string]map[string]int64, error) {
+	tx, err := db.read.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	models, err := queryModelAggregates(ctx, tx, since)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	modelReturned, err := queryModelReturnedSourceCounts(ctx, tx, since)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	usage, err := queryUsageSourceCounts(ctx, tx, since)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, nil, err
+	}
+	return models, modelReturned, usage, nil
+}
+
+type modelQueryContext interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+func queryModelAggregates(ctx context.Context, q modelQueryContext, since time.Time) ([]ModelRow, error) {
+	rows, err := q.QueryContext(ctx, `
 		SELECT
 			`+effectiveModelExpr+`,
 			`+modelSourceAggExpr+`,
@@ -1339,10 +1381,78 @@ func (db *DB) Models(since time.Time) ([]ModelRow, error) {
 	return result, rows.Err()
 }
 
+func queryModelReturnedSourceCounts(ctx context.Context, q modelQueryContext, since time.Time) (map[string]map[string]int64, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT
+			`+effectiveModelExpr+`,
+			`+modelReturnedSourceCompatExpr+`,
+			COUNT(*)
+		FROM request_usage
+		WHERE created_at_unix >= ?
+		GROUP BY 1, 2
+	`, since.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]map[string]int64)
+	for rows.Next() {
+		var modelName, src string
+		var cnt int64
+		if err := rows.Scan(&modelName, &src, &cnt); err != nil {
+			return nil, err
+		}
+		bucket := out[modelName]
+		if bucket == nil {
+			bucket = make(map[string]int64)
+			out[modelName] = bucket
+		}
+		bucket[src] = cnt
+	}
+	return out, rows.Err()
+}
+
+func queryUsageSourceCounts(ctx context.Context, q modelQueryContext, since time.Time) (map[string]map[string]int64, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT
+			`+effectiveModelExpr+`,
+			`+usageSourceCompatExpr+`,
+			COUNT(*)
+		FROM request_usage
+		WHERE created_at_unix >= ?
+		GROUP BY 1, 2
+	`, since.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]map[string]int64)
+	for rows.Next() {
+		var modelName, src string
+		var cnt int64
+		if err := rows.Scan(&modelName, &src, &cnt); err != nil {
+			return nil, err
+		}
+		bucket := out[modelName]
+		if bucket == nil {
+			bucket = make(map[string]int64)
+			out[modelName] = bucket
+		}
+		bucket[src] = cnt
+	}
+	return out, rows.Err()
+}
+
 func (db *DB) ModelSourceCounts(since time.Time, model string) (modelReturnedSourceCounts map[string]int64, usageSourceCounts map[string]int64, err error) {
+	return db.ModelSourceCountsContext(context.Background(), since, model)
+}
+
+func (db *DB) ModelSourceCountsContext(ctx context.Context, since time.Time, model string) (modelReturnedSourceCounts map[string]int64, usageSourceCounts map[string]int64, err error) {
 	modelReturnedSourceCounts = make(map[string]int64)
 	usageSourceCounts = make(map[string]int64)
-	modelRows, err := db.read.Query(`
+	modelRows, err := db.read.QueryContext(ctx, `
 		SELECT
 			`+modelReturnedSourceCompatExpr+`,
 			COUNT(*)
@@ -1353,17 +1463,24 @@ func (db *DB) ModelSourceCounts(since time.Time, model string) (modelReturnedSou
 	if err != nil {
 		return nil, nil, err
 	}
-	defer modelRows.Close()
 	for modelRows.Next() {
 		var src string
 		var cnt int64
 		if err := modelRows.Scan(&src, &cnt); err != nil {
+			modelRows.Close()
 			return nil, nil, err
 		}
 		modelReturnedSourceCounts[src] = cnt
 	}
+	if err := modelRows.Err(); err != nil {
+		modelRows.Close()
+		return nil, nil, err
+	}
+	if err := modelRows.Close(); err != nil {
+		return nil, nil, err
+	}
 
-	usageRows, err := db.read.Query(`
+	usageRows, err := db.read.QueryContext(ctx, `
 		SELECT
 			`+usageSourceCompatExpr+`,
 			COUNT(*)
@@ -1383,7 +1500,7 @@ func (db *DB) ModelSourceCounts(since time.Time, model string) (modelReturnedSou
 		}
 		usageSourceCounts[src] = cnt
 	}
-	return modelReturnedSourceCounts, usageSourceCounts, nil
+	return modelReturnedSourceCounts, usageSourceCounts, usageRows.Err()
 }
 
 func (db *DB) Keys(since time.Time) ([]KeyRow, error) {
