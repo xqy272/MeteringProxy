@@ -510,22 +510,15 @@ func normalizeKeyLabels(cfg *Config) error {
 }
 
 func keyLabelsPath(hash string) string {
-	if hash == "" || !isSafeConfigPathSegment(hash) {
-		return "key_labels"
+	if hash == "unknown" {
+		return "key_labels.unknown"
 	}
-	return "key_labels." + hash
-}
-
-func isSafeConfigPathSegment(s string) bool {
-	if s == "" {
-		return false
+	if isFullLowerHexHash(hash) {
+		return "key_labels." + hash
 	}
-	for _, r := range s {
-		if unicode.IsControl(r) || unicode.IsSpace(r) {
-			return false
-		}
-	}
-	return true
+	// An invalid map key may be an accidentally pasted plaintext API key.
+	// Never echo it in validation errors.
+	return "key_labels[invalid_hash]"
 }
 
 func isFullLowerHexHash(s string) bool {

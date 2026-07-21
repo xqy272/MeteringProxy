@@ -400,8 +400,8 @@ func TestLoadKeyLabelsRejectsUppercaseHash(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for uppercase hash")
 	}
-	if !strings.Contains(err.Error(), "key_labels."+upper) {
-		t.Fatalf("error = %v, want stable path with uppercase hash", err)
+	if !strings.Contains(err.Error(), "key_labels[invalid_hash]") || strings.Contains(err.Error(), upper) {
+		t.Fatalf("error = %v, want redacted stable path", err)
 	}
 }
 
@@ -413,8 +413,8 @@ func TestLoadKeyLabelsRejectsNonHexHash(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for non-hex hash")
 	}
-	if !strings.Contains(err.Error(), "key_labels."+bad) {
-		t.Fatalf("error = %v, want stable path", err)
+	if !strings.Contains(err.Error(), "key_labels[invalid_hash]") || strings.Contains(err.Error(), bad) {
+		t.Fatalf("error = %v, want redacted stable path", err)
 	}
 }
 
@@ -468,7 +468,7 @@ func TestLoadKeyLabelsRejectsControlRune(t *testing.T) {
 }
 
 func TestLoadKeyLabelsAccepts80RunesRejects81(t *testing.T) {
-	label80 := strings.Repeat("?", 80)
+	label80 := strings.Repeat("\u754c", 80)
 	if utf8.RuneCountInString(label80) != 80 {
 		t.Fatalf("fixture rune count = %d", utf8.RuneCountInString(label80))
 	}
@@ -482,7 +482,7 @@ func TestLoadKeyLabelsAccepts80RunesRejects81(t *testing.T) {
 		t.Fatalf("label not preserved for 80 runes")
 	}
 
-	label81 := strings.Repeat("?", 81)
+	label81 := strings.Repeat("\u754c", 81)
 	bodyBad := "upstream: \"http://127.0.0.1:8317\"\nkey_labels:\n  \"" + validKeyHashA + "\": \"" + label81 + "\"\n"
 	pathBad := writeConfig(t, bodyBad)
 	_, err = Load(pathBad)
@@ -500,6 +500,7 @@ func TestLoadKeyLabelsAccepts80RunesRejects81(t *testing.T) {
 func TestLoadKeyLabelsErrorsDoNotLeakCredentials(t *testing.T) {
 	secretSalt := "super-secret-salt-value-do-not-leak"
 	secretMgmtKey := "mgmt-key-plaintext-should-not-appear"
+	plaintextAPIKey := "sk-live-plaintext-api-key-must-not-appear"
 	body := "upstream: \"http://127.0.0.1:8317\"\n" +
 		"salt_file: \"/data/" + secretSalt + "\"\n" +
 		"cliproxy_management:\n" +
@@ -521,5 +522,21 @@ func TestLoadKeyLabelsErrorsDoNotLeakCredentials(t *testing.T) {
 	}
 	if !strings.Contains(msg, "key_labels.unknown") {
 		t.Fatalf("error = %v, want stable key_labels path", err)
+	}
+
+	plaintextPath := writeConfig(t, `
+upstream: "http://127.0.0.1:8317"
+key_labels:
+  "`+plaintextAPIKey+`": "nope"
+`)
+	_, err = Load(plaintextPath)
+	if err == nil {
+		t.Fatal("expected validation error for plaintext map key")
+	}
+	if strings.Contains(err.Error(), plaintextAPIKey) {
+		t.Fatalf("error leaked plaintext API key: %v", err)
+	}
+	if !strings.Contains(err.Error(), "key_labels[invalid_hash]") {
+		t.Fatalf("error = %v, want redacted stable key_labels path", err)
 	}
 }
