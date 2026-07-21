@@ -35,26 +35,33 @@ func newTestServer(t *testing.T, basePath string) (*Server, *db.DB) {
 	t.Cleanup(func() { bw.Stop() })
 
 	registry := profile.NewRegistry()
-	modelsReporter := report.NewService(report.Dependencies{Models: database, Summary: database, Timeseries: database}, pricingData)
+	modelsReporter := report.NewService(report.Dependencies{Models: database, Summary: database, Timeseries: database, Images: database}, pricingData)
 
 	s := New(database, modelsReporter, pricingData, bw, registry, basePath)
 	return s, database
 }
 
 type stubModelsReporter struct {
-	calls            int
-	filter           report.ModelsFilter
-	ctxErr           error
-	out              []report.ModelReport
-	err              error
-	summaryOut       report.SummaryReport
-	summaryErr       error
-	summaryCalls     int
-	summaryFilter    report.SummaryFilter
-	timeseriesOut    []report.TimeseriesReport
-	timeseriesErr    error
-	timeseriesCalls  int
-	timeseriesFilter report.TimeseriesFilter
+	calls             int
+	filter            report.ModelsFilter
+	ctxErr            error
+	out               []report.ModelReport
+	err               error
+	summaryOut        report.SummaryReport
+	summaryErr        error
+	summaryCalls      int
+	summaryFilter     report.SummaryFilter
+	timeseriesOut     []report.TimeseriesReport
+	timeseriesErr     error
+	timeseriesCalls   int
+	timeseriesFilter  report.TimeseriesFilter
+	imageSummaryOut   report.ImageSummaryReport
+	imageSummaryErr   error
+	imageModelsOut    []report.ImageModelReport
+	imageModelsErr    error
+	imageSummaryCalls int
+	imageModelsCalls  int
+	imageFilter       report.ImagesFilter
 }
 
 func (s *stubModelsReporter) Models(ctx context.Context, filter report.ModelsFilter) ([]report.ModelReport, error) {
@@ -77,6 +84,18 @@ func (s *stubModelsReporter) Timeseries(ctx context.Context, filter report.Times
 	s.timeseriesCalls++
 	s.timeseriesFilter = filter
 	return s.timeseriesOut, s.timeseriesErr
+}
+
+func (s *stubModelsReporter) ImageSummary(ctx context.Context, filter report.ImagesFilter) (report.ImageSummaryReport, error) {
+	s.imageSummaryCalls++
+	s.imageFilter = filter
+	return s.imageSummaryOut, s.imageSummaryErr
+}
+
+func (s *stubModelsReporter) ImageModels(ctx context.Context, filter report.ImagesFilter) ([]report.ImageModelReport, error) {
+	s.imageModelsCalls++
+	s.imageFilter = filter
+	return s.imageModelsOut, s.imageModelsErr
 }
 
 func TestNewDoesNotPanic(t *testing.T) {
@@ -109,7 +128,7 @@ func TestNewWithStaticFS_ServesIndexFromInjectedFS(t *testing.T) {
 		},
 	}
 
-	s := NewWithStaticFS(database, report.NewService(report.Dependencies{Models: database, Summary: database, Timeseries: database}, pricingData), pricingData, bw, registry, "/metering", staticFS)
+	s := NewWithStaticFS(database, report.NewService(report.Dependencies{Models: database, Summary: database, Timeseries: database, Images: database}, pricingData), pricingData, bw, registry, "/metering", staticFS)
 
 	// Index: placeholder injection.
 	req := httptest.NewRequest("GET", "/metering", nil)
@@ -1616,8 +1635,10 @@ func TestCoreReporterIsExplicitlyInjected(t *testing.T) {
 			RequestCount: 7,
 			CostKnown:    true,
 		}},
-		summaryOut:    report.SummaryReport{TotalRequests: 11, CostKnown: true, CostState: report.CostStateComplete},
-		timeseriesOut: []report.TimeseriesReport{{Timestamp: "from-injected-reporter", Count: 13, CostKnown: true}},
+		summaryOut:      report.SummaryReport{TotalRequests: 11, CostKnown: true, CostState: report.CostStateComplete},
+		timeseriesOut:   []report.TimeseriesReport{{Timestamp: "from-injected-reporter", Count: 13, CostKnown: true}},
+		imageSummaryOut: report.ImageSummaryReport{Summary: report.ImageSummaryUsage{RequestCount: 17}, CostKnown: true},
+		imageModelsOut:  []report.ImageModelReport{{Model: "from-image-reporter", RequestCount: 19, CostKnown: true}},
 	}
 	s := New(database, stub, pricingData, bw, registry, "/metering")
 
@@ -1652,6 +1673,22 @@ func TestCoreReporterIsExplicitlyInjected(t *testing.T) {
 	var series []report.TimeseriesReport
 	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &series) != nil || len(series) != 1 || series[0].Count != 13 || stub.timeseriesCalls != 1 || stub.timeseriesFilter.BucketMin != 1440 {
 		t.Fatalf("timeseries status=%d payload=%+v calls=%d filter=%+v", rec.Code, series, stub.timeseriesCalls, stub.timeseriesFilter)
+	}
+
+	req = httptest.NewRequest("GET", "/metering/api/images/summary?range=24h", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	var imageSummary report.ImageSummaryReport
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &imageSummary) != nil || imageSummary.Summary.RequestCount != 17 || stub.imageSummaryCalls != 1 {
+		t.Fatalf("image summary status=%d payload=%+v calls=%d", rec.Code, imageSummary, stub.imageSummaryCalls)
+	}
+
+	req = httptest.NewRequest("GET", "/metering/api/images/models?range=24h", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	var imageModels []report.ImageModelReport
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &imageModels) != nil || len(imageModels) != 1 || imageModels[0].RequestCount != 19 || stub.imageModelsCalls != 1 {
+		t.Fatalf("image models status=%d payload=%+v calls=%d", rec.Code, imageModels, stub.imageModelsCalls)
 	}
 }
 

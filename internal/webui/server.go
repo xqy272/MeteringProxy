@@ -374,47 +374,25 @@ func (s *Server) handleMultimodalSummary(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleImageSummary(w http.ResponseWriter, r *http.Request) {
 	since, _ := parseRange(r)
-	row, err := s.db.ImageSummary(since)
+	result, err := s.reports.ImageSummary(r.Context(), report.ImagesFilter{Since: since})
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	models, err := s.db.ImageModels(since)
-	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
-	totalCost, costKnown, unpricedModels := s.imageModelsCost(models)
-	writeJSON(w, map[string]any{
-		"summary":         row,
-		"cost":            totalCost,
-		"cost_known":      costKnown,
-		"unpriced_models": unpricedModels,
-	})
+	writeJSON(w, result)
 }
 
 func (s *Server) handleImageModels(w http.ResponseWriter, r *http.Request) {
 	since, _ := parseRange(r)
-	rows, err := s.db.ImageModels(since)
+	rows, err := s.reports.ImageModels(r.Context(), report.ImagesFilter{Since: since})
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	type imageModelReport struct {
-		db.ImageModelRow
-		Cost      float64 `json:"cost"`
-		CostKnown bool    `json:"cost_known"`
+	if rows == nil {
+		rows = []report.ImageModelReport{}
 	}
-	report := make([]imageModelReport, 0, len(rows))
-	for _, row := range rows {
-		cost, known := s.imageModelCost(row)
-		report = append(report, imageModelReport{
-			ImageModelRow: row,
-			Cost:          cost,
-			CostKnown:     known,
-		})
-	}
-	writeJSON(w, report)
+	writeJSON(w, rows)
 }
 
 func (s *Server) handleImageRequests(w http.ResponseWriter, r *http.Request) {

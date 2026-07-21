@@ -63,9 +63,10 @@ type CostResult struct {
 // CostGroup identifies one report aggregation cell. Empty dimensions mean the
 // caller did not request that grouping.
 type CostGroup struct {
-	Bucket  string
-	KeyHash string
-	Model   string
+	Bucket    string
+	KeyHash   string
+	Model     string
+	Operation string
 }
 
 type costGrouping uint8
@@ -74,6 +75,7 @@ const (
 	costGroupByBucket costGrouping = 1 << iota
 	costGroupByKey
 	costGroupByModel
+	costGroupByOperation
 )
 
 type costAccumulator struct {
@@ -110,7 +112,7 @@ func evaluateCostBuckets(engine CostEngine, textRows []db.TextCostBucketRow, ima
 	}
 
 	for _, row := range textRows {
-		group := makeCostGroup(grouping, row.Bucket, row.KeyHash, row.Model)
+		group := makeCostGroup(grouping, row.Bucket, row.KeyHash, row.Model, row.Operation)
 		acc := get(group)
 		acc.addConfidence(row.ObservedCount, row.SideChannelCount, row.RequestOnlyCount, row.MissingUsageCount, row.UnsupportedCount, row.ConflictCount)
 		if row.ImageRequest {
@@ -141,7 +143,7 @@ func evaluateCostBuckets(engine CostEngine, textRows []db.TextCostBucketRow, ima
 	}
 
 	for _, row := range imageRows {
-		group := makeCostGroup(grouping, row.Bucket, row.KeyHash, row.Model)
+		group := makeCostGroup(grouping, row.Bucket, row.KeyHash, row.Model, row.Operation)
 		acc := get(group)
 
 		if row.MissingOutputCount > 0 {
@@ -201,7 +203,7 @@ func evaluateCostBuckets(engine CostEngine, textRows []db.TextCostBucketRow, ima
 	return results
 }
 
-func makeCostGroup(grouping costGrouping, bucket, keyHash, model string) CostGroup {
+func makeCostGroup(grouping costGrouping, bucket, keyHash, model, operation string) CostGroup {
 	var group CostGroup
 	if grouping&costGroupByBucket != 0 {
 		group.Bucket = bucket
@@ -211,6 +213,9 @@ func makeCostGroup(grouping costGrouping, bucket, keyHash, model string) CostGro
 	}
 	if grouping&costGroupByModel != 0 {
 		group.Model = model
+	}
+	if grouping&costGroupByOperation != 0 {
+		group.Operation = operation
 	}
 	return group
 }

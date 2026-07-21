@@ -16,3 +16,7 @@ type TimeseriesFilter struct {
 	Since     time.Time
 	BucketMin int
 }
+
+type ImagesFilter struct {
+	Since time.Time
+}

@@ -429,6 +429,7 @@ type ImageModelRow struct {
 	FailedCount       int64  `json:"failed_count"`
 	ImageCount        int64  `json:"image_count"`
 	PartialImageCount int64  `json:"partial_image_count"`
+	InputImageCount   int64  `json:"input_image_count"`
 	InputTextTokens   int64  `json:"input_text_tokens"`
 	InputImageTokens  int64  `json:"input_image_tokens"`
 	CachedTextTokens  int64  `json:"cached_text_tokens"`
@@ -1959,6 +1960,7 @@ func (db *DB) ImageModels(since time.Time) ([]ImageModelRow, error) {
 			COUNT(CASE WHEN ru.status >= 400 THEN 1 END),
 			COALESCE(SUM(iu.image_count), 0),
 			COALESCE(SUM(iu.partial_image_count), 0),
+			COALESCE(SUM(iu.input_image_count), 0),
 			COALESCE(SUM(dim.input_text_tokens), 0),
 			COALESCE(SUM(dim.input_image_tokens), 0),
 			COALESCE(SUM(dim.cached_text_tokens), 0),
@@ -1991,6 +1993,7 @@ func (db *DB) ImageModels(since time.Time) ([]ImageModelRow, error) {
 			&r.FailedCount,
 			&r.ImageCount,
 			&r.PartialImageCount,
+			&r.InputImageCount,
 			&r.InputTextTokens,
 			&r.InputImageTokens,
 			&r.CachedTextTokens,

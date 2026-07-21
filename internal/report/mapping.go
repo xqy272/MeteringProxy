@@ -30,6 +30,44 @@ func timeseriesReportFromRow(row db.TimeseriesRow) TimeseriesReport {
 	}
 }
 
+func imageSummaryUsageFromRow(row db.ImageSummaryRow) ImageSummaryUsage {
+	return ImageSummaryUsage{
+		RequestCount:      row.RequestCount,
+		FailedCount:       row.FailedCount,
+		ImageCount:        row.ImageCount,
+		PartialImageCount: row.PartialImageCount,
+		InputImageCount:   row.InputImageCount,
+		MissingUsageCount: row.MissingUsageCount,
+		InputTextTokens:   row.InputTextTokens,
+		InputImageTokens:  row.InputImageTokens,
+		CachedTextTokens:  row.CachedTextTokens,
+		CachedImageTokens: row.CachedImageTokens,
+		CachedMixedTokens: row.CachedMixedTokens,
+		OutputImageTokens: row.OutputImageTokens,
+		TotalTokens:       row.TotalTokens,
+	}
+}
+
+func imageModelReportFromRow(row db.ImageModelRow) ImageModelReport {
+	return ImageModelReport{
+		Model:             row.Model,
+		Operation:         row.Operation,
+		RequestCount:      row.RequestCount,
+		FailedCount:       row.FailedCount,
+		ImageCount:        row.ImageCount,
+		PartialImageCount: row.PartialImageCount,
+		InputImageCount:   row.InputImageCount,
+		InputTextTokens:   row.InputTextTokens,
+		InputImageTokens:  row.InputImageTokens,
+		CachedTextTokens:  row.CachedTextTokens,
+		CachedImageTokens: row.CachedImageTokens,
+		CachedMixedTokens: row.CachedMixedTokens,
+		OutputImageTokens: row.OutputImageTokens,
+		TotalTokens:       row.TotalTokens,
+		MissingUsageCount: row.MissingUsageCount,
+	}
+}
+
 func modelReportFromRow(row db.ModelRow) ModelReport {
 	return ModelReport{
 		Model:               row.Model,

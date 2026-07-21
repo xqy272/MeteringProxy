@@ -24,12 +24,17 @@ type TimeseriesReader interface {
 	TimeseriesReportSnapshot(ctx context.Context, since time.Time, bucketMin int) (*db.TimeseriesReportData, error)
 }
 
+type ImagesReader interface {
+	ImageReportSnapshot(ctx context.Context, since time.Time) (*db.ImageReportData, error)
+}
+
 // Dependencies keeps each read capability narrow while giving the composition
 // root one explicit, compile-time checked wiring object.
 type Dependencies struct {
 	Models     ModelsReader
 	Summary    SummaryReader
 	Timeseries TimeseriesReader
+	Images     ImagesReader
 }
 
 // ModelsReporter is the WebUI-facing /api/models boundary.
@@ -46,10 +51,16 @@ type TimeseriesReporter interface {
 	Timeseries(ctx context.Context, filter TimeseriesFilter) ([]TimeseriesReport, error)
 }
 
+type ImagesReporter interface {
+	ImageSummary(ctx context.Context, filter ImagesFilter) (ImageSummaryReport, error)
+	ImageModels(ctx context.Context, filter ImagesFilter) ([]ImageModelReport, error)
+}
+
 type CoreReporter interface {
 	ModelsReporter
 	SummaryReporter
 	TimeseriesReporter
+	ImagesReporter
 }
 
 // CostEngine is the pricing surface required by core cost reports.

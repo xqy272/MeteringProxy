@@ -17,6 +17,11 @@ type stubModelsReader struct {
 	summaryErr         error
 	timeseriesSnapshot *db.TimeseriesReportData
 	timeseriesErr      error
+	imageSnapshot      *db.ImageReportData
+	imageErr           error
+	imageCalls         int
+	imageSince         time.Time
+	imageDone          bool
 	lastBucketMin      int
 	calls              int
 	lastSince          time.Time
@@ -57,8 +62,21 @@ func (s *stubModelsReader) TimeseriesReportSnapshot(ctx context.Context, since t
 	return s.timeseriesSnapshot, nil
 }
 
+func (s *stubModelsReader) ImageReportSnapshot(ctx context.Context, since time.Time) (*db.ImageReportData, error) {
+	s.imageCalls++
+	s.imageSince = since
+	s.imageDone = ctx.Err() != nil
+	if s.imageErr != nil {
+		return nil, s.imageErr
+	}
+	if s.imageSnapshot == nil {
+		return &db.ImageReportData{}, nil
+	}
+	return s.imageSnapshot, nil
+}
+
 func testDependencies(reader *stubModelsReader) Dependencies {
-	return Dependencies{Models: reader, Summary: reader, Timeseries: reader}
+	return Dependencies{Models: reader, Summary: reader, Timeseries: reader, Images: reader}
 }
 
 type stubCostEngine struct {

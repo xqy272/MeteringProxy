@@ -14,10 +14,12 @@ import (
 // model-specific. BucketSeconds and GroupByKey add time/key dimensions without
 // changing the billing semantics.
 type CostBucketFilter struct {
-	Since         time.Time
-	KeyHash       string
-	BucketSeconds int64
-	GroupByKey    bool
+	Since            time.Time
+	KeyHash          string
+	BucketSeconds    int64
+	GroupByKey       bool
+	GroupByOperation bool
+	ImageOnly        bool
 }
 
 // TextCostBucketRow contains text usage that is homogeneous for tier
@@ -29,6 +31,7 @@ type TextCostBucketRow struct {
 	Bucket              string
 	KeyHash             string
 	Model               string
+	Operation           string
 	RequestInputTokens  int64
 	ImageRequest        bool
 	RequestCount        int64
@@ -110,7 +113,7 @@ func queryCostBuckets(ctx context.Context, q modelQueryContext, filter CostBucke
 	return textRows, imageRows, nil
 }
 
-func costBucketExpressions(filter CostBucketFilter) (bucketExpr, keyExpr, where string, args []any) {
+func costBucketExpressions(filter CostBucketFilter) (bucketExpr, keyExpr, operationExpr, where string, args []any) {
 	bucketExpr = `''`
 	if filter.BucketSeconds > 0 {
 		seconds := strconv.FormatInt(filter.BucketSeconds, 10)
@@ -119,6 +122,10 @@ func costBucketExpressions(filter CostBucketFilter) (bucketExpr, keyExpr, where 
 	keyExpr = `''`
 	if filter.GroupByKey {
 		keyExpr = `COALESCE(NULLIF(TRIM(ru.api_key_hash), ''), 'unknown')`
+	}
+	operationExpr = `''`
+	if filter.GroupByOperation {
+		operationExpr = `COALESCE((SELECT NULLIF(TRIM(iu_op.operation), '') FROM image_usage iu_op WHERE iu_op.request_usage_id = ru.id ORDER BY iu_op.id ASC LIMIT 1), 'unknown')`
 	}
 
 	where = `ru.created_at_unix >= ?`
@@ -131,17 +138,21 @@ func costBucketExpressions(filter CostBucketFilter) (bucketExpr, keyExpr, where 
 		where += ` AND ru.api_key_hash = ?`
 		args = append(args, filter.KeyHash)
 	}
-	return bucketExpr, keyExpr, where, args
+	if filter.ImageOnly {
+		where += ` AND EXISTS (SELECT 1 FROM image_usage iu_scope WHERE iu_scope.request_usage_id = ru.id)`
+	}
+	return bucketExpr, keyExpr, operationExpr, where, args
 }
 
 func queryTextCostBuckets(ctx context.Context, q modelQueryContext, filter CostBucketFilter) ([]TextCostBucketRow, error) {
-	bucketExpr, keyExpr, where, args := costBucketExpressions(filter)
+	bucketExpr, keyExpr, operationExpr, where, args := costBucketExpressions(filter)
 	query := fmt.Sprintf(`
 		WITH raw AS (
 			SELECT
 				%s AS bucket,
 				%s AS key_hash,
 				%s AS model,
+				%s AS operation,
 				MAX(COALESCE(ru.input_tokens, 0), 0) AS request_input_tokens,
 				MAX(COALESCE(ru.cached_tokens, 0), 0) AS cached_raw,
 				MAX(COALESCE(ru.cache_creation_tokens, 0), 0) AS cache_creation_raw,
@@ -194,7 +205,7 @@ func queryTextCostBuckets(ctx context.Context, q modelQueryContext, filter CostB
 			FROM input_normalized
 		)
 		SELECT
-			bucket, key_hash, model, request_input_tokens, image_request,
+			bucket, key_hash, model, operation, request_input_tokens, image_request,
 			COUNT(*),
 			SUM(CASE WHEN billable_input_tokens > 0 OR output_tokens > 0 OR reasoning_tokens > 0 THEN 1 ELSE 0 END),
 			COALESCE(SUM(billable_input_tokens), 0),
@@ -209,9 +220,9 @@ func queryTextCostBuckets(ctx context.Context, q modelQueryContext, filter CostB
 			SUM(CASE WHEN confidence = 'unsupported' THEN 1 ELSE 0 END),
 			SUM(CASE WHEN confidence = 'conflict' THEN 1 ELSE 0 END)
 		FROM classified
-		GROUP BY 1, 2, 3, 4, 5
-		ORDER BY 1, 2, 3, 4, 5
-	`, bucketExpr, keyExpr, effectiveModelExprWithAlias("ru"), where)
+		GROUP BY 1, 2, 3, 4, 5, 6
+		ORDER BY 1, 2, 3, 4, 5, 6
+	`, bucketExpr, keyExpr, effectiveModelExprWithAlias("ru"), operationExpr, where)
 
 	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -223,7 +234,7 @@ func queryTextCostBuckets(ctx context.Context, q modelQueryContext, filter CostB
 	for rows.Next() {
 		var row TextCostBucketRow
 		if err := rows.Scan(
-			&row.Bucket, &row.KeyHash, &row.Model, &row.RequestInputTokens, &row.ImageRequest,
+			&row.Bucket, &row.KeyHash, &row.Model, &row.Operation, &row.RequestInputTokens, &row.ImageRequest,
 			&row.RequestCount, &row.BillableUsageCount, &row.InputTokens, &row.OutputTokens, &row.ReasoningTokens,
 			&row.CachedTokens, &row.CacheCreationTokens,
 			&row.ObservedCount, &row.SideChannelCount, &row.RequestOnlyCount,
@@ -237,7 +248,7 @@ func queryTextCostBuckets(ctx context.Context, q modelQueryContext, filter CostB
 }
 
 func queryImageCostBuckets(ctx context.Context, q modelQueryContext, filter CostBucketFilter) ([]ImageCostBucketRow, error) {
-	bucketExpr, keyExpr, where, args := costBucketExpressions(filter)
+	bucketExpr, keyExpr, _, where, args := costBucketExpressions(filter)
 	query := fmt.Sprintf(`
 		WITH dimensions AS (
 			SELECT

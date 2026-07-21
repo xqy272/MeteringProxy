@@ -11,6 +11,7 @@ type Service struct {
 	models     ModelsReader
 	summary    SummaryReader
 	timeseries TimeseriesReader
+	images     ImagesReader
 	cost       CostEngine
 }
 
@@ -25,10 +26,13 @@ func NewService(deps Dependencies, cost CostEngine) *Service {
 	if deps.Timeseries == nil {
 		panic("report: TimeseriesReader is required")
 	}
+	if deps.Images == nil {
+		panic("report: ImagesReader is required")
+	}
 	if cost == nil {
 		panic("report: CostEngine is required")
 	}
-	return &Service{models: deps.Models, summary: deps.Summary, timeseries: deps.Timeseries, cost: cost}
+	return &Service{models: deps.Models, summary: deps.Summary, timeseries: deps.Timeseries, images: deps.Images, cost: cost}
 }
 
 // Models builds the /api/models report from one consistent DB snapshot, then
