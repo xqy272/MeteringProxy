@@ -48,6 +48,16 @@ type RequestsReader interface {
 	RequestsReport(ctx context.Context, filter db.RequestFilter) ([]db.RequestRow, error)
 }
 
+type IssueReader interface {
+	IssuesReport(ctx context.Context, filter db.IssueFilter) (*db.IssuesReportData, error)
+	ErrorTimelineReport(ctx context.Context, since time.Time) ([]db.ErrorTimelineRow, error)
+}
+
+// SideChannelStatusReader is optional runtime status for side-channel disconnect system issues.
+type SideChannelStatusReader interface {
+	Snapshot() (connected bool, lastAt time.Time, lastErr string)
+}
+
 type CaptureRuntimeReader interface {
 	Snapshot() (queueDepth, dropped, parseErrors, dbErrors int64)
 }
@@ -65,6 +75,8 @@ type Dependencies struct {
 	Keys        KeysReader
 	Activity    ActivityReader
 	Requests    RequestsReader
+	Issues      IssueReader
+	SideChannel SideChannelStatusReader
 	KeyLabels   map[string]string
 }
 
@@ -107,6 +119,10 @@ type RequestsReporter interface {
 	Requests(ctx context.Context, filter RequestFilter) ([]RequestReport, error)
 }
 
+type IssuesReporter interface {
+	Issues(ctx context.Context, filter IssueFilter) (IssuesReport, error)
+}
+
 type CoreReporter interface {
 	ModelsReporter
 	SummaryReporter
@@ -117,6 +133,7 @@ type CoreReporter interface {
 	KeysReporter
 	ActivityReporter
 	RequestsReporter
+	IssuesReporter
 }
 
 // CostEngine is the pricing surface required by core cost reports.

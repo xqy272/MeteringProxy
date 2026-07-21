@@ -40,6 +40,11 @@ type stubModelsReader struct {
 	requestRows         []db.RequestRow
 	requestErr          error
 	requestFilter       db.RequestFilter
+	issuesData          *db.IssuesReportData
+	issuesErr           error
+	issueFilter         db.IssueFilter
+	errorTimeline       []db.ErrorTimelineRow
+	errorTimelineErr    error
 	lastBucketMin       int
 	calls               int
 	lastSince           time.Time
@@ -152,6 +157,25 @@ func (s *stubModelsReader) RequestsReport(ctx context.Context, filter db.Request
 	return s.requestRows, nil
 }
 
+func (s *stubModelsReader) IssuesReport(ctx context.Context, filter db.IssueFilter) (*db.IssuesReportData, error) {
+	s.issueFilter = filter
+	s.lastKeyHash = filter.Scope.KeyHash
+	if s.issuesErr != nil {
+		return nil, s.issuesErr
+	}
+	if s.issuesData == nil {
+		return &db.IssuesReportData{RequestUsage: []db.IssueRow{}}, nil
+	}
+	return s.issuesData, nil
+}
+
+func (s *stubModelsReader) ErrorTimelineReport(ctx context.Context, since time.Time) ([]db.ErrorTimelineRow, error) {
+	if s.errorTimelineErr != nil {
+		return nil, s.errorTimelineErr
+	}
+	return s.errorTimeline, nil
+}
+
 func testDependencies(reader *stubModelsReader) Dependencies {
 	return Dependencies{
 		Models: reader, Summary: reader, Timeseries: reader, Images: reader,
@@ -160,6 +184,7 @@ func testDependencies(reader *stubModelsReader) Dependencies {
 		Keys:        reader,
 		Activity:    reader,
 		Requests:    reader,
+		Issues:      reader,
 	}
 }
 

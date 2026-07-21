@@ -71,3 +71,10 @@ type RequestFilter struct {
 	Endpoint   string
 	ErrorClass string
 }
+
+type IssueFilter struct {
+	Since   time.Time
+	KeyHash string
+	Limit   int
+	Range   string
+}

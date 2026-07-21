@@ -338,3 +338,63 @@ type ModelReport struct {
 	UsageSourceCounts         map[string]int64      `json:"usage_source_counts,omitempty"`
 	MissingUsageCount         int64                 `json:"missing_usage_count"`
 }
+
+// Issue source status values for multi-source issues reports.
+const (
+	IssueSourceComplete      = "complete"
+	IssueSourceUnavailable   = "unavailable"
+	IssueSourceNotApplicable = "not_applicable"
+)
+
+type IssueReport struct {
+	Class       string `json:"class"`
+	Label       string `json:"label"`
+	Count       int64  `json:"count"`
+	Severity    string `json:"severity"`
+	SourceGroup string `json:"source_group"`
+	LatestAt    string `json:"latest_at"`
+	Status      int    `json:"status"`
+	Endpoint    string `json:"endpoint"`
+	Model       string `json:"model"`
+	ModelSource string `json:"model_source"`
+	APIKeyHash  string `json:"api_key_hash"`
+	ErrorType   string `json:"error_type"`
+	ErrorCode   string `json:"error_code"`
+	Message     string `json:"message"`
+	RequestID   string `json:"request_id"`
+}
+
+type IssuesSystem struct {
+	ParseErrors   int64             `json:"parse_errors"`
+	DBErrors      int64             `json:"db_errors"`
+	DroppedEvents int64             `json:"dropped_events"`
+	Items         []IssueSystemItem `json:"items"`
+}
+
+type IssueSystemItem struct {
+	Class    string `json:"class"`
+	Label    string `json:"label"`
+	Count    int64  `json:"count"`
+	Scope    string `json:"scope"`
+	Severity string `json:"severity"`
+}
+
+// IssuesSourceStatuses is the additive multi-source status envelope for /api/issues.
+type IssuesSourceStatuses struct {
+	RequestUsage     string `json:"request_usage"`
+	SideChannel      string `json:"side_channel"`
+	CredentialHealth string `json:"credential_health"`
+	Quota            string `json:"quota"`
+	System           string `json:"system"`
+}
+
+// IssuesReport is the stable /api/issues response. Old fields are preserved;
+// Partial and Sources are additive.
+type IssuesReport struct {
+	Range   string               `json:"range"`
+	Total   int                  `json:"total"`
+	Items   []IssueReport        `json:"items"`
+	System  IssuesSystem         `json:"system"`
+	Partial bool                 `json:"partial"`
+	Sources IssuesSourceStatuses `json:"sources"`
+}

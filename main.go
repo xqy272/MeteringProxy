@@ -237,11 +237,16 @@ func main() {
 	mux.Handle("/metrics", metrics.Handler())
 
 	if cfg.WebUI.Enabled {
+		var sideChannel report.SideChannelStatusReader
+		if usageQueuePoller != nil {
+			sideChannel = usageQueuePoller
+		}
 		modelsReporter := report.NewService(report.Dependencies{
 			Models: database, Summary: database, Timeseries: database, Images: database,
 			Overview: database, Capture: batchWriter, ModelAssets: database,
 			Keys: database, KeyLabels: cfg.KeyLabels,
-			Activity: database, Requests: database,
+			Activity: database, Requests: database, Issues: database,
+			SideChannel: sideChannel,
 		}, pricingData)
 		var webuiServer *webui.Server
 		if *devStatic {

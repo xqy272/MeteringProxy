@@ -45,7 +45,7 @@ func newTestServerWithPricing(t *testing.T, basePath string) (*Server, *db.DB, *
 	modelsReporter := report.NewService(report.Dependencies{
 		Models: database, Summary: database, Timeseries: database, Images: database,
 		Overview: database, Capture: bw, ModelAssets: database,
-		Keys: database, Activity: database, Requests: database,
+		Keys: database, Activity: database, Requests: database, Issues: database,
 	}, pricingData)
 
 	s := New(database, modelsReporter, bw, registry, basePath)
@@ -93,6 +93,10 @@ type stubModelsReporter struct {
 	requestsErr       error
 	requestsCalls     int
 	requestsFilter    report.RequestFilter
+	issuesOut         report.IssuesReport
+	issuesErr         error
+	issuesCalls       int
+	issuesFilter      report.IssueFilter
 }
 
 func (s *stubModelsReporter) Models(ctx context.Context, filter report.ModelsFilter) ([]report.ModelReport, error) {
@@ -159,6 +163,15 @@ func (s *stubModelsReporter) Requests(ctx context.Context, filter report.Request
 	return s.requestsOut, s.requestsErr
 }
 
+func (s *stubModelsReporter) Issues(ctx context.Context, filter report.IssueFilter) (report.IssuesReport, error) {
+	s.issuesCalls++
+	s.issuesFilter = filter
+	if s.issuesErr != nil {
+		return report.IssuesReport{}, s.issuesErr
+	}
+	return s.issuesOut, nil
+}
+
 func TestNewDoesNotPanic(t *testing.T) {
 	s1, _ := newTestServer(t, "/metering")
 	s2, _ := newTestServer(t, "/stats")
@@ -192,7 +205,7 @@ func TestNewWithStaticFS_ServesIndexFromInjectedFS(t *testing.T) {
 	s := NewWithStaticFS(database, report.NewService(report.Dependencies{
 		Models: database, Summary: database, Timeseries: database, Images: database,
 		Overview: database, Capture: bw, ModelAssets: database,
-		Keys: database, Activity: database, Requests: database,
+		Keys: database, Activity: database, Requests: database, Issues: database,
 	}, pricingData), bw, registry, "/metering", staticFS)
 
 	// Index: placeholder injection.
@@ -511,7 +524,7 @@ func TestAPIOverviewAndIssuesAreRoutedNoStore(t *testing.T) {
 	if got := rec.Header().Get("Cache-Control"); got != "no-store, no-cache, must-revalidate" {
 		t.Fatalf("issues Cache-Control = %q, want no-store", got)
 	}
-	var issues event.IssuesResponse
+	var issues report.IssuesReport
 	if err := json.Unmarshal(rec.Body.Bytes(), &issues); err != nil {
 		t.Fatalf("unmarshal issues: %v", err)
 	}
@@ -1722,6 +1735,18 @@ func TestCoreReporterIsExplicitlyInjected(t *testing.T) {
 		keysOut:     []report.KeyReport{{KeyHash: "from-keys-reporter", RequestCount: 31}},
 		activityOut: report.ActivityReport{SampleSize: 37},
 		requestsOut: []report.RequestReport{{RequestID: "from-requests-reporter", Status: 418}},
+		issuesOut: report.IssuesReport{
+			Range: "from-issues-reporter", Total: 1,
+			Items:  []report.IssueReport{{Class: "from-issues-reporter"}},
+			System: report.IssuesSystem{Items: []report.IssueSystemItem{}},
+			Sources: report.IssuesSourceStatuses{
+				RequestUsage:     report.IssueSourceComplete,
+				SideChannel:      report.IssueSourceNotApplicable,
+				CredentialHealth: report.IssueSourceNotApplicable,
+				Quota:            report.IssueSourceNotApplicable,
+				System:           report.IssueSourceNotApplicable,
+			},
+		},
 	}
 	s := New(database, stub, bw, registry, "/metering")
 
@@ -1835,6 +1860,20 @@ func TestCoreReporterIsExplicitlyInjected(t *testing.T) {
 	}
 	if stub.requestsFilter.KeyHash != validKey || stub.requestsFilter.Limit != 25 || stub.requestsFilter.StatusMin != 400 || stub.requestsFilter.StatusMax != 500 || stub.requestsFilter.Model != "model-a" || stub.requestsFilter.Endpoint != "profile:responses" || stub.requestsFilter.ErrorClass != "rate_limited" {
 		t.Fatalf("requests filter=%+v", stub.requestsFilter)
+	}
+
+	req = httptest.NewRequest("GET", "/metering/api/issues?range=24h&key_hash="+validKey+"&limit=15", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	var issues report.IssuesReport
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &issues) != nil || issues.Range != "from-issues-reporter" || stub.issuesCalls != 1 || stub.issuesFilter.KeyHash != validKey || stub.issuesFilter.Limit != 15 {
+		t.Fatalf("issues status=%d payload=%+v calls=%d filter=%+v", rec.Code, issues, stub.issuesCalls, stub.issuesFilter)
+	}
+	req = httptest.NewRequest("GET", "/metering/api/issues?range=24h&key_hash=not-a-hash", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || stub.issuesCalls != 1 {
+		t.Fatalf("invalid key issues status=%d calls=%d", rec.Code, stub.issuesCalls)
 	}
 }
 
@@ -1989,5 +2028,138 @@ func TestAPIModelsReporterErrorIsNonSuccessWithoutBodyContract(t *testing.T) {
 	}
 	if stub.calls != 1 {
 		t.Fatalf("reporter calls = %d, want 1", stub.calls)
+	}
+}
+
+func TestAPIIssuesKeyFilterAndCompatibility(t *testing.T) {
+	s, database := newTestServer(t, "/metering")
+	now := time.Now().UTC().Truncate(time.Second)
+	keyA := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	keyB := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	if err := database.InsertBatch([]db.UsageRecord{
+		{
+			CreatedAt: now.Add(-15 * time.Minute).Format(time.RFC3339), APIKeyHash: keyA,
+			Endpoint: "/v1/chat/completions", Method: "POST", Status: 429,
+			ErrorClass: "rate_limited", RequestID: "a-1", ModelRequested: "model-a",
+		},
+		{
+			CreatedAt: now.Add(-10 * time.Minute).Format(time.RFC3339), APIKeyHash: keyB,
+			Endpoint: "/v1/responses", Method: "POST", Status: 401,
+			ErrorClass: "auth_failed", RequestID: "b-1", ModelRequested: "model-b",
+		},
+	}); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+	if err := database.UpsertCredentialHealth(&db.CredentialHealthRow{
+		Provider: "codex", CredentialHash: "cred-1", Status: "error",
+		CheckedAt: now.Format(time.RFC3339), CheckedAtUnix: now.Unix(), ErrorClass: "credential_error",
+	}); err != nil {
+		t.Fatalf("UpsertCredentialHealth: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/metering/api/issues?range=24h&key_hash="+keyA, nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var issues report.IssuesReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &issues); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if issues.Total != 1 || len(issues.Items) != 1 || issues.Items[0].Class != "rate_limited" || issues.Items[0].APIKeyHash != keyA {
+		t.Fatalf("key-scoped issues = %+v", issues)
+	}
+	if len(issues.System.Items) != 0 {
+		t.Fatalf("key-scoped system items = %+v", issues.System.Items)
+	}
+	if issues.Sources.RequestUsage != report.IssueSourceComplete || issues.Sources.CredentialHealth != report.IssueSourceNotApplicable {
+		t.Fatalf("sources = %+v", issues.Sources)
+	}
+	// Old fields present; additive fields present; items never null.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("raw map: %v", err)
+	}
+	for _, key := range []string{"range", "total", "items", "system", "partial", "sources"} {
+		if _, ok := raw[key]; !ok {
+			t.Fatalf("missing %s", key)
+		}
+	}
+
+	req = httptest.NewRequest("GET", "/metering/api/issues?range=24h", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("global status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &issues); err != nil {
+		t.Fatalf("global unmarshal: %v", err)
+	}
+	classes := map[string]bool{}
+	for _, item := range issues.Items {
+		classes[item.Class] = true
+	}
+	if !classes["rate_limited"] || !classes["auth_failed"] || !classes["credential_error"] {
+		t.Fatalf("global classes = %v", classes)
+	}
+	if issues.Sources.CredentialHealth != report.IssueSourceComplete || issues.Sources.System != report.IssueSourceComplete {
+		t.Fatalf("global sources = %+v", issues.Sources)
+	}
+}
+
+func TestAPIIssuesDoesNotLeakInternalErrors(t *testing.T) {
+	database, err := db.Open(t.TempDir() + "/test.sqlite")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+	bw := writer.New(store.NewEventSink(database), 100, 10, time.Nanosecond)
+	bw.Start()
+	t.Cleanup(func() { bw.Stop() })
+	registry := profile.NewRegistry()
+
+	secret := `SQL error: no such table request_usage at C:\secret\path\usage.sqlite`
+	stub := &stubModelsReporter{issuesErr: errors.New(secret)}
+	s := New(database, stub, bw, registry, "/metering")
+
+	req := httptest.NewRequest("GET", "/metering/api/issues?range=24h", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, secret) || strings.Contains(body, `C:\secret\path`) || strings.Contains(body, "usage.sqlite") || strings.Contains(body, "no such table") {
+		t.Fatalf("response leaked internal error details: %s", body)
+	}
+	var payload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, body)
+	}
+	if payload.Error.Code != "report_query_failed" || payload.Error.Message != "failed to load issues report" {
+		t.Fatalf("payload=%+v", payload)
+	}
+
+	req = httptest.NewRequest("GET", "/metering/api/issues?range=24h&key_hash=not-a-full-hash", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid key status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	body = rec.Body.String()
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("invalid key unmarshal: %v body=%s", err, body)
+	}
+	if payload.Error.Code != "invalid_key_hash" {
+		t.Fatalf("invalid key payload=%+v", payload)
+	}
+	if stub.issuesCalls != 1 {
+		t.Fatalf("issuesCalls=%d, want 1 (invalid key must not call reporter)", stub.issuesCalls)
 	}
 }

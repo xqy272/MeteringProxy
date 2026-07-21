@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"html"
 	"io/fs"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -247,6 +248,28 @@ func parseKeyHashFilter(r *http.Request) (string, error) {
 func writeJSON(w http.ResponseWriter, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
+}
+
+type apiErrorBody struct {
+	Error apiErrorDetail `json:"error"`
+}
+
+type apiErrorDetail struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+func writeAPIError(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(apiErrorBody{Error: apiErrorDetail{Code: code, Message: message}}); err != nil {
+		log.Printf("writeAPIError encode failed: %v", err)
+	}
+}
+
+func writeReportQueryFailed(w http.ResponseWriter, reportName string, err error) {
+	log.Printf("%s report query failed: %v", reportName, err)
+	writeAPIError(w, http.StatusInternalServerError, "report_query_failed", "failed to load "+reportName+" report")
 }
 
 func formatRFC3339OrEmpty(t time.Time) string {

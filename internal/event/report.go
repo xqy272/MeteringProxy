@@ -93,46 +93,6 @@ type BucketMeta struct {
 	Label string `json:"label"`
 }
 
-type IssueReport struct {
-	Class       string `json:"class"`
-	Label       string `json:"label"`
-	Count       int64  `json:"count"`
-	Severity    string `json:"severity"`
-	SourceGroup string `json:"source_group"`
-	LatestAt    string `json:"latest_at"`
-	Status      int    `json:"status"`
-	Endpoint    string `json:"endpoint"`
-	Model       string `json:"model"`
-	ModelSource string `json:"model_source"`
-	APIKeyHash  string `json:"api_key_hash"`
-	ErrorType   string `json:"error_type"`
-	ErrorCode   string `json:"error_code"`
-	Message     string `json:"message"`
-	RequestID   string `json:"request_id"`
-}
-
-type IssuesResponse struct {
-	Range  string        `json:"range"`
-	Total  int           `json:"total"`
-	Items  []IssueReport `json:"items"`
-	System IssuesSystem  `json:"system"`
-}
-
-type IssuesSystem struct {
-	ParseErrors   int64             `json:"parse_errors"`
-	DBErrors      int64             `json:"db_errors"`
-	DroppedEvents int64             `json:"dropped_events"`
-	Items         []IssueSystemItem `json:"items"`
-}
-
-type IssueSystemItem struct {
-	Class    string `json:"class"`
-	Label    string `json:"label"`
-	Count    int64  `json:"count"`
-	Scope    string `json:"scope"`
-	Severity string `json:"severity"`
-}
-
 // GatewayCapabilitiesReport answers "what does the proxy see and meter?" for
 // the transparent-gateway view. It merges the static profile.Registry
 // capability matrix with observed request_usage traffic.

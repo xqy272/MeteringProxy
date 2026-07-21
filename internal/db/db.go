@@ -1661,70 +1661,7 @@ func (db *DB) ImageRequests(limit int, since time.Time) ([]RequestRow, error) {
 }
 
 func (db *DB) ErrorTimeline(since time.Time) ([]ErrorTimelineRow, error) {
-	rows, err := db.read.Query(`
-		SELECT
-			timestamp,
-			timestamp_unix,
-			parse_error_total,
-			db_write_error_total,
-			dropped_events_total
-		FROM health_metrics
-		WHERE timestamp_unix >= ?
-			OR id = (
-				SELECT id FROM health_metrics
-				WHERE timestamp_unix < ?
-				ORDER BY timestamp_unix DESC, id DESC LIMIT 1
-			)
-		ORDER BY timestamp_unix ASC, id ASC
-	`, since.Unix(), since.Unix())
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var result []ErrorTimelineRow
-	var prevParse, prevDB, prevDropped int64
-	havePrev := false
-	baselineMissing := false
-	for rows.Next() {
-		var timestamp string
-		var timestampUnix int64
-		var parseErrors, dbErrors, droppedEvents int64
-		if err := rows.Scan(&timestamp, &timestampUnix, &parseErrors, &dbErrors, &droppedEvents); err != nil {
-			return nil, err
-		}
-		if !havePrev {
-			havePrev = true
-			if timestampUnix < since.Unix() {
-				prevParse = parseErrors
-				prevDB = dbErrors
-				prevDropped = droppedEvents
-				continue
-			}
-			// No baseline row exists before the query range. Seed prev from
-			// the first in-range row so the delta is zero rather than the raw
-			// cumulative value, and mark this bucket as baseline_missing so
-			// the UI can distinguish it from a genuine zero-delta interval.
-			prevParse = parseErrors
-			prevDB = dbErrors
-			prevDropped = droppedEvents
-			baselineMissing = true
-		}
-		r := ErrorTimelineRow{
-			Timestamp:       timestamp,
-			Count:           0,
-			ParseErrors:     positiveDelta(parseErrors, prevParse),
-			DBErrors:        positiveDelta(dbErrors, prevDB),
-			DroppedEvents:   positiveDelta(droppedEvents, prevDropped),
-			BaselineMissing: baselineMissing,
-		}
-		baselineMissing = false
-		prevParse = parseErrors
-		prevDB = dbErrors
-		prevDropped = droppedEvents
-		result = append(result, r)
-	}
-	return result, rows.Err()
+	return db.ErrorTimelineReport(context.Background(), since)
 }
 
 func positiveDelta(current, previous int64) int64 {
