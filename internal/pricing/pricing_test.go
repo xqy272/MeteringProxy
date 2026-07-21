@@ -550,13 +550,30 @@ func TestLoad_DefaultPricingYAML(t *testing.T) {
 		t.Fatal("grok-4.5 must not include long_context")
 	}
 
-	// Gemini long_context must not be present yet
+	// Gemini uses the confirmed request-level 200k long-context tier.
 	g, ok := p.Models["gemini-3.1-pro-preview"]
 	if !ok {
 		t.Fatal("gemini-3.1-pro-preview missing")
 	}
-	if g.LongContext != nil {
-		t.Fatal("default pricing.yaml must not enable Gemini long_context yet")
+	if g.LongContext == nil {
+		t.Fatal("default pricing.yaml must enable Gemini long_context")
+	}
+	if g.LongContext.ThresholdInputTokens != 200000 ||
+		g.LongContext.InputPer1M != 4.00 || g.LongContext.CachedInputPer1M != 0.40 ||
+		g.LongContext.OutputPer1M != 18.00 {
+		t.Fatalf("Gemini long_context prices = %+v", g.LongContext)
+	}
+	shortCost, known := p.CostText("gemini-3.1-pro-preview-customtools", TextTokenUsage{
+		InputTokens: 199999, OutputTokens: 1000, RequestInputTokens: 199999,
+	})
+	if !known {
+		t.Fatal("Gemini short tier alias should resolve")
+	}
+	longCost, known := p.CostText("gemini-3.1-pro-preview-customtools", TextTokenUsage{
+		InputTokens: 200000, OutputTokens: 1000, RequestInputTokens: 200000,
+	})
+	if !known || longCost <= shortCost {
+		t.Fatalf("Gemini tier costs short=%f long=%f known=%v", shortCost, longCost, known)
 	}
 
 	// Imagine per-image

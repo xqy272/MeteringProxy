@@ -66,11 +66,15 @@ pricing:
     cached_input_per_1m: 0.025
     output_per_1m: 1.50
   gemini-3.1-pro-preview:
-    # Standard tier for prompts <= 200k. Prompts > 200k are priced higher
-    # (input $4.00, cached $0.40, output $18.00) but pricing.yaml has no tier support.
+    # Request-level threshold: input_tokens >= 200k uses the long-context tier.
     input_per_1m: 2.00
     cached_input_per_1m: 0.20
     output_per_1m: 12.00
+    long_context:
+      threshold_input_tokens: 200000
+      input_per_1m: 4.00
+      cached_input_per_1m: 0.40
+      output_per_1m: 18.00
     aliases:
       - gemini-3.1-pro-preview-customtools
   gemini-3.1-flash-image:
