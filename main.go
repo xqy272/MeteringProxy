@@ -240,6 +240,7 @@ func main() {
 		modelsReporter := report.NewService(report.Dependencies{
 			Models: database, Summary: database, Timeseries: database, Images: database,
 			Overview: database, Capture: batchWriter, ModelAssets: database,
+			Keys: database, KeyLabels: cfg.KeyLabels,
 		}, pricingData)
 		var webuiServer *webui.Server
 		if *devStatic {

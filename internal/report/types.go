@@ -226,6 +226,31 @@ type ModelAssetSummary struct {
 	CostPartial        bool `json:"cost_partial"`
 }
 
+type KeyReport struct {
+	KeyHash               string                `json:"key_hash"`
+	Label                 string                `json:"label"`
+	RequestCount          int64                 `json:"request_count"`
+	FailedCount           int64                 `json:"failed_count"`
+	FailureRate           float64               `json:"failure_rate"`
+	ModelCount            int64                 `json:"model_count"`
+	InputTokens           int64                 `json:"input_tokens"`
+	OutputTokens          int64                 `json:"output_tokens"`
+	ReasoningTokens       int64                 `json:"reasoning_tokens"`
+	CachedTokens          int64                 `json:"cached_tokens"`
+	CacheCreationTokens   int64                 `json:"cache_creation_tokens"`
+	TotalTokens           int64                 `json:"total_tokens"`
+	AvgLatencyMs          int64                 `json:"avg_latency_ms"`
+	AvgTTFBMs             int64                 `json:"avg_ttfb_ms"`
+	EstimatedCost         float64               `json:"estimated_cost"`
+	CostKnown             bool                  `json:"cost_known"`
+	CostState             CostState             `json:"cost_state"`
+	UnpricedModels        int64                 `json:"unpriced_models"`
+	MissingUsageCount     int64                 `json:"missing_usage_count"`
+	PartialReasons        []PartialReason       `json:"partial_reasons"`
+	UsageConfidenceCounts UsageConfidenceCounts `json:"usage_confidence_counts"`
+	LatestSeenAt          string                `json:"latest_seen_at"`
+}
+
 // ModelReport is the stable /api/models response item.
 // Field names and JSON shape match the previous event.ModelReport contract.
 type ModelReport struct {

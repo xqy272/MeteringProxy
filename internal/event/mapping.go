@@ -110,22 +110,6 @@ func valueOrDefault(value, fallback string) string {
 	return fallback
 }
 
-// KeysFromDB converts db.KeyRow slice to domain KeyReport slice.
-func KeysFromDB(rows []db.KeyRow) []KeyReport {
-	result := make([]KeyReport, len(rows))
-	for i, r := range rows {
-		result[i] = KeyReport{
-			KeyHash:      r.KeyHash,
-			RequestCount: r.RequestCount,
-			FailedCount:  r.FailedCount,
-			InputTokens:  r.InputTokens,
-			OutputTokens: r.OutputTokens,
-			TotalTokens:  r.TotalTokens,
-		}
-	}
-	return result
-}
-
 func ActivityFromDB(row *db.ActivityRow) ActivityReport {
 	if row == nil {
 		return ActivityReport{}

@@ -33,6 +33,8 @@ type stubModelsReader struct {
 	runtimeDBErrors     int64
 	modelAssetsSnapshot *db.ModelAssetsReportData
 	modelAssetsErr      error
+	keysSnapshot        *db.KeysReportData
+	keysErr             error
 	lastBucketMin       int
 	calls               int
 	lastSince           time.Time
@@ -113,11 +115,22 @@ func (s *stubModelsReader) ModelAssetsReportSnapshot(ctx context.Context, since 
 	return s.modelAssetsSnapshot, nil
 }
 
+func (s *stubModelsReader) KeysReportSnapshot(ctx context.Context, since time.Time) (*db.KeysReportData, error) {
+	if s.keysErr != nil {
+		return nil, s.keysErr
+	}
+	if s.keysSnapshot == nil {
+		return &db.KeysReportData{}, nil
+	}
+	return s.keysSnapshot, nil
+}
+
 func testDependencies(reader *stubModelsReader) Dependencies {
 	return Dependencies{
 		Models: reader, Summary: reader, Timeseries: reader, Images: reader,
 		Overview: reader, Capture: reader,
 		ModelAssets: reader,
+		Keys:        reader,
 	}
 }
 

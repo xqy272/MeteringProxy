@@ -40,7 +40,6 @@ type ReportStore interface {
 	Summary(since time.Time) (*db.SummaryRow, error)
 	Models(since time.Time) ([]db.ModelRow, error)
 	ModelSourceCounts(since time.Time, model string) (map[string]int64, map[string]int64, error)
-	Keys(since time.Time) ([]db.KeyRow, error)
 	Timeseries(since time.Time, bucketMin int) ([]db.TimeseriesRow, error)
 	ModelTimeseries(since time.Time, bucketMin int) ([]db.ModelTimeseriesRow, error)
 	Activity(since time.Time) (*db.ActivityRow, error)

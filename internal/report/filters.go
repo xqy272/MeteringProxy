@@ -30,3 +30,7 @@ type ModelAssetsFilter struct {
 	Since time.Time
 	Range string
 }
+
+type KeysFilter struct {
+	Since time.Time
+}

@@ -383,10 +383,11 @@ func TestModelsAndKeysTreatEmptyAsUnknown(t *testing.T) {
 		t.Fatalf("models = %+v, want one unidentified row", models)
 	}
 
-	keys, err := d.Keys(time.Now().Add(-24 * time.Hour))
+	keysSnapshot, err := d.KeysReportSnapshot(context.Background(), time.Now().Add(-24*time.Hour))
 	if err != nil {
-		t.Fatalf("Keys: %v", err)
+		t.Fatalf("KeysReportSnapshot: %v", err)
 	}
+	keys := keysSnapshot.Rows
 	if len(keys) != 1 || keys[0].KeyHash != "unknown" {
 		t.Fatalf("keys = %+v, want one unknown row", keys)
 	}

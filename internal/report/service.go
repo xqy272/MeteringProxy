@@ -16,6 +16,8 @@ type Service struct {
 	overview    OverviewReader
 	capture     CaptureRuntimeReader
 	modelAssets ModelAssetsReader
+	keys        KeysReader
+	keyLabels   map[string]string
 	cost        CostEngine
 	now         func() time.Time
 }
@@ -43,14 +45,22 @@ func NewService(deps Dependencies, cost CostEngine) *Service {
 	if deps.ModelAssets == nil {
 		panic("report: ModelAssetsReader is required")
 	}
+	if deps.Keys == nil {
+		panic("report: KeysReader is required")
+	}
 	if cost == nil {
 		panic("report: CostEngine is required")
+	}
+	labels := make(map[string]string, len(deps.KeyLabels))
+	for hash, label := range deps.KeyLabels {
+		labels[hash] = label
 	}
 	return &Service{
 		models: deps.Models, summary: deps.Summary, timeseries: deps.Timeseries,
 		images: deps.Images, overview: deps.Overview, capture: deps.Capture,
 		modelAssets: deps.ModelAssets,
-		cost:        cost, now: time.Now,
+		keys:        deps.Keys, keyLabels: labels,
+		cost: cost, now: time.Now,
 	}
 }
 

@@ -58,6 +58,7 @@ type CostResult struct {
 	UnpricedModels        int64
 	PartialReasons        []PartialReason
 	UsageConfidenceCounts UsageConfidenceCounts
+	MissingUsageCount     int64
 }
 
 // CostGroup identifies one report aggregation cell. Empty dimensions mean the
@@ -79,24 +80,31 @@ const (
 )
 
 type costAccumulator struct {
-	amount                 float64
-	priceKnown             bool
-	textPricedModels       map[string]struct{}
-	imageExpectedTextUsage map[string]int64
-	imageTextUsage         map[string]int64
-	unpricedModels         map[string]struct{}
-	reasons                map[PartialReason]struct{}
-	confidence             UsageConfidenceCounts
+	amount                  float64
+	priceKnown              bool
+	textPricedModels        map[string]struct{}
+	imageExpectedTextUsage  map[string]int64
+	imageTextUsage          map[string]int64
+	imageExpectedTokenUsage map[string]int64
+	imageTokenUsage         map[string]int64
+	imageFallbackModels     map[string]struct{}
+	unpricedModels          map[string]struct{}
+	reasons                 map[PartialReason]struct{}
+	confidence              UsageConfidenceCounts
+	missingUsageCount       int64
 }
 
 func newCostAccumulator() *costAccumulator {
 	return &costAccumulator{
-		priceKnown:             true,
-		textPricedModels:       make(map[string]struct{}),
-		imageExpectedTextUsage: make(map[string]int64),
-		imageTextUsage:         make(map[string]int64),
-		unpricedModels:         make(map[string]struct{}),
-		reasons:                make(map[PartialReason]struct{}),
+		priceKnown:              true,
+		textPricedModels:        make(map[string]struct{}),
+		imageExpectedTextUsage:  make(map[string]int64),
+		imageTextUsage:          make(map[string]int64),
+		imageExpectedTokenUsage: make(map[string]int64),
+		imageTokenUsage:         make(map[string]int64),
+		imageFallbackModels:     make(map[string]struct{}),
+		unpricedModels:          make(map[string]struct{}),
+		reasons:                 make(map[PartialReason]struct{}),
 	}
 }
 
@@ -158,9 +166,7 @@ func evaluateCostBuckets(engine CostEngine, textRows []db.TextCostBucketRow, ima
 			if imageBucketBillable(row) && !textPriced {
 				acc.markUnpriced(row.Model)
 			}
-			if acc.imageTextUsage[row.Model] < acc.imageExpectedTextUsage[row.Model] {
-				acc.addReason(PartialReasonMissingUsage)
-			}
+			acc.imageFallbackModels[row.Model] = struct{}{}
 			continue
 		}
 
@@ -176,9 +182,8 @@ func evaluateCostBuckets(engine CostEngine, textRows []db.TextCostBucketRow, ima
 			acc.addImageDimension(engine, row.Model, "text", "output", row.OutputTextTokens)
 			acc.addImageDimension(engine, row.Model, "image", "output", row.OutputImageTokens)
 			acc.addImageDimension(engine, row.Model, "mixed", "output", row.OutputMixedTokens)
-			if row.TokenUsageCount < row.ObservedCount+row.SideChannelCount {
-				acc.addReason(PartialReasonMissingUsage)
-			}
+			acc.imageExpectedTokenUsage[row.Model] += row.ObservedCount + row.SideChannelCount
+			acc.imageTokenUsage[row.Model] += row.TokenUsageCount
 		}
 
 		if hasPerImagePricing {
@@ -198,6 +203,7 @@ func evaluateCostBuckets(engine CostEngine, textRows []db.TextCostBucketRow, ima
 
 	results := make(map[CostGroup]CostResult, len(accumulators))
 	for group, acc := range accumulators {
+		acc.finalizeImageCompleteness()
 		results[group] = acc.result()
 	}
 	return results
@@ -227,6 +233,7 @@ func (a *costAccumulator) addConfidence(observed, sideChannel, requestOnly, miss
 	a.confidence.MissingUsage += missing
 	a.confidence.Unsupported += unsupported
 	a.confidence.Conflict += conflict
+	a.missingUsageCount += missing
 	if requestOnly > 0 {
 		a.addReason(PartialReasonRequestOnly)
 	}
@@ -238,6 +245,22 @@ func (a *costAccumulator) addConfidence(observed, sideChannel, requestOnly, miss
 	}
 	if conflict > 0 {
 		a.addReason(PartialReasonUsageConflict)
+	}
+}
+
+func (a *costAccumulator) finalizeImageCompleteness() {
+	for model := range a.imageFallbackModels {
+		expected := a.imageExpectedTextUsage[model]
+		if actual := a.imageTextUsage[model]; actual < expected {
+			a.missingUsageCount += expected - actual
+			a.addReason(PartialReasonMissingUsage)
+		}
+	}
+	for model, expected := range a.imageExpectedTokenUsage {
+		if actual := a.imageTokenUsage[model]; actual < expected {
+			a.missingUsageCount += expected - actual
+			a.addReason(PartialReasonMissingUsage)
+		}
 	}
 }
 
@@ -281,6 +304,7 @@ func (a *costAccumulator) result() CostResult {
 		UnpricedModels:        int64(len(a.unpricedModels)),
 		PartialReasons:        reasons,
 		UsageConfidenceCounts: a.confidence,
+		MissingUsageCount:     a.missingUsageCount,
 	}
 }
 

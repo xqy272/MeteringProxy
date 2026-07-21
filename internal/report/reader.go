@@ -36,6 +36,10 @@ type ModelAssetsReader interface {
 	ModelAssetsReportSnapshot(ctx context.Context, since time.Time) (*db.ModelAssetsReportData, error)
 }
 
+type KeysReader interface {
+	KeysReportSnapshot(ctx context.Context, since time.Time) (*db.KeysReportData, error)
+}
+
 type CaptureRuntimeReader interface {
 	Snapshot() (queueDepth, dropped, parseErrors, dbErrors int64)
 }
@@ -50,6 +54,8 @@ type Dependencies struct {
 	Overview    OverviewReader
 	Capture     CaptureRuntimeReader
 	ModelAssets ModelAssetsReader
+	Keys        KeysReader
+	KeyLabels   map[string]string
 }
 
 // ModelsReporter is the WebUI-facing /api/models boundary.
@@ -79,6 +85,10 @@ type ModelAssetsReporter interface {
 	ModelAssets(ctx context.Context, filter ModelAssetsFilter) (ModelAssetsReport, error)
 }
 
+type KeysReporter interface {
+	Keys(ctx context.Context, filter KeysFilter) ([]KeyReport, error)
+}
+
 type CoreReporter interface {
 	ModelsReporter
 	SummaryReporter
@@ -86,6 +96,7 @@ type CoreReporter interface {
 	ImagesReporter
 	OverviewReporter
 	ModelAssetsReporter
+	KeysReporter
 }
 
 // CostEngine is the pricing surface required by core cost reports.

@@ -310,16 +310,15 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 	since, _ := parseRange(r)
-	rows, err := s.db.Keys(since)
+	rows, err := s.reports.Keys(r.Context(), report.KeysFilter{Since: since})
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	report := event.KeysFromDB(rows)
-	if report == nil {
-		report = []event.KeyReport{}
+	if rows == nil {
+		rows = []report.KeyReport{}
 	}
-	writeJSON(w, report)
+	writeJSON(w, rows)
 }
 
 func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {

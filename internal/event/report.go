@@ -3,15 +3,6 @@ package event
 // Report types are used by the query/reporting layer. They are independent of
 // the database schema and provide stable types for WebUI API responses.
 
-type KeyReport struct {
-	KeyHash      string `json:"key_hash"`
-	RequestCount int64  `json:"request_count"`
-	FailedCount  int64  `json:"failed_count"`
-	InputTokens  int64  `json:"input_tokens"`
-	OutputTokens int64  `json:"output_tokens"`
-	TotalTokens  int64  `json:"total_tokens"`
-}
-
 type ActivityReport struct {
 	SampleSize          int64   `json:"sample_size"`
 	SuccessCount        int64   `json:"success_count"`

@@ -44,6 +44,7 @@ func newTestServerWithPricing(t *testing.T, basePath string) (*Server, *db.DB, *
 	modelsReporter := report.NewService(report.Dependencies{
 		Models: database, Summary: database, Timeseries: database, Images: database,
 		Overview: database, Capture: bw, ModelAssets: database,
+		Keys: database,
 	}, pricingData)
 
 	s := New(database, modelsReporter, bw, registry, basePath)
@@ -79,6 +80,10 @@ type stubModelsReporter struct {
 	modelAssetsErr    error
 	modelAssetsCalls  int
 	modelAssetsFilter report.ModelAssetsFilter
+	keysOut           []report.KeyReport
+	keysErr           error
+	keysCalls         int
+	keysFilter        report.KeysFilter
 }
 
 func (s *stubModelsReporter) Models(ctx context.Context, filter report.ModelsFilter) ([]report.ModelReport, error) {
@@ -127,6 +132,12 @@ func (s *stubModelsReporter) ModelAssets(ctx context.Context, filter report.Mode
 	return s.modelAssetsOut, s.modelAssetsErr
 }
 
+func (s *stubModelsReporter) Keys(ctx context.Context, filter report.KeysFilter) ([]report.KeyReport, error) {
+	s.keysCalls++
+	s.keysFilter = filter
+	return s.keysOut, s.keysErr
+}
+
 func TestNewDoesNotPanic(t *testing.T) {
 	s1, _ := newTestServer(t, "/metering")
 	s2, _ := newTestServer(t, "/stats")
@@ -160,6 +171,7 @@ func TestNewWithStaticFS_ServesIndexFromInjectedFS(t *testing.T) {
 	s := NewWithStaticFS(database, report.NewService(report.Dependencies{
 		Models: database, Summary: database, Timeseries: database, Images: database,
 		Overview: database, Capture: bw, ModelAssets: database,
+		Keys: database,
 	}, pricingData), bw, registry, "/metering", staticFS)
 
 	// Index: placeholder injection.
@@ -1686,6 +1698,7 @@ func TestCoreReporterIsExplicitlyInjected(t *testing.T) {
 			Range: "from-model-assets-reporter",
 			Items: []report.ModelAssetItem{{Model: "asset-from-reporter", RequestCount: 29}},
 		},
+		keysOut: []report.KeyReport{{KeyHash: "from-keys-reporter", RequestCount: 31}},
 	}
 	s := New(database, stub, bw, registry, "/metering")
 
@@ -1752,6 +1765,14 @@ func TestCoreReporterIsExplicitlyInjected(t *testing.T) {
 	var assets report.ModelAssetsReport
 	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &assets) != nil || assets.Range != "from-model-assets-reporter" || len(assets.Items) != 1 || assets.Items[0].RequestCount != 29 || stub.modelAssetsCalls != 1 || stub.modelAssetsFilter.Range != "7d" {
 		t.Fatalf("model assets status=%d payload=%+v calls=%d filter=%+v", rec.Code, assets, stub.modelAssetsCalls, stub.modelAssetsFilter)
+	}
+
+	req = httptest.NewRequest("GET", "/metering/api/keys?range=7d", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	var keys []report.KeyReport
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &keys) != nil || len(keys) != 1 || keys[0].RequestCount != 31 || stub.keysCalls != 1 {
+		t.Fatalf("keys status=%d payload=%+v calls=%d", rec.Code, keys, stub.keysCalls)
 	}
 }
 

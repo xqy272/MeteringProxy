@@ -148,15 +148,6 @@ type ModelsReportData struct {
 	ImageCostBuckets          []ImageCostBucketRow
 }
 
-type KeyRow struct {
-	KeyHash      string `json:"key_hash"`
-	RequestCount int64  `json:"request_count"`
-	FailedCount  int64  `json:"failed_count"`
-	InputTokens  int64  `json:"input_tokens"`
-	OutputTokens int64  `json:"output_tokens"`
-	TotalTokens  int64  `json:"total_tokens"`
-}
-
 type TimeseriesRow struct {
 	Timestamp           string `json:"timestamp"`
 	Count               int64  `json:"count"`
@@ -1510,34 +1501,6 @@ func (db *DB) ModelSourceCountsContext(ctx context.Context, since time.Time, mod
 		usageSourceCounts[src] = cnt
 	}
 	return modelReturnedSourceCounts, usageSourceCounts, usageRows.Err()
-}
-
-func (db *DB) Keys(since time.Time) ([]KeyRow, error) {
-	rows, err := db.read.Query(`
-		SELECT
-			COALESCE(NULLIF(TRIM(api_key_hash), ''), 'unknown'),
-			COUNT(*),
-			COUNT(CASE WHEN status >= 400 THEN 1 END),
-			COALESCE(SUM(input_tokens), 0),
-			COALESCE(SUM(output_tokens), 0),
-			COALESCE(SUM(total_tokens), 0)
-		FROM request_usage WHERE created_at_unix >= ?
-		GROUP BY COALESCE(NULLIF(TRIM(api_key_hash), ''), 'unknown') ORDER BY COUNT(*) DESC
-	`, since.Unix())
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var result []KeyRow
-	for rows.Next() {
-		var r KeyRow
-		if err := rows.Scan(&r.KeyHash, &r.RequestCount, &r.FailedCount, &r.InputTokens, &r.OutputTokens, &r.TotalTokens); err != nil {
-			return nil, err
-		}
-		result = append(result, r)
-	}
-	return result, rows.Err()
 }
 
 func (db *DB) Timeseries(since time.Time, bucketMin int) ([]TimeseriesRow, error) {

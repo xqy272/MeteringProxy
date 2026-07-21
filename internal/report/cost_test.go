@@ -160,7 +160,7 @@ multimodal_pricing:
 		costGroupByModel,
 	)
 	result := results[CostGroup{Model: "token-image"}]
-	if !result.CostKnown || result.State != CostStatePartial || len(result.PartialReasons) != 1 || result.PartialReasons[0] != PartialReasonMissingUsage {
+	if !result.CostKnown || result.State != CostStatePartial || result.MissingUsageCount != 1 || len(result.PartialReasons) != 1 || result.PartialReasons[0] != PartialReasonMissingUsage {
 		t.Fatalf("result = %+v", result)
 	}
 }
