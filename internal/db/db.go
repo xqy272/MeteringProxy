@@ -137,6 +137,17 @@ type ModelRow struct {
 	MissingUsageCount         int64            `json:"missing_usage_count"`
 }
 
+// ModelsReportData is the complete read snapshot needed to build /api/models.
+// Aggregates, source breakdowns, and price-homogeneous cost buckets are loaded
+// in one read transaction so a concurrent writer cannot mix database moments.
+type ModelsReportData struct {
+	Models                    []ModelRow
+	ModelReturnedSourceCounts map[string]map[string]int64
+	UsageSourceCounts         map[string]map[string]int64
+	TextCostBuckets           []TextCostBucketRow
+	ImageCostBuckets          []ImageCostBucketRow
+}
+
 type KeyRow struct {
 	KeyHash      string `json:"key_hash"`
 	RequestCount int64  `json:"request_count"`
@@ -1315,29 +1326,39 @@ func (db *DB) ModelsContext(ctx context.Context, since time.Time) ([]ModelRow, e
 // one read-only transaction so all three set-based queries share a consistent
 // SQLite snapshot. Rows are closed sequentially to avoid deadlocking the single
 // read connection.
-func (db *DB) ModelsReportSnapshot(ctx context.Context, since time.Time) ([]ModelRow, map[string]map[string]int64, map[string]map[string]int64, error) {
+func (db *DB) ModelsReportSnapshot(ctx context.Context, since time.Time) (*ModelsReportData, error) {
 	tx, err := db.read.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	models, err := queryModelAggregates(ctx, tx, since)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	modelReturned, err := queryModelReturnedSourceCounts(ctx, tx, since)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	usage, err := queryUsageSourceCounts(ctx, tx, since)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
+	}
+	textCost, imageCost, err := queryCostBuckets(ctx, tx, CostBucketFilter{Since: since})
+	if err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
-	return models, modelReturned, usage, nil
+	return &ModelsReportData{
+		Models:                    models,
+		ModelReturnedSourceCounts: modelReturned,
+		UsageSourceCounts:         usage,
+		TextCostBuckets:           textCost,
+		ImageCostBuckets:          imageCost,
+	}, nil
 }
 
 type modelQueryContext interface {

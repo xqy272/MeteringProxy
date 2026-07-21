@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"ai-gateway-metering-proxy/internal/db"
+	"ai-gateway-metering-proxy/internal/pricing"
 )
 
 // ModelsReader is the narrow DB reader surface required by the models report.
@@ -12,12 +13,7 @@ import (
 // Implementations must load model aggregates and both source breakdowns from one
 // consistent read snapshot (for example a single SQLite read-only transaction).
 type ModelsReader interface {
-	ModelsReportSnapshot(ctx context.Context, since time.Time) (
-		models []db.ModelRow,
-		modelReturned map[string]map[string]int64,
-		usage map[string]map[string]int64,
-		err error,
-	)
+	ModelsReportSnapshot(ctx context.Context, since time.Time) (*db.ModelsReportData, error)
 }
 
 // ModelsReporter is the WebUI-facing /api/models boundary.
@@ -28,5 +24,10 @@ type ModelsReporter interface {
 
 // CostEngine is the pricing surface required by the models report.
 type CostEngine interface {
-	CostWithCacheCreation(model string, inputTokens, outputTokens, reasoningTokens, cachedTokens, cacheCreationTokens int64) (float64, bool)
+	CostText(model string, usage pricing.TextTokenUsage) (float64, bool)
+	CostDimension(model, modality, channel, metric, direction, unit string, amount float64) (float64, bool)
+	CostImages(model string, inputImageCount, outputImageCount int64, size string) (cost float64, known bool, sizeDefaulted bool)
+	HasMultimodal(model string) bool
+	HasPerImagePricing(model string) bool
+	HasImageTokenPricing(model string) bool
 }

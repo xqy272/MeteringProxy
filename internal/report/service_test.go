@@ -7,26 +7,28 @@ import (
 	"time"
 
 	"ai-gateway-metering-proxy/internal/db"
+	"ai-gateway-metering-proxy/internal/pricing"
 )
 
 type stubModelsReader struct {
-	rows      []db.ModelRow
-	returned  map[string]map[string]int64
-	usage     map[string]map[string]int64
+	snapshot  *db.ModelsReportData
 	err       error
 	calls     int
 	lastSince time.Time
 	lastDone  bool
 }
 
-func (s *stubModelsReader) ModelsReportSnapshot(ctx context.Context, since time.Time) ([]db.ModelRow, map[string]map[string]int64, map[string]map[string]int64, error) {
+func (s *stubModelsReader) ModelsReportSnapshot(ctx context.Context, since time.Time) (*db.ModelsReportData, error) {
 	s.calls++
 	s.lastSince = since
 	s.lastDone = ctx.Err() != nil
 	if s.err != nil {
-		return nil, nil, nil, s.err
+		return nil, s.err
 	}
-	return s.rows, s.returned, s.usage, nil
+	if s.snapshot == nil {
+		return &db.ModelsReportData{}, nil
+	}
+	return s.snapshot, nil
 }
 
 type stubCostEngine struct {
@@ -34,18 +36,33 @@ type stubCostEngine struct {
 	known bool
 	calls int
 	model string
+	usage pricing.TextTokenUsage
 }
 
-func (s *stubCostEngine) CostWithCacheCreation(model string, inputTokens, outputTokens, reasoningTokens, cachedTokens, cacheCreationTokens int64) (float64, bool) {
+func (s *stubCostEngine) CostText(model string, usage pricing.TextTokenUsage) (float64, bool) {
 	s.calls++
 	s.model = model
-	_, _, _, _, _ = inputTokens, outputTokens, reasoningTokens, cachedTokens, cacheCreationTokens
+	s.usage = usage
 	return s.cost, s.known
 }
 
+func (s *stubCostEngine) CostDimension(model, modality, channel, metric, direction, unit string, amount float64) (float64, bool) {
+	return s.cost, s.known
+}
+
+func (s *stubCostEngine) CostImages(model string, inputImageCount, outputImageCount int64, size string) (float64, bool, bool) {
+	return s.cost, s.known, false
+}
+
+func (s *stubCostEngine) HasMultimodal(model string) bool { return false }
+
+func (s *stubCostEngine) HasPerImagePricing(model string) bool { return false }
+
+func (s *stubCostEngine) HasImageTokenPricing(model string) bool { return false }
+
 func TestModelsMapsAndMergesSources(t *testing.T) {
 	reader := &stubModelsReader{
-		rows: []db.ModelRow{{
+		snapshot: &db.ModelsReportData{Models: []db.ModelRow{{
 			Model:               "gpt-4o",
 			ModelSource:         "returned",
 			RequestCount:        2,
@@ -58,11 +75,18 @@ func TestModelsMapsAndMergesSources(t *testing.T) {
 			TotalTokens:         155,
 			MissingUsageCount:   1,
 		}},
-		returned: map[string]map[string]int64{
-			"gpt-4o": {"response_body": 2},
-		},
-		usage: map[string]map[string]int64{
-			"gpt-4o": {"http_response": 1, "none": 1},
+			ModelReturnedSourceCounts: map[string]map[string]int64{
+				"gpt-4o": {"response_body": 2},
+			},
+			UsageSourceCounts: map[string]map[string]int64{
+				"gpt-4o": {"http_response": 1, "none": 1},
+			},
+			TextCostBuckets: []db.TextCostBucketRow{{
+				Model: "gpt-4o", RequestInputTokens: 50, RequestCount: 2,
+				InputTokens: 100, OutputTokens: 50, ReasoningTokens: 5,
+				CachedTokens: 10, CacheCreationTokens: 3,
+				ObservedCount: 1, MissingUsageCount: 1,
+			}},
 		},
 	}
 	cost := &stubCostEngine{cost: 1.25, known: true}
@@ -83,6 +107,12 @@ func TestModelsMapsAndMergesSources(t *testing.T) {
 	if item.Cost != 1.25 || !item.CostKnown {
 		t.Fatalf("cost = %.2f known=%v", item.Cost, item.CostKnown)
 	}
+	if item.CostState != CostStatePartial || len(item.PartialReasons) != 1 || item.PartialReasons[0] != PartialReasonMissingUsage {
+		t.Fatalf("cost state/reasons = %s / %+v", item.CostState, item.PartialReasons)
+	}
+	if item.UsageConfidenceCounts.Observed != 1 || item.UsageConfidenceCounts.MissingUsage != 1 {
+		t.Fatalf("confidence = %+v", item.UsageConfidenceCounts)
+	}
 	if item.ModelReturnedSourceCounts["response_body"] != 2 {
 		t.Fatalf("returned sources = %+v", item.ModelReturnedSourceCounts)
 	}
@@ -102,11 +132,11 @@ func TestModelsMapsAndMergesSources(t *testing.T) {
 
 func TestModelsCostKnownForZeroTokenUnpriced(t *testing.T) {
 	reader := &stubModelsReader{
-		rows: []db.ModelRow{{
+		snapshot: &db.ModelsReportData{Models: []db.ModelRow{{
 			Model:        "unknown-model",
 			ModelSource:  "requested",
 			RequestCount: 1,
-		}},
+		}}},
 	}
 	cost := &stubCostEngine{cost: 0, known: false}
 	svc := NewService(reader, cost)
@@ -151,7 +181,7 @@ func TestModelsEmptyResult(t *testing.T) {
 
 func TestModelsUsesRequestContext(t *testing.T) {
 	reader := &stubModelsReader{
-		rows: []db.ModelRow{{Model: "gpt-4o"}},
+		snapshot: &db.ModelsReportData{Models: []db.ModelRow{{Model: "gpt-4o"}}},
 	}
 	svc := NewService(reader, &stubCostEngine{known: true})
 	ctx, cancel := context.WithCancel(context.Background())

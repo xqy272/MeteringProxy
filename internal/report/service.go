@@ -32,16 +32,21 @@ func (s *Service) Models(ctx context.Context, filter ModelsFilter) ([]ModelRepor
 		return nil, fmt.Errorf("report service is not configured")
 	}
 
-	rows, returnedByModel, usageByModel, err := s.models.ModelsReportSnapshot(ctx, filter.Since)
+	snapshot, err := s.models.ModelsReportSnapshot(ctx, filter.Since)
 	if err != nil {
 		return nil, err
 	}
+	costs := evaluateCostBuckets(s.cost, snapshot.TextCostBuckets, snapshot.ImageCostBuckets)
 
-	out := make([]ModelReport, 0, len(rows))
-	for _, row := range rows {
+	out := make([]ModelReport, 0, len(snapshot.Models))
+	for _, row := range snapshot.Models {
 		item := modelReportFromRow(row)
-		mergeModelSourceCounts(&item, returnedByModel, usageByModel)
-		applyModelCost(s.cost, &item, row)
+		mergeModelSourceCounts(&item, snapshot.ModelReturnedSourceCounts, snapshot.UsageSourceCounts)
+		costResult := completeZeroCost()
+		if result, ok := costs[CostGroup{Model: row.Model}]; ok {
+			costResult = result
+		}
+		applyModelCostResult(&item, costResult)
 		out = append(out, item)
 	}
 	return out, nil

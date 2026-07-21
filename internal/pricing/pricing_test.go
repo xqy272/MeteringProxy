@@ -1235,6 +1235,12 @@ multimodal_pricing:
 	if p.HasMultimodal("missing-model") {
 		t.Fatal("unknown should not hit multimodal")
 	}
+	if !p.HasPerImagePricing("imag-alias") {
+		t.Fatal("configured per-image alias should enable the per-image channel")
+	}
+	if p.HasImageTokenPricing("imag-alias") {
+		t.Fatal("per-image-only model must not enable image token pricing")
+	}
 	p2, err := Parse([]byte(`
 multimodal_pricing:
   imag-base:
@@ -1248,6 +1254,26 @@ multimodal_pricing:
 	}
 	if !p2.HasMultimodal("imag-base-2026-03-18") {
 		t.Fatal("canonicalized date suffix should hit multimodal")
+	}
+	if !p2.HasPerImagePricing("imag-base-2026-03-18") {
+		t.Fatal("canonicalized model should retain per-image configuration")
+	}
+
+	tokenOnly, err := Parse([]byte(`
+multimodal_pricing:
+  token-image:
+    image:
+      input_per_1m: 8
+      output_per_1m: 30
+`))
+	if err != nil {
+		t.Fatalf("Parse token-only: %v", err)
+	}
+	if !tokenOnly.HasMultimodal("token-image") || tokenOnly.HasPerImagePricing("token-image") {
+		t.Fatal("token-only multimodal model must not enable per-image billing")
+	}
+	if !tokenOnly.HasImageTokenPricing("token-image") {
+		t.Fatal("token-only multimodal model should expose image token pricing")
 	}
 }
 

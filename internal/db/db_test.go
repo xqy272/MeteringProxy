@@ -1363,10 +1363,13 @@ func TestModelsReportSnapshotMultipleModels(t *testing.T) {
 	}
 
 	since := now.Add(-time.Hour)
-	models, returned, usage, err := d.ModelsReportSnapshot(context.Background(), since)
+	snapshot, err := d.ModelsReportSnapshot(context.Background(), since)
 	if err != nil {
 		t.Fatalf("ModelsReportSnapshot: %v", err)
 	}
+	models := snapshot.Models
+	returned := snapshot.ModelReturnedSourceCounts
+	usage := snapshot.UsageSourceCounts
 	if len(models) != 3 {
 		t.Fatalf("models = %+v, want 3", models)
 	}
@@ -1394,14 +1397,18 @@ func TestModelsReportSnapshotMultipleModels(t *testing.T) {
 			t.Fatalf("snapshot mismatch for %s: requests=%d returned=%d usage=%d", m.Model, m.RequestCount, retSum, useSum)
 		}
 	}
+	assertModelSnapshotCostBucketsConserve(t, snapshot)
 }
 
 func TestModelsReportSnapshotEmpty(t *testing.T) {
 	d := newTestDB(t)
-	models, returned, usage, err := d.ModelsReportSnapshot(context.Background(), time.Now().Add(-time.Hour))
+	snapshot, err := d.ModelsReportSnapshot(context.Background(), time.Now().Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("ModelsReportSnapshot: %v", err)
 	}
+	models := snapshot.Models
+	returned := snapshot.ModelReturnedSourceCounts
+	usage := snapshot.UsageSourceCounts
 	if len(returned) != 0 || len(usage) != 0 {
 		t.Fatalf("expected empty maps, got returned=%+v usage=%+v", returned, usage)
 	}
@@ -1425,7 +1432,7 @@ func TestModelsContextCanceled(t *testing.T) {
 		t.Fatalf("ModelsContext err = %v, want context.Canceled", err)
 	}
 
-	_, _, _, err = d.ModelsReportSnapshot(ctx, time.Now().Add(-time.Hour))
+	_, err = d.ModelsReportSnapshot(ctx, time.Now().Add(-time.Hour))
 	if err == nil {
 		t.Fatal("expected canceled error from ModelsReportSnapshot")
 	}
@@ -1440,10 +1447,13 @@ func TestModelsReportSnapshotReleasesReadConnection(t *testing.T) {
 	since := time.Now().Add(-time.Hour)
 
 	for i := 0; i < 3; i++ {
-		models, returned, usage, err := d.ModelsReportSnapshot(context.Background(), since)
+		snapshot, err := d.ModelsReportSnapshot(context.Background(), since)
 		if err != nil {
 			t.Fatalf("snapshot %d: %v", i, err)
 		}
+		models := snapshot.Models
+		returned := snapshot.ModelReturnedSourceCounts
+		usage := snapshot.UsageSourceCounts
 		if len(models) != 1 || models[0].Model != "gpt-4o" {
 			t.Fatalf("snapshot %d models = %+v", i, models)
 		}
@@ -1552,10 +1562,13 @@ func TestModelsReportSnapshotConsistentUnderConcurrentWrites(t *testing.T) {
 			t.Fatalf("writer failed during snapshot loop: %v", err)
 		default:
 		}
-		models, returned, usage, err := d.ModelsReportSnapshot(context.Background(), since)
+		snapshot, err := d.ModelsReportSnapshot(context.Background(), since)
 		if err != nil {
 			t.Fatalf("snapshot loop %d: %v", n, err)
 		}
+		models := snapshot.Models
+		returned := snapshot.ModelReturnedSourceCounts
+		usage := snapshot.UsageSourceCounts
 		for _, m := range models {
 			var retSum, useSum int64
 			for _, c := range returned[m.Model] {
@@ -1569,6 +1582,7 @@ func TestModelsReportSnapshotConsistentUnderConcurrentWrites(t *testing.T) {
 					m.Model, m.RequestCount, retSum, useSum, returned[m.Model], usage[m.Model])
 			}
 		}
+		assertModelSnapshotCostBucketsConserve(t, snapshot)
 	}
 
 	close(stop)

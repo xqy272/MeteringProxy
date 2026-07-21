@@ -1702,6 +1702,17 @@ func TestAPIModelsUsesReportBoundaryAndSourceCounts(t *testing.T) {
 	if known, _ := gpt["cost_known"].(bool); !known {
 		t.Fatal("gpt cost_known = false")
 	}
+	if state, _ := gpt["cost_state"].(string); state != "complete" {
+		t.Fatalf("gpt cost_state = %q", state)
+	}
+	reasons, ok := gpt["partial_reasons"].([]any)
+	if !ok || len(reasons) != 0 {
+		t.Fatalf("gpt partial_reasons = %#v", gpt["partial_reasons"])
+	}
+	confidence, ok := gpt["usage_confidence_counts"].(map[string]any)
+	if !ok || int64(confidence["observed"].(float64)) != 2 {
+		t.Fatalf("gpt confidence = %#v", gpt["usage_confidence_counts"])
+	}
 	returned, ok := gpt["model_returned_source_counts"].(map[string]any)
 	if !ok || int64(returned["response_body"].(float64)) != 2 {
 		t.Fatalf("gpt returned sources = %#v", gpt["model_returned_source_counts"])
@@ -1715,7 +1726,8 @@ func TestAPIModelsUsesReportBoundaryAndSourceCounts(t *testing.T) {
 	required := []string{
 		"model", "model_source", "request_count", "failed_count",
 		"input_tokens", "output_tokens", "reasoning_tokens", "cached_tokens",
-		"cache_creation_tokens", "total_tokens", "cost", "cost_known", "missing_usage_count",
+		"cache_creation_tokens", "total_tokens", "cost", "cost_known", "cost_state",
+		"unpriced_models", "partial_reasons", "usage_confidence_counts", "missing_usage_count",
 	}
 	for _, row := range rows {
 		for _, key := range required {

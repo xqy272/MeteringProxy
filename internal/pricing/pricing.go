@@ -877,6 +877,33 @@ func (p *Pricing) HasMultimodal(model string) bool {
 	return ok
 }
 
+// HasPerImagePricing reports whether model explicitly enables a per-image
+// billing channel. A multimodal model may be token-priced only; image counts in
+// that case are metadata and must not be treated as a missing per-image rate.
+func (p *Pricing) HasPerImagePricing(model string) bool {
+	mp, ok := p.lookupMultimodal(model)
+	if !ok {
+		return false
+	}
+	return perImageInputConfigured(mp.Image) || mp.Image.perImageOutputKeySet || mp.Image.PerImageOutput != nil
+}
+
+// HasImageTokenPricing reports whether a multimodal model enables any text or
+// image token rate used by image requests. It lets reports distinguish a
+// per-image-only model from a token-priced model whose usage dimensions are
+// unexpectedly missing.
+func (p *Pricing) HasImageTokenPricing(model string) bool {
+	mp, ok := p.lookupMultimodal(model)
+	if !ok {
+		return false
+	}
+	return modalityHasTokenPrice(mp.Text) || modalityHasTokenPrice(mp.Image)
+}
+
+func modalityHasTokenPrice(mp ModalityPrice) bool {
+	return mp.InputPer1M > 0 || mp.CachedInputPer1M > 0 || mp.OutputPer1M > 0 || mp.ReasoningPer1M > 0
+}
+
 func (p *Pricing) lookupMultimodal(model string) (MultimodalModelPrice, bool) {
 	if mp, ok := p.Multimodal[model]; ok {
 		return mp, true
