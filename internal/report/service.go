@@ -3,6 +3,7 @@ package report
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // Service orchestrates read-side report assembly for WebUI handlers.
@@ -12,7 +13,10 @@ type Service struct {
 	summary    SummaryReader
 	timeseries TimeseriesReader
 	images     ImagesReader
+	overview   OverviewReader
+	capture    CaptureRuntimeReader
 	cost       CostEngine
+	now        func() time.Time
 }
 
 // NewService constructs a report service from narrow reader/pricing interfaces.
@@ -29,10 +33,20 @@ func NewService(deps Dependencies, cost CostEngine) *Service {
 	if deps.Images == nil {
 		panic("report: ImagesReader is required")
 	}
+	if deps.Overview == nil {
+		panic("report: OverviewReader is required")
+	}
+	if deps.Capture == nil {
+		panic("report: CaptureRuntimeReader is required")
+	}
 	if cost == nil {
 		panic("report: CostEngine is required")
 	}
-	return &Service{models: deps.Models, summary: deps.Summary, timeseries: deps.Timeseries, images: deps.Images, cost: cost}
+	return &Service{
+		models: deps.Models, summary: deps.Summary, timeseries: deps.Timeseries,
+		images: deps.Images, overview: deps.Overview, capture: deps.Capture,
+		cost: cost, now: time.Now,
+	}
 }
 
 // Models builds the /api/models report from one consistent DB snapshot, then

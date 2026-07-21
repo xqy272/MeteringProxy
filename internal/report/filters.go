@@ -20,3 +20,8 @@ type TimeseriesFilter struct {
 type ImagesFilter struct {
 	Since time.Time
 }
+
+type OverviewFilter struct {
+	Since time.Time
+	Range string
+}

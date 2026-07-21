@@ -91,6 +91,103 @@ type ImageModelReport struct {
 	UsageConfidenceCounts UsageConfidenceCounts `json:"usage_confidence_counts"`
 }
 
+type SectionStatus string
+
+const (
+	SectionStatusComplete    SectionStatus = "complete"
+	SectionStatusPartial     SectionStatus = "partial"
+	SectionStatusUnavailable SectionStatus = "unavailable"
+)
+
+type OverviewSelectedData struct {
+	TotalRequests        int64   `json:"total_requests"`
+	FailedRequests       int64   `json:"failed_requests"`
+	FailureRate          float64 `json:"failure_rate"`
+	TotalInputTokens     int64   `json:"total_input_tokens"`
+	TotalOutputTokens    int64   `json:"total_output_tokens"`
+	TotalReasoningTokens int64   `json:"total_reasoning_tokens"`
+	TotalCachedTokens    int64   `json:"total_cached_tokens"`
+	TotalTokens          int64   `json:"total_tokens"`
+	TotalCost            float64 `json:"total_cost"`
+	P95LatencyMs         int64   `json:"p95_latency_ms"`
+	P95TTFBMs            int64   `json:"p95_ttfb_ms"`
+}
+
+type OverviewLatestError struct {
+	LatestAt    string `json:"latest_at"`
+	Status      int    `json:"status"`
+	Endpoint    string `json:"endpoint"`
+	Model       string `json:"model"`
+	ModelSource string `json:"model_source"`
+	Class       string `json:"class"`
+	Message     string `json:"message"`
+	RequestID   string `json:"request_id"`
+}
+
+type OverviewRecentData struct {
+	TotalRequests  int64                `json:"total_requests"`
+	FailedRequests int64                `json:"failed_requests"`
+	FailureRate    float64              `json:"failure_rate"`
+	P95LatencyMs   int64                `json:"p95_latency_ms"`
+	LatestError    *OverviewLatestError `json:"latest_error"`
+}
+
+type OverviewCaptureData struct {
+	Status         string `json:"status"`
+	QueueDepth     int64  `json:"queue_depth"`
+	DroppedEvents  int64  `json:"dropped_events"`
+	ParseErrors    int64  `json:"parse_errors"`
+	DBWriteErrors  int64  `json:"db_write_errors"`
+	CaptureFailed  int64  `json:"capture_failed"`
+	CaptureSkipped int64  `json:"capture_skipped"`
+}
+
+type OverviewCostData struct {
+	KnownCost             float64               `json:"known_cost"`
+	UnpricedModels        int64                 `json:"unpriced_models"`
+	Partial               bool                  `json:"partial"`
+	CostKnown             bool                  `json:"cost_known"`
+	CostState             CostState             `json:"cost_state"`
+	PartialReasons        []PartialReason       `json:"partial_reasons"`
+	UsageConfidenceCounts UsageConfidenceCounts `json:"usage_confidence_counts"`
+}
+
+type OverviewSelectedSection struct {
+	Data      OverviewSelectedData `json:"data"`
+	Error     string               `json:"error"`
+	Status    SectionStatus        `json:"status"`
+	ErrorCode string               `json:"error_code"`
+}
+
+type OverviewRecentSection struct {
+	Data      OverviewRecentData `json:"data"`
+	Error     string             `json:"error"`
+	Status    SectionStatus      `json:"status"`
+	ErrorCode string             `json:"error_code"`
+}
+
+type OverviewCaptureSection struct {
+	Data      OverviewCaptureData `json:"data"`
+	Error     string              `json:"error"`
+	Status    SectionStatus       `json:"status"`
+	ErrorCode string              `json:"error_code"`
+}
+
+type OverviewCostSection struct {
+	Data      OverviewCostData `json:"data"`
+	Error     string           `json:"error"`
+	Status    SectionStatus    `json:"status"`
+	ErrorCode string           `json:"error_code"`
+}
+
+type OverviewReport struct {
+	Range    string                  `json:"range"`
+	Selected OverviewSelectedSection `json:"selected"`
+	Recent1h OverviewRecentSection   `json:"recent_1h"`
+	Capture  OverviewCaptureSection  `json:"capture"`
+	Cost     OverviewCostSection     `json:"cost"`
+}
+
 // ModelReport is the stable /api/models response item.
 // Field names and JSON shape match the previous event.ModelReport contract.
 type ModelReport struct {

@@ -239,6 +239,7 @@ func main() {
 	if cfg.WebUI.Enabled {
 		modelsReporter := report.NewService(report.Dependencies{
 			Models: database, Summary: database, Timeseries: database, Images: database,
+			Overview: database, Capture: batchWriter,
 		}, pricingData)
 		var webuiServer *webui.Server
 		if *devStatic {

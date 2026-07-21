@@ -28,6 +28,14 @@ type ImagesReader interface {
 	ImageReportSnapshot(ctx context.Context, since time.Time) (*db.ImageReportData, error)
 }
 
+type OverviewReader interface {
+	OverviewReportSnapshot(ctx context.Context, since, recentSince time.Time) (*db.OverviewReportData, error)
+}
+
+type CaptureRuntimeReader interface {
+	Snapshot() (queueDepth, dropped, parseErrors, dbErrors int64)
+}
+
 // Dependencies keeps each read capability narrow while giving the composition
 // root one explicit, compile-time checked wiring object.
 type Dependencies struct {
@@ -35,6 +43,8 @@ type Dependencies struct {
 	Summary    SummaryReader
 	Timeseries TimeseriesReader
 	Images     ImagesReader
+	Overview   OverviewReader
+	Capture    CaptureRuntimeReader
 }
 
 // ModelsReporter is the WebUI-facing /api/models boundary.
@@ -56,11 +66,16 @@ type ImagesReporter interface {
 	ImageModels(ctx context.Context, filter ImagesFilter) ([]ImageModelReport, error)
 }
 
+type OverviewReporter interface {
+	Overview(ctx context.Context, filter OverviewFilter) (OverviewReport, error)
+}
+
 type CoreReporter interface {
 	ModelsReporter
 	SummaryReporter
 	TimeseriesReporter
 	ImagesReporter
+	OverviewReporter
 }
 
 // CostEngine is the pricing surface required by core cost reports.

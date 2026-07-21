@@ -199,18 +199,16 @@ func TestMultimodalAndImageReports(t *testing.T) {
 		t.Fatalf("multimodal rows = %+v, want 4", mm)
 	}
 
-	summary, err := d.ImageSummary(now.Add(-time.Hour))
+	imageReport, err := d.ImageReportSnapshot(context.Background(), now.Add(-time.Hour))
 	if err != nil {
-		t.Fatalf("ImageSummary: %v", err)
+		t.Fatalf("ImageReportSnapshot: %v", err)
 	}
+	summary := &imageReport.Summary
 	if summary.RequestCount != 1 || summary.ImageCount != 1 || summary.InputTextTokens != 10 || summary.InputImageTokens != 40 || summary.OutputImageTokens != 50 || summary.TotalTokens != 100 {
 		t.Fatalf("image summary = %+v", summary)
 	}
 
-	models, err := d.ImageModels(now.Add(-time.Hour))
-	if err != nil {
-		t.Fatalf("ImageModels: %v", err)
-	}
+	models := imageReport.Models
 	if len(models) != 1 || models[0].Model != "gpt-image-2" || models[0].Operation != "generation" || models[0].TotalTokens != 100 {
 		t.Fatalf("image models = %+v", models)
 	}
@@ -1111,58 +1109,6 @@ func TestDBFilePermissions(t *testing.T) {
 				t.Errorf("%s file permissions: %04o, want 0600", suffix, got)
 			}
 		}
-	}
-}
-
-func TestOverview(t *testing.T) {
-	d := newTestDB(t)
-	now := time.Now().UTC().Truncate(time.Second)
-
-	if err := d.InsertBatch([]UsageRecord{
-		{CreatedAt: now.Add(-30 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/chat/completions", Method: "POST", Status: 200, LatencyMs: 100, TTFBMs: 20, InputTokens: 500, OutputTokens: 200, TotalTokens: 700, CaptureOutcome: "captured"},
-		{CreatedAt: now.Add(-20 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/chat/completions", Method: "POST", Status: 500, LatencyMs: 300, TTFBMs: 60, InputTokens: 100, OutputTokens: 50, TotalTokens: 150, CaptureOutcome: "failed"},
-	}); err != nil {
-		t.Fatalf("InsertBatch: %v", err)
-	}
-
-	row := d.Overview(now.Add(-time.Hour))
-	if row == nil {
-		t.Fatal("Overview returned nil")
-	}
-	if row.Selected.Error != "" {
-		t.Fatalf("Overview.Selected error: %s", row.Selected.Error)
-	}
-	data, ok := row.Selected.Data.(map[string]interface{})
-	if !ok {
-		t.Fatalf("Overview.Selected.Data is not a map, got %T", row.Selected.Data)
-	}
-	totalReqs, _ := data["total_requests"].(int64)
-	if totalReqs != 2 {
-		t.Errorf("total_requests = %d, want 2", totalReqs)
-	}
-	failedReqs, _ := data["failed_requests"].(int64)
-	if failedReqs != 1 {
-		t.Errorf("failed_requests = %d, want 1", failedReqs)
-	}
-}
-
-func TestOverviewCaptureStats(t *testing.T) {
-	d := newTestDB(t)
-	now := time.Now().UTC().Truncate(time.Second)
-	if err := d.InsertBatch([]UsageRecord{
-		{CreatedAt: now.Add(-30 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/chat/completions", Method: "POST", Status: 200, LatencyMs: 10, CaptureOutcome: "failed"},
-		{CreatedAt: now.Add(-20 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/chat/completions", Method: "POST", Status: 200, LatencyMs: 10, CaptureOutcome: "skipped"},
-		{CreatedAt: now.Add(-10 * time.Minute).Format(time.RFC3339), Endpoint: "/v1/chat/completions", Method: "POST", Status: 200, LatencyMs: 10, CaptureOutcome: "skipped"},
-	}); err != nil {
-		t.Fatalf("InsertBatch: %v", err)
-	}
-
-	failed, skipped, err := d.OverviewCaptureStats(now.Add(-time.Hour))
-	if err != nil {
-		t.Fatalf("OverviewCaptureStats: %v", err)
-	}
-	if failed != 1 || skipped != 2 {
-		t.Fatalf("capture stats failed=%d skipped=%d, want 1/2", failed, skipped)
 	}
 }
 

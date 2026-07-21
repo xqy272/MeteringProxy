@@ -123,19 +123,6 @@ type BucketMeta struct {
 	Label string `json:"label"`
 }
 
-type OverviewReport struct {
-	Range    string          `json:"range"`
-	Selected OverviewSection `json:"selected"`
-	Recent1h OverviewSection `json:"recent_1h"`
-	Capture  OverviewSection `json:"capture"`
-	Cost     OverviewSection `json:"cost"`
-}
-
-type OverviewSection struct {
-	Data  interface{} `json:"data"`
-	Error string      `json:"error"`
-}
-
 type IssueReport struct {
 	Class       string `json:"class"`
 	Label       string `json:"label"`

@@ -8,112 +8,6 @@ import (
 	"time"
 )
 
-// Overview returns a composite overview with selected range, recent 1h,
-// capture health, and cost sections.
-func (db *DB) Overview(since time.Time) *OverviewRow {
-	row := &OverviewRow{Range: "24h"}
-
-	var totalRequests, failedRequests, inputTokens, outputTokens, reasoningTokens, cachedTokens, totalTokens int64
-	err := db.read.QueryRow(`
-		SELECT COUNT(*), COUNT(CASE WHEN status >= 400 THEN 1 END),
-			COALESCE(SUM(input_tokens), 0),
-			COALESCE(SUM(output_tokens), 0),
-			COALESCE(SUM(reasoning_tokens), 0),
-			COALESCE(SUM(cached_tokens), 0),
-			COALESCE(SUM(total_tokens), 0)
-		FROM request_usage WHERE created_at_unix >= ?
-	`, since.Unix()).Scan(
-		&totalRequests, &failedRequests,
-		&inputTokens, &outputTokens, &reasoningTokens, &cachedTokens, &totalTokens,
-	)
-	if err == nil {
-		p95Lat, _ := db.percentileInt(since, "latency_ms", 0.95, activitySampleLimit)
-		p95TTFB, _ := db.percentileInt(since, "ttfb_ms", 0.95, activitySampleLimit)
-		row.Selected.Data = map[string]interface{}{
-			"total_requests":         totalRequests,
-			"failed_requests":        failedRequests,
-			"total_input_tokens":     inputTokens,
-			"total_output_tokens":    outputTokens,
-			"total_reasoning_tokens": reasoningTokens,
-			"total_cached_tokens":    cachedTokens,
-			"total_tokens":           totalTokens,
-			"p95_latency_ms":         p95Lat,
-			"p95_ttfb_ms":            p95TTFB,
-		}
-	} else {
-		row.Selected.Error = err.Error()
-	}
-
-	// Recent 1h
-	oneHourAgo := time.Now().Add(-1 * time.Hour)
-	var rTotal, rFailed int64
-	err = db.read.QueryRow(`
-		SELECT COUNT(*), COUNT(CASE WHEN status >= 400 THEN 1 END)
-		FROM request_usage WHERE created_at_unix >= ?
-	`, oneHourAgo.Unix()).Scan(&rTotal, &rFailed)
-	if err == nil {
-		p95Lat1h, _ := db.percentileInt(oneHourAgo, "latency_ms", 0.95, activitySampleLimit)
-		failureRate := 0.0
-		if rTotal > 0 {
-			failureRate = float64(rFailed) / float64(rTotal)
-		}
-		recentData := map[string]interface{}{
-			"total_requests":  rTotal,
-			"failed_requests": rFailed,
-			"failure_rate":    failureRate,
-			"p95_latency_ms":  p95Lat1h,
-			"latest_error":    nil,
-		}
-		var latest struct {
-			CreatedAt   string
-			Status      int
-			Endpoint    string
-			Model       string
-			ModelSource string
-			Class       string
-			Message     string
-			RequestID   string
-		}
-		latestErr := db.read.QueryRow(`
-			SELECT
-				COALESCE(created_at, ''),
-				COALESCE(status, 0),
-				COALESCE(endpoint, ''),
-				`+effectiveModelExpr+`,
-				`+modelSourceExpr+`,
-				COALESCE(NULLIF(TRIM(error_class), ''), 'unknown'),
-				COALESCE(NULLIF(TRIM(error_code), ''), NULLIF(TRIM(error_type), ''), NULLIF(TRIM(error_class), ''), error, ''),
-				COALESCE(request_id, '')
-			FROM request_usage
-			WHERE created_at_unix >= ? AND status >= 400
-			ORDER BY created_at_unix DESC, id DESC
-			LIMIT 1
-		`, oneHourAgo.Unix()).Scan(
-			&latest.CreatedAt, &latest.Status, &latest.Endpoint, &latest.Model,
-			&latest.ModelSource, &latest.Class, &latest.Message, &latest.RequestID,
-		)
-		if latestErr == nil {
-			recentData["latest_error"] = map[string]interface{}{
-				"latest_at":    latest.CreatedAt,
-				"status":       latest.Status,
-				"endpoint":     latest.Endpoint,
-				"model":        latest.Model,
-				"model_source": latest.ModelSource,
-				"class":        latest.Class,
-				"message":      latest.Message,
-				"request_id":   latest.RequestID,
-			}
-		}
-		row.Recent1h.Data = recentData
-	} else {
-		row.Recent1h.Error = err.Error()
-	}
-
-	row.Capture.Data = map[string]interface{}{"status": "healthy"}
-	row.Cost.Data = map[string]interface{}{"partial": false}
-	return row
-}
-
 // Issues returns aggregated request-level issues.
 func (db *DB) Issues(since time.Time, limit int) ([]IssueRow, error) {
 	if limit <= 0 || limit > 100 {
@@ -551,22 +445,6 @@ func classSeverity(class string) string {
 	}
 }
 
-func (db *DB) OverviewCaptureStats(since time.Time) (failed, skipped int64, err error) {
-	if err := db.read.QueryRow(`
-		SELECT COUNT(*) FROM request_usage
-		WHERE created_at_unix >= ? AND capture_outcome = 'failed'
-	`, since.Unix()).Scan(&failed); err != nil {
-		return 0, 0, fmt.Errorf("capture failed stats: %w", err)
-	}
-	if err := db.read.QueryRow(`
-		SELECT COUNT(*) FROM request_usage
-		WHERE created_at_unix >= ? AND capture_outcome = 'skipped'
-	`, since.Unix()).Scan(&skipped); err != nil {
-		return 0, 0, fmt.Errorf("capture skipped stats: %w", err)
-	}
-	return failed, skipped, nil
-}
-
 func (db *DB) CaptureOutcomeCounts(since time.Time) (captured, skipped, failed int64, err error) {
 	if err := db.read.QueryRow(`
 		SELECT COUNT(*) FROM request_usage
@@ -598,7 +476,7 @@ type ModelAssetRow struct {
 	OutputTokens     int64  `json:"output_tokens"`
 	TotalTokens      int64  `json:"total_tokens"`
 	EndpointProfiles string `json:"endpoint_profiles"` // comma-separated distinct values
-	CaptureModes     string `json:"capture_modes"`      // comma-separated distinct values
+	CaptureModes     string `json:"capture_modes"`     // comma-separated distinct values
 	LatestSeenAt     string `json:"latest_seen_at"`
 }
 
@@ -645,13 +523,13 @@ func (db *DB) ModelAssets(since time.Time) ([]ModelAssetRow, error) {
 // GatewayCapabilityRow is one per-endpoint_profile aggregate for the gateway
 // capability view.
 type GatewayCapabilityRow struct {
-	EndpointProfile    string `json:"endpoint_profile"`
-	RequestCount       int64  `json:"request_count"`
-	StreamCount        int64  `json:"stream_count"`
-	MissingUsageCount  int64  `json:"missing_usage_count"`
-	UsageMeteredCount  int64  `json:"usage_metered_count"`
-	RequestOnlyCount   int64  `json:"request_only_count"`
-	PassthroughCount   int64  `json:"passthrough_count"`
+	EndpointProfile   string `json:"endpoint_profile"`
+	RequestCount      int64  `json:"request_count"`
+	StreamCount       int64  `json:"stream_count"`
+	MissingUsageCount int64  `json:"missing_usage_count"`
+	UsageMeteredCount int64  `json:"usage_metered_count"`
+	RequestOnlyCount  int64  `json:"request_only_count"`
+	PassthroughCount  int64  `json:"passthrough_count"`
 }
 
 // VerifySaltFingerprint enforces the salt-consistency invariant (CLAUDE.md #7).

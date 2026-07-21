@@ -35,7 +35,10 @@ func newTestServer(t *testing.T, basePath string) (*Server, *db.DB) {
 	t.Cleanup(func() { bw.Stop() })
 
 	registry := profile.NewRegistry()
-	modelsReporter := report.NewService(report.Dependencies{Models: database, Summary: database, Timeseries: database, Images: database}, pricingData)
+	modelsReporter := report.NewService(report.Dependencies{
+		Models: database, Summary: database, Timeseries: database, Images: database,
+		Overview: database, Capture: bw,
+	}, pricingData)
 
 	s := New(database, modelsReporter, pricingData, bw, registry, basePath)
 	return s, database
@@ -62,6 +65,10 @@ type stubModelsReporter struct {
 	imageSummaryCalls int
 	imageModelsCalls  int
 	imageFilter       report.ImagesFilter
+	overviewOut       report.OverviewReport
+	overviewErr       error
+	overviewCalls     int
+	overviewFilter    report.OverviewFilter
 }
 
 func (s *stubModelsReporter) Models(ctx context.Context, filter report.ModelsFilter) ([]report.ModelReport, error) {
@@ -98,6 +105,12 @@ func (s *stubModelsReporter) ImageModels(ctx context.Context, filter report.Imag
 	return s.imageModelsOut, s.imageModelsErr
 }
 
+func (s *stubModelsReporter) Overview(ctx context.Context, filter report.OverviewFilter) (report.OverviewReport, error) {
+	s.overviewCalls++
+	s.overviewFilter = filter
+	return s.overviewOut, s.overviewErr
+}
+
 func TestNewDoesNotPanic(t *testing.T) {
 	s1, _ := newTestServer(t, "/metering")
 	s2, _ := newTestServer(t, "/stats")
@@ -128,7 +141,10 @@ func TestNewWithStaticFS_ServesIndexFromInjectedFS(t *testing.T) {
 		},
 	}
 
-	s := NewWithStaticFS(database, report.NewService(report.Dependencies{Models: database, Summary: database, Timeseries: database, Images: database}, pricingData), pricingData, bw, registry, "/metering", staticFS)
+	s := NewWithStaticFS(database, report.NewService(report.Dependencies{
+		Models: database, Summary: database, Timeseries: database, Images: database,
+		Overview: database, Capture: bw,
+	}, pricingData), pricingData, bw, registry, "/metering", staticFS)
 
 	// Index: placeholder injection.
 	req := httptest.NewRequest("GET", "/metering", nil)
@@ -309,16 +325,15 @@ func TestAPIModelsDoesNotMarkZeroTokenUnknownModelUnpriced(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("GET /metering/api/overview: status %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	var overview event.OverviewReport
+	var overview report.OverviewReport
 	if err := json.Unmarshal(rec.Body.Bytes(), &overview); err != nil {
 		t.Fatalf("unmarshal overview: %v", err)
 	}
-	costData, ok := overview.Cost.Data.(map[string]interface{})
-	if !ok {
-		t.Fatalf("cost data = %T, want map", overview.Cost.Data)
+	if !overview.Cost.Data.Partial || !overview.Cost.Data.CostKnown || overview.Cost.Data.UnpricedModels != 0 {
+		t.Fatalf("overview cost = %+v, want known partial request-only cost without unpriced model", overview.Cost.Data)
 	}
-	if partial, _ := costData["partial"].(bool); partial {
-		t.Fatalf("overview cost partial = true for zero-token request-only row: %+v", costData)
+	if len(overview.Cost.Data.PartialReasons) != 1 || overview.Cost.Data.PartialReasons[0] != report.PartialReasonRequestOnly {
+		t.Fatalf("overview partial reasons = %+v, want request_only", overview.Cost.Data.PartialReasons)
 	}
 }
 
@@ -430,11 +445,11 @@ func TestAPIOverviewAndIssuesAreRoutedNoStore(t *testing.T) {
 	if got := rec.Header().Get("Cache-Control"); got != "no-store, no-cache, must-revalidate" {
 		t.Fatalf("overview Cache-Control = %q, want no-store", got)
 	}
-	var overview event.OverviewReport
+	var overview report.OverviewReport
 	if err := json.Unmarshal(rec.Body.Bytes(), &overview); err != nil {
 		t.Fatalf("unmarshal overview: %v", err)
 	}
-	if overview.Range != "7d" || overview.Recent1h.Data == nil {
+	if overview.Range != "7d" || overview.Recent1h.Data.TotalRequests != 1 || overview.Recent1h.Data.LatestError == nil {
 		t.Fatalf("overview = %+v, want range=7d with recent_1h data", overview)
 	}
 
@@ -1639,6 +1654,10 @@ func TestCoreReporterIsExplicitlyInjected(t *testing.T) {
 		timeseriesOut:   []report.TimeseriesReport{{Timestamp: "from-injected-reporter", Count: 13, CostKnown: true}},
 		imageSummaryOut: report.ImageSummaryReport{Summary: report.ImageSummaryUsage{RequestCount: 17}, CostKnown: true},
 		imageModelsOut:  []report.ImageModelReport{{Model: "from-image-reporter", RequestCount: 19, CostKnown: true}},
+		overviewOut: report.OverviewReport{
+			Range:    "from-overview-reporter",
+			Selected: report.OverviewSelectedSection{Data: report.OverviewSelectedData{TotalRequests: 23}},
+		},
 	}
 	s := New(database, stub, pricingData, bw, registry, "/metering")
 
@@ -1689,6 +1708,14 @@ func TestCoreReporterIsExplicitlyInjected(t *testing.T) {
 	var imageModels []report.ImageModelReport
 	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &imageModels) != nil || len(imageModels) != 1 || imageModels[0].RequestCount != 19 || stub.imageModelsCalls != 1 {
 		t.Fatalf("image models status=%d payload=%+v calls=%d", rec.Code, imageModels, stub.imageModelsCalls)
+	}
+
+	req = httptest.NewRequest("GET", "/metering/api/overview?range=7d", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	var overview report.OverviewReport
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &overview) != nil || overview.Range != "from-overview-reporter" || overview.Selected.Data.TotalRequests != 23 || stub.overviewCalls != 1 || stub.overviewFilter.Range != "7d" {
+		t.Fatalf("overview status=%d payload=%+v calls=%d filter=%+v", rec.Code, overview, stub.overviewCalls, stub.overviewFilter)
 	}
 }
 
