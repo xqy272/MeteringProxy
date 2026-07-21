@@ -194,34 +194,3 @@ type GatewayCapabilityProfile struct {
 	StreamCount       int64    `json:"stream_count"`
 	KnownLimitations  []string `json:"known_limitations,omitempty"`
 }
-
-// ModelAssetsReport merges request_usage model data with pricing
-// configuration so the UI can show which models are used, metered, and priced.
-type ModelAssetsReport struct {
-	Range   string            `json:"range"`
-	Items   []ModelAssetItem  `json:"items"`
-	Summary ModelAssetSummary `json:"summary"`
-}
-
-type ModelAssetItem struct {
-	Model            string   `json:"model"`
-	Sources          []string `json:"sources"`
-	EndpointProfiles []string `json:"endpoint_profiles"`
-	CaptureMode      string   `json:"capture_mode"`
-	Confidence       string   `json:"confidence"`
-	RequestCount     int64    `json:"request_count"`
-	FailedCount      int64    `json:"failed_count"`
-	TotalTokens      int64    `json:"total_tokens"`
-	EstimatedCost    float64  `json:"estimated_cost"`
-	CostKnown        bool     `json:"cost_known"`
-	PricingSource    string   `json:"pricing_source"`
-	LatestSeenAt     string   `json:"latest_seen_at"`
-}
-
-type ModelAssetSummary struct {
-	ModelsTotal        int  `json:"models_total"`
-	UsedModels         int  `json:"used_models"`
-	UnpricedUsedModels int  `json:"unpriced_used_models"`
-	RequestOnlyModels  int  `json:"request_only_models"`
-	CostPartial        bool `json:"cost_partial"`
-}

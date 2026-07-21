@@ -467,59 +467,6 @@ func (db *DB) CaptureOutcomeCounts(since time.Time) (captured, skipped, failed i
 	return captured, skipped, failed, nil
 }
 
-// ModelAssetRow is one per-model aggregate for the model assets view.
-type ModelAssetRow struct {
-	Model            string `json:"model"`
-	RequestCount     int64  `json:"request_count"`
-	FailedCount      int64  `json:"failed_count"`
-	InputTokens      int64  `json:"input_tokens"`
-	OutputTokens     int64  `json:"output_tokens"`
-	TotalTokens      int64  `json:"total_tokens"`
-	EndpointProfiles string `json:"endpoint_profiles"` // comma-separated distinct values
-	CaptureModes     string `json:"capture_modes"`     // comma-separated distinct values
-	LatestSeenAt     string `json:"latest_seen_at"`
-}
-
-// ModelAssets aggregates request_usage by effective model for the model
-// assets view. EndpointProfiles and CaptureModes are comma-separated distinct
-// values; the webui layer splits them.
-func (db *DB) ModelAssets(since time.Time) ([]ModelAssetRow, error) {
-	rows, err := db.read.Query(`
-		SELECT
-			`+effectiveModelExpr+`,
-			COUNT(*),
-			COUNT(CASE WHEN status >= 400 THEN 1 END),
-			COALESCE(SUM(input_tokens), 0),
-			COALESCE(SUM(output_tokens), 0),
-			COALESCE(SUM(total_tokens), 0),
-			COALESCE(GROUP_CONCAT(DISTINCT COALESCE(NULLIF(endpoint_profile, ''), 'unknown')), ''),
-			COALESCE(GROUP_CONCAT(DISTINCT COALESCE(NULLIF(capture_mode, ''), 'unknown')), ''),
-			MAX(created_at)
-		FROM request_usage
-		WHERE created_at_unix >= ?
-		GROUP BY 1
-		ORDER BY COUNT(*) DESC
-	`, since.Unix())
-	if err != nil {
-		return nil, fmt.Errorf("model assets query: %w", err)
-	}
-	defer rows.Close()
-
-	var result []ModelAssetRow
-	for rows.Next() {
-		var r ModelAssetRow
-		if err := rows.Scan(
-			&r.Model, &r.RequestCount, &r.FailedCount,
-			&r.InputTokens, &r.OutputTokens, &r.TotalTokens,
-			&r.EndpointProfiles, &r.CaptureModes, &r.LatestSeenAt,
-		); err != nil {
-			return nil, fmt.Errorf("model assets scan: %w", err)
-		}
-		result = append(result, r)
-	}
-	return result, rows.Err()
-}
-
 // GatewayCapabilityRow is one per-endpoint_profile aggregate for the gateway
 // capability view.
 type GatewayCapabilityRow struct {

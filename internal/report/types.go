@@ -188,6 +188,44 @@ type OverviewReport struct {
 	Cost     OverviewCostSection     `json:"cost"`
 }
 
+type ModelAssetsReport struct {
+	Range   string            `json:"range"`
+	Items   []ModelAssetItem  `json:"items"`
+	Summary ModelAssetSummary `json:"summary"`
+}
+
+type ModelAssetItem struct {
+	Model                 string                `json:"model"`
+	Sources               []string              `json:"sources"`
+	EndpointProfiles      []string              `json:"endpoint_profiles"`
+	CaptureMode           string                `json:"capture_mode"`
+	Confidence            string                `json:"confidence"`
+	RequestCount          int64                 `json:"request_count"`
+	FailedCount           int64                 `json:"failed_count"`
+	InputTokens           int64                 `json:"input_tokens"`
+	OutputTokens          int64                 `json:"output_tokens"`
+	ReasoningTokens       int64                 `json:"reasoning_tokens"`
+	CachedTokens          int64                 `json:"cached_tokens"`
+	CacheCreationTokens   int64                 `json:"cache_creation_tokens"`
+	TotalTokens           int64                 `json:"total_tokens"`
+	EstimatedCost         float64               `json:"estimated_cost"`
+	CostKnown             bool                  `json:"cost_known"`
+	CostState             CostState             `json:"cost_state"`
+	UnpricedModels        int64                 `json:"unpriced_models"`
+	PartialReasons        []PartialReason       `json:"partial_reasons"`
+	UsageConfidenceCounts UsageConfidenceCounts `json:"usage_confidence_counts"`
+	PricingSource         string                `json:"pricing_source"`
+	LatestSeenAt          string                `json:"latest_seen_at"`
+}
+
+type ModelAssetSummary struct {
+	ModelsTotal        int  `json:"models_total"`
+	UsedModels         int  `json:"used_models"`
+	UnpricedUsedModels int  `json:"unpriced_used_models"`
+	RequestOnlyModels  int  `json:"request_only_models"`
+	CostPartial        bool `json:"cost_partial"`
+}
+
 // ModelReport is the stable /api/models response item.
 // Field names and JSON shape match the previous event.ModelReport contract.
 type ModelReport struct {

@@ -32,6 +32,10 @@ type OverviewReader interface {
 	OverviewReportSnapshot(ctx context.Context, since, recentSince time.Time) (*db.OverviewReportData, error)
 }
 
+type ModelAssetsReader interface {
+	ModelAssetsReportSnapshot(ctx context.Context, since time.Time) (*db.ModelAssetsReportData, error)
+}
+
 type CaptureRuntimeReader interface {
 	Snapshot() (queueDepth, dropped, parseErrors, dbErrors int64)
 }
@@ -39,12 +43,13 @@ type CaptureRuntimeReader interface {
 // Dependencies keeps each read capability narrow while giving the composition
 // root one explicit, compile-time checked wiring object.
 type Dependencies struct {
-	Models     ModelsReader
-	Summary    SummaryReader
-	Timeseries TimeseriesReader
-	Images     ImagesReader
-	Overview   OverviewReader
-	Capture    CaptureRuntimeReader
+	Models      ModelsReader
+	Summary     SummaryReader
+	Timeseries  TimeseriesReader
+	Images      ImagesReader
+	Overview    OverviewReader
+	Capture     CaptureRuntimeReader
+	ModelAssets ModelAssetsReader
 }
 
 // ModelsReporter is the WebUI-facing /api/models boundary.
@@ -70,12 +75,17 @@ type OverviewReporter interface {
 	Overview(ctx context.Context, filter OverviewFilter) (OverviewReport, error)
 }
 
+type ModelAssetsReporter interface {
+	ModelAssets(ctx context.Context, filter ModelAssetsFilter) (ModelAssetsReport, error)
+}
+
 type CoreReporter interface {
 	ModelsReporter
 	SummaryReporter
 	TimeseriesReporter
 	ImagesReporter
 	OverviewReporter
+	ModelAssetsReporter
 }
 
 // CostEngine is the pricing surface required by core cost reports.
@@ -84,6 +94,7 @@ type CostEngine interface {
 	CostDimension(model, modality, channel, metric, direction, unit string, amount float64) (float64, bool)
 	CostImages(model string, inputImageCount, outputImageCount int64, size string) (cost float64, known bool, sizeDefaulted bool)
 	HasMultimodal(model string) bool
+	HasTextPricing(model string) bool
 	HasPerImagePricing(model string) bool
 	HasImageTokenPricing(model string) bool
 }

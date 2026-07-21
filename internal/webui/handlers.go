@@ -3,7 +3,6 @@ package webui
 import (
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"ai-gateway-metering-proxy/internal/db"
@@ -348,108 +347,20 @@ func (s *Server) handleProviderQuotaDiagnostics(w http.ResponseWriter, r *http.R
 // request-only models that should not be read as complete cost (4.5 节).
 func (s *Server) handleModelAssets(w http.ResponseWriter, r *http.Request) {
 	since, rangeKey := parseRange(r)
-	rows, err := s.db.ModelAssets(since)
+	result, err := s.reports.ModelAssets(r.Context(), report.ModelAssetsFilter{Since: since, Range: rangeKey})
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-
-	report := &event.ModelAssetsReport{
-		Range: rangeKey,
-		Items: []event.ModelAssetItem{},
-	}
-
-	for _, row := range rows {
-		cost, known := s.pricing.CostWithCacheCreation(row.Model, row.InputTokens, row.OutputTokens, 0, 0, 0)
-
-		pricingSource := "unpriced"
-		if known {
-			pricingSource = "exact"
-		}
-
-		profiles := splitCSV(row.EndpointProfiles)
-		captureModes := splitCSV(row.CaptureModes)
-		captureMode := "unknown"
-		if len(captureModes) > 0 {
-			captureMode = captureModes[0]
-		}
-		confidence := modelAssetConfidence(captureMode, known)
-
-		sources := []string{"requested"}
-		if known {
-			sources = append(sources, "pricing")
-		}
-
-		report.Items = append(report.Items, event.ModelAssetItem{
-			Model:            row.Model,
-			Sources:          sources,
-			EndpointProfiles: profiles,
-			CaptureMode:      captureMode,
-			Confidence:       confidence,
-			RequestCount:     row.RequestCount,
-			FailedCount:      row.FailedCount,
-			TotalTokens:      row.TotalTokens,
-			EstimatedCost:    cost,
-			CostKnown:        known,
-			PricingSource:    pricingSource,
-			LatestSeenAt:     row.LatestSeenAt,
-		})
-
-		report.Summary.ModelsTotal++
-		report.Summary.UsedModels++
-		if !known {
-			report.Summary.UnpricedUsedModels++
-		}
-		if captureMode == "request_only" {
-			report.Summary.RequestOnlyModels++
-		}
-	}
-
-	// Cost is partial if any used model is unpriced or request-only (cannot
-	// represent complete cost).
-	report.Summary.CostPartial = report.Summary.UnpricedUsedModels > 0 || report.Summary.RequestOnlyModels > 0
-
-	writeJSON(w, report)
-}
-
-func splitCSV(s string) []string {
-	if s == "" {
-		return nil
-	}
-	parts := strings.Split(s, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-// modelAssetConfidence computes a model-level confidence label from the
-// dominant capture mode and pricing status (4.7 节).
-func modelAssetConfidence(captureMode string, priced bool) string {
-	switch captureMode {
-	case event.CaptureRequestOnly:
-		return "request_only"
-	case event.CapturePassthrough:
-		return "unsupported"
-	case event.CaptureUsageMetered:
-		if priced {
-			return "observed"
-		}
-		return "missing_usage"
-	default:
-		return "missing_usage"
-	}
+	writeJSON(w, result)
 }
 
 // handlePricingStub generates a YAML pricing stub with all-zero prices for
 // models that have been used in the time range but are not yet configured in
 // pricing.yaml. It does not guess prices; the operator fills in real values.
 func (s *Server) handlePricingStub(w http.ResponseWriter, r *http.Request) {
-	since, _ := parseRange(r)
-	rows, err := s.db.ModelAssets(since)
+	since, rangeKey := parseRange(r)
+	assets, err := s.reports.ModelAssets(r.Context(), report.ModelAssetsFilter{Since: since, Range: rangeKey})
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -468,14 +379,14 @@ func (s *Server) handlePricingStub(w http.ResponseWriter, r *http.Request) {
 		Pricing: make(map[string]stubModel),
 	}
 	var unpricedCount int
-	for _, row := range rows {
-		if row.Model == "" || row.Model == "unidentified" {
+	for _, item := range assets.Items {
+		if item.Model == "" || item.Model == "unidentified" {
 			continue
 		}
-		if _, known := s.pricing.CostWithCacheCreation(row.Model, 0, 0, 0, 0, 0); known {
+		if item.PricingSource != "unpriced" {
 			continue
 		}
-		stub.Pricing[row.Model] = stubModel{}
+		stub.Pricing[item.Model] = stubModel{}
 		unpricedCount++
 	}
 

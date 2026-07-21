@@ -9,14 +9,15 @@ import (
 // Service orchestrates read-side report assembly for WebUI handlers.
 // It implements the core usage/cost reporter interfaces.
 type Service struct {
-	models     ModelsReader
-	summary    SummaryReader
-	timeseries TimeseriesReader
-	images     ImagesReader
-	overview   OverviewReader
-	capture    CaptureRuntimeReader
-	cost       CostEngine
-	now        func() time.Time
+	models      ModelsReader
+	summary     SummaryReader
+	timeseries  TimeseriesReader
+	images      ImagesReader
+	overview    OverviewReader
+	capture     CaptureRuntimeReader
+	modelAssets ModelAssetsReader
+	cost        CostEngine
+	now         func() time.Time
 }
 
 // NewService constructs a report service from narrow reader/pricing interfaces.
@@ -39,13 +40,17 @@ func NewService(deps Dependencies, cost CostEngine) *Service {
 	if deps.Capture == nil {
 		panic("report: CaptureRuntimeReader is required")
 	}
+	if deps.ModelAssets == nil {
+		panic("report: ModelAssetsReader is required")
+	}
 	if cost == nil {
 		panic("report: CostEngine is required")
 	}
 	return &Service{
 		models: deps.Models, summary: deps.Summary, timeseries: deps.Timeseries,
 		images: deps.Images, overview: deps.Overview, capture: deps.Capture,
-		cost: cost, now: time.Now,
+		modelAssets: deps.ModelAssets,
+		cost:        cost, now: time.Now,
 	}
 }
 

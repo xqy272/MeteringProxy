@@ -13,7 +13,6 @@ import (
 
 	"ai-gateway-metering-proxy/internal/db"
 	"ai-gateway-metering-proxy/internal/event"
-	"ai-gateway-metering-proxy/internal/pricing"
 	"ai-gateway-metering-proxy/internal/profile"
 	"ai-gateway-metering-proxy/internal/report"
 	"ai-gateway-metering-proxy/internal/store"
@@ -26,7 +25,6 @@ var staticFiles embed.FS
 type Server struct {
 	db        store.ReportStore
 	reports   report.CoreReporter
-	pricing   *pricing.Pricing
 	writer    *writer.BatchWriter
 	registry  *profile.Registry
 	basePath  string
@@ -54,19 +52,19 @@ type Server struct {
 
 // New creates a Server that serves static files from the embedded filesystem.
 // models is required and must be wired by the composition root.
-func New(database store.ReportStore, reports report.CoreReporter, pricingData *pricing.Pricing, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string) *Server {
+func New(database store.ReportStore, reports report.CoreReporter, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string) *Server {
 	staticFS, _ := fs.Sub(staticFiles, "static")
-	return newServer(database, reports, pricingData, batchWriter, registry, basePath, staticFS)
+	return newServer(database, reports, batchWriter, registry, basePath, staticFS)
 }
 
 // NewWithStaticFS creates a Server that serves static files from the given
 // filesystem. Use this for local development (os.DirFS on the static/ directory)
 // or testing with custom asset sets.
-func NewWithStaticFS(database store.ReportStore, reports report.CoreReporter, pricingData *pricing.Pricing, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string, staticFS fs.FS) *Server {
-	return newServer(database, reports, pricingData, batchWriter, registry, basePath, staticFS)
+func NewWithStaticFS(database store.ReportStore, reports report.CoreReporter, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string, staticFS fs.FS) *Server {
+	return newServer(database, reports, batchWriter, registry, basePath, staticFS)
 }
 
-func newServer(database store.ReportStore, reports report.CoreReporter, pricingData *pricing.Pricing, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string, staticFS fs.FS) *Server {
+func newServer(database store.ReportStore, reports report.CoreReporter, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string, staticFS fs.FS) *Server {
 	if reports == nil {
 		panic("webui: core reporter is required")
 	}
@@ -76,7 +74,6 @@ func newServer(database store.ReportStore, reports report.CoreReporter, pricingD
 	s := &Server{
 		db:              database,
 		reports:         reports,
-		pricing:         pricingData,
 		writer:          batchWriter,
 		registry:        registry,
 		basePath:        basePath,

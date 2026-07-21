@@ -25,3 +25,8 @@ type OverviewFilter struct {
 	Since time.Time
 	Range string
 }
+
+type ModelAssetsFilter struct {
+	Since time.Time
+	Range string
+}

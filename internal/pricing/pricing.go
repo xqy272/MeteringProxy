@@ -877,6 +877,13 @@ func (p *Pricing) HasMultimodal(model string) bool {
 	return ok
 }
 
+// HasTextPricing reports whether model resolves to a configured text price,
+// including aliases and supported canonicalized names.
+func (p *Pricing) HasTextPricing(model string) bool {
+	_, ok := p.lookup(model)
+	return ok
+}
+
 // HasPerImagePricing reports whether model explicitly enables a per-image
 // billing channel. A multimodal model may be token-priced only; image counts in
 // that case are metadata and must not be treated as a missing per-image rate.

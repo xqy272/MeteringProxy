@@ -1213,6 +1213,25 @@ multimodal_pricing:
 	}
 }
 
+func TestHasTextPricingUsesNormalLookupRules(t *testing.T) {
+	p, err := Parse([]byte(`
+pricing:
+  model-a:
+    aliases: [model-alias]
+    input_per_1m: 1
+    output_per_1m: 2
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !p.HasTextPricing("model-a") || !p.HasTextPricing("model-alias") {
+		t.Fatalf("configured model or alias not recognized")
+	}
+	if p.HasTextPricing("missing-model") {
+		t.Fatal("missing model reported as text-priced")
+	}
+}
+
 func TestHasMultimodal(t *testing.T) {
 	p, err := Parse([]byte(`
 multimodal_pricing:

@@ -11,30 +11,32 @@ import (
 )
 
 type stubModelsReader struct {
-	snapshot           *db.ModelsReportData
-	err                error
-	summarySnapshot    *db.SummaryReportData
-	summaryErr         error
-	timeseriesSnapshot *db.TimeseriesReportData
-	timeseriesErr      error
-	imageSnapshot      *db.ImageReportData
-	imageErr           error
-	imageCalls         int
-	imageSince         time.Time
-	imageDone          bool
-	overviewSnapshot   *db.OverviewReportData
-	overviewErr        error
-	overviewCalls      int
-	overviewSince      time.Time
-	overviewRecent     time.Time
-	runtimeQueueDepth  int64
-	runtimeDropped     int64
-	runtimeParseErrors int64
-	runtimeDBErrors    int64
-	lastBucketMin      int
-	calls              int
-	lastSince          time.Time
-	lastDone           bool
+	snapshot            *db.ModelsReportData
+	err                 error
+	summarySnapshot     *db.SummaryReportData
+	summaryErr          error
+	timeseriesSnapshot  *db.TimeseriesReportData
+	timeseriesErr       error
+	imageSnapshot       *db.ImageReportData
+	imageErr            error
+	imageCalls          int
+	imageSince          time.Time
+	imageDone           bool
+	overviewSnapshot    *db.OverviewReportData
+	overviewErr         error
+	overviewCalls       int
+	overviewSince       time.Time
+	overviewRecent      time.Time
+	runtimeQueueDepth   int64
+	runtimeDropped      int64
+	runtimeParseErrors  int64
+	runtimeDBErrors     int64
+	modelAssetsSnapshot *db.ModelAssetsReportData
+	modelAssetsErr      error
+	lastBucketMin       int
+	calls               int
+	lastSince           time.Time
+	lastDone            bool
 }
 
 func (s *stubModelsReader) ModelsReportSnapshot(ctx context.Context, since time.Time) (*db.ModelsReportData, error) {
@@ -101,19 +103,31 @@ func (s *stubModelsReader) Snapshot() (queueDepth, dropped, parseErrors, dbError
 	return s.runtimeQueueDepth, s.runtimeDropped, s.runtimeParseErrors, s.runtimeDBErrors
 }
 
+func (s *stubModelsReader) ModelAssetsReportSnapshot(ctx context.Context, since time.Time) (*db.ModelAssetsReportData, error) {
+	if s.modelAssetsErr != nil {
+		return nil, s.modelAssetsErr
+	}
+	if s.modelAssetsSnapshot == nil {
+		return &db.ModelAssetsReportData{}, nil
+	}
+	return s.modelAssetsSnapshot, nil
+}
+
 func testDependencies(reader *stubModelsReader) Dependencies {
 	return Dependencies{
 		Models: reader, Summary: reader, Timeseries: reader, Images: reader,
 		Overview: reader, Capture: reader,
+		ModelAssets: reader,
 	}
 }
 
 type stubCostEngine struct {
-	cost  float64
-	known bool
-	calls int
-	model string
-	usage pricing.TextTokenUsage
+	cost    float64
+	known   bool
+	calls   int
+	model   string
+	usage   pricing.TextTokenUsage
+	hasText bool
 }
 
 func (s *stubCostEngine) CostText(model string, usage pricing.TextTokenUsage) (float64, bool) {
@@ -132,6 +146,8 @@ func (s *stubCostEngine) CostImages(model string, inputImageCount, outputImageCo
 }
 
 func (s *stubCostEngine) HasMultimodal(model string) bool { return false }
+
+func (s *stubCostEngine) HasTextPricing(model string) bool { return s.hasText }
 
 func (s *stubCostEngine) HasPerImagePricing(model string) bool { return false }
 

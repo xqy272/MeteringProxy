@@ -22,6 +22,12 @@ import (
 
 func newTestServer(t *testing.T, basePath string) (*Server, *db.DB) {
 	t.Helper()
+	s, database, _ := newTestServerWithPricing(t, basePath)
+	return s, database
+}
+
+func newTestServerWithPricing(t *testing.T, basePath string) (*Server, *db.DB, *pricing.Pricing) {
+	t.Helper()
 	path := t.TempDir() + "/test.sqlite"
 	database, err := db.Open(path)
 	if err != nil {
@@ -37,11 +43,11 @@ func newTestServer(t *testing.T, basePath string) (*Server, *db.DB) {
 	registry := profile.NewRegistry()
 	modelsReporter := report.NewService(report.Dependencies{
 		Models: database, Summary: database, Timeseries: database, Images: database,
-		Overview: database, Capture: bw,
+		Overview: database, Capture: bw, ModelAssets: database,
 	}, pricingData)
 
-	s := New(database, modelsReporter, pricingData, bw, registry, basePath)
-	return s, database
+	s := New(database, modelsReporter, bw, registry, basePath)
+	return s, database, pricingData
 }
 
 type stubModelsReporter struct {
@@ -69,6 +75,10 @@ type stubModelsReporter struct {
 	overviewErr       error
 	overviewCalls     int
 	overviewFilter    report.OverviewFilter
+	modelAssetsOut    report.ModelAssetsReport
+	modelAssetsErr    error
+	modelAssetsCalls  int
+	modelAssetsFilter report.ModelAssetsFilter
 }
 
 func (s *stubModelsReporter) Models(ctx context.Context, filter report.ModelsFilter) ([]report.ModelReport, error) {
@@ -111,6 +121,12 @@ func (s *stubModelsReporter) Overview(ctx context.Context, filter report.Overvie
 	return s.overviewOut, s.overviewErr
 }
 
+func (s *stubModelsReporter) ModelAssets(ctx context.Context, filter report.ModelAssetsFilter) (report.ModelAssetsReport, error) {
+	s.modelAssetsCalls++
+	s.modelAssetsFilter = filter
+	return s.modelAssetsOut, s.modelAssetsErr
+}
+
 func TestNewDoesNotPanic(t *testing.T) {
 	s1, _ := newTestServer(t, "/metering")
 	s2, _ := newTestServer(t, "/stats")
@@ -143,8 +159,8 @@ func TestNewWithStaticFS_ServesIndexFromInjectedFS(t *testing.T) {
 
 	s := NewWithStaticFS(database, report.NewService(report.Dependencies{
 		Models: database, Summary: database, Timeseries: database, Images: database,
-		Overview: database, Capture: bw,
-	}, pricingData), pricingData, bw, registry, "/metering", staticFS)
+		Overview: database, Capture: bw, ModelAssets: database,
+	}, pricingData), bw, registry, "/metering", staticFS)
 
 	// Index: placeholder injection.
 	req := httptest.NewRequest("GET", "/metering", nil)
@@ -236,8 +252,8 @@ func TestAPISummary(t *testing.T) {
 }
 
 func TestAPIModelsCostIncludesCacheCreationTokens(t *testing.T) {
-	s, database := newTestServer(t, "/metering")
-	s.pricing.Models["claude-sonnet-4-6"] = pricing.ModelPrice{
+	s, database, prices := newTestServerWithPricing(t, "/metering")
+	prices.Models["claude-sonnet-4-6"] = pricing.ModelPrice{
 		InputPer1M:         3.00,
 		CachedInputPer1M:   0.30,
 		CacheCreationPer1M: 3.75,
@@ -338,8 +354,8 @@ func TestAPIModelsDoesNotMarkZeroTokenUnknownModelUnpriced(t *testing.T) {
 }
 
 func TestAPIImagesSummary(t *testing.T) {
-	s, database := newTestServer(t, "/metering")
-	s.pricing.Multimodal["gpt-image-2"] = pricing.MultimodalModelPrice{
+	s, database, prices := newTestServerWithPricing(t, "/metering")
+	prices.Multimodal["gpt-image-2"] = pricing.MultimodalModelPrice{
 		Text:  pricing.ModalityPrice{InputPer1M: 5.00, CachedInputPer1M: 1.25},
 		Image: pricing.ModalityPrice{InputPer1M: 8.00, CachedInputPer1M: 2.00, OutputPer1M: 30.00},
 	}
@@ -1460,8 +1476,11 @@ func TestProviderQuotaUnsupportedWhenNoAdapterRows(t *testing.T) {
 }
 
 func TestModelAssets(t *testing.T) {
-	s, database := newTestServer(t, "/metering")
-	s.pricing.Models["gpt-4o"] = pricing.ModelPrice{InputPer1M: 2.5, OutputPer1M: 10.0}
+	s, database, prices := newTestServerWithPricing(t, "/metering")
+	prices.Models["gpt-4o"] = pricing.ModelPrice{
+		InputPer1M: 2.5, CachedInputPer1M: 1.0, OutputPer1M: 10.0,
+		ReasoningPer1M: 15.0, CacheCreationPer1M: 3.0,
+	}
 	now := time.Now().UTC().Truncate(time.Second)
 
 	records := []db.UsageRecord{
@@ -1470,7 +1489,8 @@ func TestModelAssets(t *testing.T) {
 			Endpoint:  "/v1/chat/completions", Method: "POST", Status: 200,
 			EndpointProfile: "chat_completions", CaptureMode: "usage_metered",
 			ModelRequested: "gpt-4o", ModelReturned: "gpt-4o",
-			InputTokens: 100, OutputTokens: 50, TotalTokens: 150,
+			InputTokens: 100, OutputTokens: 50, ReasoningTokens: 10,
+			CachedTokens: 20, CacheCreationTokens: 5, TotalTokens: 150,
 		},
 		{
 			CreatedAt: now.Add(-8 * time.Minute).Format(time.RFC3339),
@@ -1504,13 +1524,13 @@ func TestModelAssets(t *testing.T) {
 		t.Fatalf("status %d, body=%s", rec.Code, rec.Body.String())
 	}
 
-	var report event.ModelAssetsReport
-	if err := json.Unmarshal(rec.Body.Bytes(), &report); err != nil {
+	var payload report.ModelAssetsReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
 
-	byModel := make(map[string]event.ModelAssetItem, len(report.Items))
-	for _, item := range report.Items {
+	byModel := make(map[string]report.ModelAssetItem, len(payload.Items))
+	for _, item := range payload.Items {
 		byModel[item.Model] = item
 	}
 
@@ -1533,6 +1553,9 @@ func TestModelAssets(t *testing.T) {
 	if gpt.EstimatedCost <= 0 {
 		t.Errorf("gpt-4o estimated_cost = %v, want > 0", gpt.EstimatedCost)
 	}
+	if gpt.ReasoningTokens != 10 || gpt.CachedTokens != 20 || gpt.CacheCreationTokens != 5 || gpt.CostState != report.CostStateComplete {
+		t.Errorf("gpt-4o detailed usage/cost = %+v", gpt)
+	}
 
 	unpriced, ok := byModel["unpriced-model"]
 	if !ok {
@@ -1549,21 +1572,24 @@ func TestModelAssets(t *testing.T) {
 	if whisper.CaptureMode != "request_only" {
 		t.Errorf("whisper-1 capture_mode = %q, want request_only", whisper.CaptureMode)
 	}
+	if !whisper.CostKnown || whisper.CostState != report.CostStatePartial || whisper.PricingSource != "unpriced" {
+		t.Errorf("whisper-1 cost contract = %+v", whisper)
+	}
 
-	if report.Summary.UsedModels != 3 {
-		t.Errorf("summary used_models = %d, want 3", report.Summary.UsedModels)
+	if payload.Summary.UsedModels != 3 {
+		t.Errorf("summary used_models = %d, want 3", payload.Summary.UsedModels)
 	}
-	if report.Summary.UnpricedUsedModels != 2 {
-		t.Errorf("summary unpriced_used_models = %d, want 2 (whisper-1 + unpriced-model)", report.Summary.UnpricedUsedModels)
+	if payload.Summary.UnpricedUsedModels != 2 {
+		t.Errorf("summary unpriced_used_models = %d, want 2 (whisper-1 + unpriced-model)", payload.Summary.UnpricedUsedModels)
 	}
-	if report.Summary.RequestOnlyModels != 1 {
-		t.Errorf("summary request_only_models = %d, want 1", report.Summary.RequestOnlyModels)
+	if payload.Summary.RequestOnlyModels != 1 {
+		t.Errorf("summary request_only_models = %d, want 1", payload.Summary.RequestOnlyModels)
 	}
 }
 
 func TestPricingStub(t *testing.T) {
-	s, database := newTestServer(t, "/metering")
-	s.pricing.Models["gpt-4o"] = pricing.ModelPrice{InputPer1M: 2.5, OutputPer1M: 10.0}
+	s, database, prices := newTestServerWithPricing(t, "/metering")
+	prices.Models["gpt-4o"] = pricing.ModelPrice{InputPer1M: 2.5, OutputPer1M: 10.0}
 	now := time.Now().UTC().Truncate(time.Second)
 
 	records := []db.UsageRecord{
@@ -1617,7 +1643,6 @@ func TestNewRequiresCoreReporter(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() { database.Close() })
-	pricingData := pricing.NewPricing()
 	bw := writer.New(store.NewEventSink(database), 100, 10, time.Nanosecond)
 	bw.Start()
 	t.Cleanup(func() { bw.Stop() })
@@ -1628,7 +1653,7 @@ func TestNewRequiresCoreReporter(t *testing.T) {
 			t.Fatal("expected panic when core reporter is nil")
 		}
 	}()
-	_ = New(database, nil, pricingData, bw, registry, "/metering")
+	_ = New(database, nil, bw, registry, "/metering")
 }
 
 func TestCoreReporterIsExplicitlyInjected(t *testing.T) {
@@ -1638,7 +1663,6 @@ func TestCoreReporterIsExplicitlyInjected(t *testing.T) {
 	}
 	t.Cleanup(func() { database.Close() })
 	// DB intentionally empty; response must come from injected reporter only.
-	pricingData := pricing.NewPricing()
 	bw := writer.New(store.NewEventSink(database), 100, 10, time.Nanosecond)
 	bw.Start()
 	t.Cleanup(func() { bw.Stop() })
@@ -1658,8 +1682,12 @@ func TestCoreReporterIsExplicitlyInjected(t *testing.T) {
 			Range:    "from-overview-reporter",
 			Selected: report.OverviewSelectedSection{Data: report.OverviewSelectedData{TotalRequests: 23}},
 		},
+		modelAssetsOut: report.ModelAssetsReport{
+			Range: "from-model-assets-reporter",
+			Items: []report.ModelAssetItem{{Model: "asset-from-reporter", RequestCount: 29}},
+		},
 	}
-	s := New(database, stub, pricingData, bw, registry, "/metering")
+	s := New(database, stub, bw, registry, "/metering")
 
 	req := httptest.NewRequest("GET", "/metering/api/models?range=24h", nil)
 	rec := httptest.NewRecorder()
@@ -1717,11 +1745,19 @@ func TestCoreReporterIsExplicitlyInjected(t *testing.T) {
 	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &overview) != nil || overview.Range != "from-overview-reporter" || overview.Selected.Data.TotalRequests != 23 || stub.overviewCalls != 1 || stub.overviewFilter.Range != "7d" {
 		t.Fatalf("overview status=%d payload=%+v calls=%d filter=%+v", rec.Code, overview, stub.overviewCalls, stub.overviewFilter)
 	}
+
+	req = httptest.NewRequest("GET", "/metering/api/model-assets?range=7d", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	var assets report.ModelAssetsReport
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &assets) != nil || assets.Range != "from-model-assets-reporter" || len(assets.Items) != 1 || assets.Items[0].RequestCount != 29 || stub.modelAssetsCalls != 1 || stub.modelAssetsFilter.Range != "7d" {
+		t.Fatalf("model assets status=%d payload=%+v calls=%d filter=%+v", rec.Code, assets, stub.modelAssetsCalls, stub.modelAssetsFilter)
+	}
 }
 
 func TestAPIModelsUsesReportBoundaryAndSourceCounts(t *testing.T) {
-	s, database := newTestServer(t, "/metering")
-	s.pricing.Models["gpt-4o"] = pricing.ModelPrice{
+	s, database, prices := newTestServerWithPricing(t, "/metering")
+	prices.Models["gpt-4o"] = pricing.ModelPrice{
 		InputPer1M:  1.00,
 		OutputPer1M: 2.00,
 	}
@@ -1852,7 +1888,6 @@ func TestAPIModelsReporterErrorIsNonSuccessWithoutBodyContract(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() { database.Close() })
-	pricingData := pricing.NewPricing()
 	bw := writer.New(store.NewEventSink(database), 100, 10, time.Nanosecond)
 	bw.Start()
 	t.Cleanup(func() { bw.Stop() })
@@ -1861,7 +1896,7 @@ func TestAPIModelsReporterErrorIsNonSuccessWithoutBodyContract(t *testing.T) {
 	// Force a reporter failure. Do not assert raw internal error text; that is
 	// not part of the public API contract for this slice.
 	stub := &stubModelsReporter{err: errors.New("internal boom must not become a contract")}
-	s := New(database, stub, pricingData, bw, registry, "/metering")
+	s := New(database, stub, bw, registry, "/metering")
 
 	req := httptest.NewRequest("GET", "/metering/api/models?range=24h", nil)
 	rec := httptest.NewRecorder()
