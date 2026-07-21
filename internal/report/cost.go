@@ -68,12 +68,20 @@ type CostGroup struct {
 	Model   string
 }
 
+type costGrouping uint8
+
+const (
+	costGroupByBucket costGrouping = 1 << iota
+	costGroupByKey
+	costGroupByModel
+)
+
 type costAccumulator struct {
 	amount                 float64
 	priceKnown             bool
-	textPriceMatched       bool
-	imageExpectedTextUsage int64
-	imageTextUsage         int64
+	textPricedModels       map[string]struct{}
+	imageExpectedTextUsage map[string]int64
+	imageTextUsage         map[string]int64
 	unpricedModels         map[string]struct{}
 	reasons                map[PartialReason]struct{}
 	confidence             UsageConfidenceCounts
@@ -81,13 +89,16 @@ type costAccumulator struct {
 
 func newCostAccumulator() *costAccumulator {
 	return &costAccumulator{
-		priceKnown:     true,
-		unpricedModels: make(map[string]struct{}),
-		reasons:        make(map[PartialReason]struct{}),
+		priceKnown:             true,
+		textPricedModels:       make(map[string]struct{}),
+		imageExpectedTextUsage: make(map[string]int64),
+		imageTextUsage:         make(map[string]int64),
+		unpricedModels:         make(map[string]struct{}),
+		reasons:                make(map[PartialReason]struct{}),
 	}
 }
 
-func evaluateCostBuckets(engine CostEngine, textRows []db.TextCostBucketRow, imageRows []db.ImageCostBucketRow) map[CostGroup]CostResult {
+func evaluateCostBuckets(engine CostEngine, textRows []db.TextCostBucketRow, imageRows []db.ImageCostBucketRow, grouping costGrouping) map[CostGroup]CostResult {
 	accumulators := make(map[CostGroup]*costAccumulator)
 	get := func(group CostGroup) *costAccumulator {
 		acc := accumulators[group]
@@ -99,12 +110,12 @@ func evaluateCostBuckets(engine CostEngine, textRows []db.TextCostBucketRow, ima
 	}
 
 	for _, row := range textRows {
-		group := CostGroup{Bucket: row.Bucket, KeyHash: row.KeyHash, Model: row.Model}
+		group := makeCostGroup(grouping, row.Bucket, row.KeyHash, row.Model)
 		acc := get(group)
 		acc.addConfidence(row.ObservedCount, row.SideChannelCount, row.RequestOnlyCount, row.MissingUsageCount, row.UnsupportedCount, row.ConflictCount)
 		if row.ImageRequest {
-			acc.imageExpectedTextUsage += row.ObservedCount + row.SideChannelCount
-			acc.imageTextUsage += row.BillableUsageCount
+			acc.imageExpectedTextUsage[row.Model] += row.ObservedCount + row.SideChannelCount
+			acc.imageTextUsage[row.Model] += row.BillableUsageCount
 		}
 
 		// A matched multimodal image request is billed only from its image
@@ -122,7 +133,7 @@ func evaluateCostBuckets(engine CostEngine, textRows []db.TextCostBucketRow, ima
 			RequestInputTokens:  row.RequestInputTokens,
 		})
 		if known {
-			acc.textPriceMatched = true
+			acc.textPricedModels[row.Model] = struct{}{}
 			acc.amount += cost
 		} else if textBucketBillable(row) {
 			acc.markUnpriced(row.Model)
@@ -130,7 +141,7 @@ func evaluateCostBuckets(engine CostEngine, textRows []db.TextCostBucketRow, ima
 	}
 
 	for _, row := range imageRows {
-		group := CostGroup{Bucket: row.Bucket, KeyHash: row.KeyHash, Model: row.Model}
+		group := makeCostGroup(grouping, row.Bucket, row.KeyHash, row.Model)
 		acc := get(group)
 
 		if row.MissingOutputCount > 0 {
@@ -141,10 +152,11 @@ func evaluateCostBuckets(engine CostEngine, textRows []db.TextCostBucketRow, ima
 			// Text pricing remains a valid fallback for image-producing requests
 			// whose model has no multimodal entry (for example blended-token
 			// models). Counts are metadata unless per-image pricing is enabled.
-			if imageBucketBillable(row) && !acc.textPriceMatched {
+			_, textPriced := acc.textPricedModels[row.Model]
+			if imageBucketBillable(row) && !textPriced {
 				acc.markUnpriced(row.Model)
 			}
-			if acc.imageTextUsage < acc.imageExpectedTextUsage {
+			if acc.imageTextUsage[row.Model] < acc.imageExpectedTextUsage[row.Model] {
 				acc.addReason(PartialReasonMissingUsage)
 			}
 			continue
@@ -187,6 +199,20 @@ func evaluateCostBuckets(engine CostEngine, textRows []db.TextCostBucketRow, ima
 		results[group] = acc.result()
 	}
 	return results
+}
+
+func makeCostGroup(grouping costGrouping, bucket, keyHash, model string) CostGroup {
+	var group CostGroup
+	if grouping&costGroupByBucket != 0 {
+		group.Bucket = bucket
+	}
+	if grouping&costGroupByKey != 0 {
+		group.KeyHash = keyHash
+	}
+	if grouping&costGroupByModel != 0 {
+		group.Model = model
+	}
+	return group
 }
 
 func (a *costAccumulator) addConfidence(observed, sideChannel, requestOnly, missing, unsupported, conflict int64) {

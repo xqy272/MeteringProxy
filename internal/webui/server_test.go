@@ -35,18 +35,26 @@ func newTestServer(t *testing.T, basePath string) (*Server, *db.DB) {
 	t.Cleanup(func() { bw.Stop() })
 
 	registry := profile.NewRegistry()
-	modelsReporter := report.NewService(database, pricingData)
+	modelsReporter := report.NewService(report.Dependencies{Models: database, Summary: database, Timeseries: database}, pricingData)
 
 	s := New(database, modelsReporter, pricingData, bw, registry, basePath)
 	return s, database
 }
 
 type stubModelsReporter struct {
-	calls  int
-	filter report.ModelsFilter
-	ctxErr error
-	out    []report.ModelReport
-	err    error
+	calls            int
+	filter           report.ModelsFilter
+	ctxErr           error
+	out              []report.ModelReport
+	err              error
+	summaryOut       report.SummaryReport
+	summaryErr       error
+	summaryCalls     int
+	summaryFilter    report.SummaryFilter
+	timeseriesOut    []report.TimeseriesReport
+	timeseriesErr    error
+	timeseriesCalls  int
+	timeseriesFilter report.TimeseriesFilter
 }
 
 func (s *stubModelsReporter) Models(ctx context.Context, filter report.ModelsFilter) ([]report.ModelReport, error) {
@@ -57,6 +65,18 @@ func (s *stubModelsReporter) Models(ctx context.Context, filter report.ModelsFil
 		return nil, s.err
 	}
 	return s.out, nil
+}
+
+func (s *stubModelsReporter) Summary(ctx context.Context, filter report.SummaryFilter) (report.SummaryReport, error) {
+	s.summaryCalls++
+	s.summaryFilter = filter
+	return s.summaryOut, s.summaryErr
+}
+
+func (s *stubModelsReporter) Timeseries(ctx context.Context, filter report.TimeseriesFilter) ([]report.TimeseriesReport, error) {
+	s.timeseriesCalls++
+	s.timeseriesFilter = filter
+	return s.timeseriesOut, s.timeseriesErr
 }
 
 func TestNewDoesNotPanic(t *testing.T) {
@@ -89,7 +109,7 @@ func TestNewWithStaticFS_ServesIndexFromInjectedFS(t *testing.T) {
 		},
 	}
 
-	s := NewWithStaticFS(database, report.NewService(database, pricingData), pricingData, bw, registry, "/metering", staticFS)
+	s := NewWithStaticFS(database, report.NewService(report.Dependencies{Models: database, Summary: database, Timeseries: database}, pricingData), pricingData, bw, registry, "/metering", staticFS)
 
 	// Index: placeholder injection.
 	req := httptest.NewRequest("GET", "/metering", nil)
@@ -171,6 +191,12 @@ func TestAPISummary(t *testing.T) {
 	var data map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &data); err != nil {
 		t.Errorf("invalid JSON: %v", err)
+	}
+	if data["cost_state"] != "complete" || data["cost_known"] != true {
+		t.Fatalf("empty summary cost contract = %+v", data)
+	}
+	if reasons, ok := data["partial_reasons"].([]any); !ok || len(reasons) != 0 {
+		t.Fatalf("empty summary partial_reasons = %#v", data["partial_reasons"])
 	}
 }
 
@@ -336,7 +362,7 @@ func TestAPIImagesSummary(t *testing.T) {
 	if summaryRec.Code != 200 {
 		t.Fatalf("GET /metering/api/summary: status %d, want 200; body=%s", summaryRec.Code, summaryRec.Body.String())
 	}
-	var summary event.SummaryReport
+	var summary report.SummaryReport
 	if err := json.Unmarshal(summaryRec.Body.Bytes(), &summary); err != nil {
 		t.Fatalf("unmarshal summary: %v", err)
 	}
@@ -1551,7 +1577,7 @@ func TestPricingStub(t *testing.T) {
 	}
 }
 
-func TestNewRequiresModelsReporter(t *testing.T) {
+func TestNewRequiresCoreReporter(t *testing.T) {
 	database, err := db.Open(t.TempDir() + "/test.sqlite")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -1565,13 +1591,13 @@ func TestNewRequiresModelsReporter(t *testing.T) {
 
 	defer func() {
 		if recover() == nil {
-			t.Fatal("expected panic when models reporter is nil")
+			t.Fatal("expected panic when core reporter is nil")
 		}
 	}()
 	_ = New(database, nil, pricingData, bw, registry, "/metering")
 }
 
-func TestModelsReporterIsExplicitlyInjected(t *testing.T) {
+func TestCoreReporterIsExplicitlyInjected(t *testing.T) {
 	database, err := db.Open(t.TempDir() + "/test.sqlite")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -1590,6 +1616,8 @@ func TestModelsReporterIsExplicitlyInjected(t *testing.T) {
 			RequestCount: 7,
 			CostKnown:    true,
 		}},
+		summaryOut:    report.SummaryReport{TotalRequests: 11, CostKnown: true, CostState: report.CostStateComplete},
+		timeseriesOut: []report.TimeseriesReport{{Timestamp: "from-injected-reporter", Count: 13, CostKnown: true}},
 	}
 	s := New(database, stub, pricingData, bw, registry, "/metering")
 
@@ -1608,6 +1636,22 @@ func TestModelsReporterIsExplicitlyInjected(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].Model != "from-injected-reporter" || rows[0].RequestCount != 7 {
 		t.Fatalf("rows = %+v, want injected reporter payload", rows)
+	}
+
+	req = httptest.NewRequest("GET", "/metering/api/summary?range=24h", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	var summary report.SummaryReport
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &summary) != nil || summary.TotalRequests != 11 || stub.summaryCalls != 1 {
+		t.Fatalf("summary status=%d payload=%+v calls=%d", rec.Code, summary, stub.summaryCalls)
+	}
+
+	req = httptest.NewRequest("GET", "/metering/api/timeseries?range=24h&bucket=1d", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	var series []report.TimeseriesReport
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &series) != nil || len(series) != 1 || series[0].Count != 13 || stub.timeseriesCalls != 1 || stub.timeseriesFilter.BucketMin != 1440 {
+		t.Fatalf("timeseries status=%d payload=%+v calls=%d filter=%+v", rec.Code, series, stub.timeseriesCalls, stub.timeseriesFilter)
 	}
 }
 

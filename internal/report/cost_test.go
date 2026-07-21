@@ -37,7 +37,7 @@ multimodal_pricing:
 		OutputImageCount: 1, InputTextTokens: 100, InputImageTokens: 200, OutputImageTokens: 300,
 	}}
 
-	results := evaluateCostBuckets(prices, textRows, imageRows)
+	results := evaluateCostBuckets(prices, textRows, imageRows, costGroupByModel)
 	tiered := results[CostGroup{Model: "tiered"}]
 	wantTiered := 300000/1_000_000.0*2 + 200/1_000_000.0*10 + 200000/1_000_000.0*4 + 100/1_000_000.0*20
 	assertCostNear(t, tiered.Amount, wantTiered)
@@ -78,7 +78,7 @@ multimodal_pricing:
 		RequestCount: 4, InputImageCount: 2, OutputImageCount: 1, MissingOutputCount: 1,
 	}}
 
-	result := evaluateCostBuckets(prices, textRows, imageRows)[CostGroup{Model: "per-image"}]
+	result := evaluateCostBuckets(prices, textRows, imageRows, costGroupByModel)[CostGroup{Model: "per-image"}]
 	assertCostNear(t, result.Amount, 0.07)
 	if !result.CostKnown || result.State != CostStatePartial {
 		t.Fatalf("result = %+v", result)
@@ -120,7 +120,7 @@ multimodal_pricing:
 	imageRows := []db.ImageCostBucketRow{{
 		Model: "partial-image", Size: "1K", InputImageCount: 2, OutputImageCount: 1,
 	}}
-	results := evaluateCostBuckets(prices, textRows, imageRows)
+	results := evaluateCostBuckets(prices, textRows, imageRows, costGroupByModel)
 
 	known := results[CostGroup{Model: "known"}]
 	assertCostNear(t, known.Amount, 0.001)
@@ -138,6 +138,12 @@ multimodal_pricing:
 	if partialImage.CostKnown || partialImage.State != CostStatePartial || partialImage.UnpricedModels != 1 {
 		t.Fatalf("partial image = %+v", partialImage)
 	}
+
+	global := evaluateCostBuckets(prices, textRows, imageRows, 0)[CostGroup{}]
+	assertCostNear(t, global.Amount, 0.021)
+	if global.CostKnown || global.UnpricedModels != 2 || global.State != CostStatePartial {
+		t.Fatalf("global result = %+v", global)
+	}
 }
 
 func TestEvaluateCostBucketsTokenPricedImageWithoutDimensionsIsPartial(t *testing.T) {
@@ -151,6 +157,7 @@ multimodal_pricing:
 	results := evaluateCostBuckets(prices,
 		[]db.TextCostBucketRow{{Model: "token-image", ImageRequest: true, RequestCount: 1, ObservedCount: 1}},
 		[]db.ImageCostBucketRow{{Model: "token-image", RequestCount: 1, OutputImageCount: 1, ObservedCount: 1}},
+		costGroupByModel,
 	)
 	result := results[CostGroup{Model: "token-image"}]
 	if !result.CostKnown || result.State != CostStatePartial || len(result.PartialReasons) != 1 || result.PartialReasons[0] != PartialReasonMissingUsage {
@@ -172,6 +179,7 @@ pricing:
 			ObservedCount: 2,
 		}},
 		[]db.ImageCostBucketRow{{Model: "blended-image", RequestCount: 2, OutputImageCount: 2}},
+		costGroupByModel,
 	)
 	result := results[CostGroup{Model: "blended-image"}]
 	want := 100/1_000_000.0 + 50/1_000_000.0*3

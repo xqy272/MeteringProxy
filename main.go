@@ -237,7 +237,9 @@ func main() {
 	mux.Handle("/metrics", metrics.Handler())
 
 	if cfg.WebUI.Enabled {
-		modelsReporter := report.NewService(database, pricingData)
+		modelsReporter := report.NewService(report.Dependencies{
+			Models: database, Summary: database, Timeseries: database,
+		}, pricingData)
 		var webuiServer *webui.Server
 		if *devStatic {
 			webuiServer = webui.NewWithStaticFS(reportStore, modelsReporter, pricingData, batchWriter, proxyHandler.Registry(), cfg.WebUI.BasePath, os.DirFS("internal/webui/static"))

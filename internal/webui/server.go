@@ -25,7 +25,7 @@ var staticFiles embed.FS
 
 type Server struct {
 	db        store.ReportStore
-	models    report.ModelsReporter
+	reports   report.CoreReporter
 	pricing   *pricing.Pricing
 	writer    *writer.BatchWriter
 	registry  *profile.Registry
@@ -54,28 +54,28 @@ type Server struct {
 
 // New creates a Server that serves static files from the embedded filesystem.
 // models is required and must be wired by the composition root.
-func New(database store.ReportStore, models report.ModelsReporter, pricingData *pricing.Pricing, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string) *Server {
+func New(database store.ReportStore, reports report.CoreReporter, pricingData *pricing.Pricing, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string) *Server {
 	staticFS, _ := fs.Sub(staticFiles, "static")
-	return newServer(database, models, pricingData, batchWriter, registry, basePath, staticFS)
+	return newServer(database, reports, pricingData, batchWriter, registry, basePath, staticFS)
 }
 
 // NewWithStaticFS creates a Server that serves static files from the given
 // filesystem. Use this for local development (os.DirFS on the static/ directory)
 // or testing with custom asset sets.
-func NewWithStaticFS(database store.ReportStore, models report.ModelsReporter, pricingData *pricing.Pricing, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string, staticFS fs.FS) *Server {
-	return newServer(database, models, pricingData, batchWriter, registry, basePath, staticFS)
+func NewWithStaticFS(database store.ReportStore, reports report.CoreReporter, pricingData *pricing.Pricing, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string, staticFS fs.FS) *Server {
+	return newServer(database, reports, pricingData, batchWriter, registry, basePath, staticFS)
 }
 
-func newServer(database store.ReportStore, models report.ModelsReporter, pricingData *pricing.Pricing, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string, staticFS fs.FS) *Server {
-	if models == nil {
-		panic("webui: models reporter is required")
+func newServer(database store.ReportStore, reports report.CoreReporter, pricingData *pricing.Pricing, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string, staticFS fs.FS) *Server {
+	if reports == nil {
+		panic("webui: core reporter is required")
 	}
 	basePath = strings.TrimRight(basePath, "/")
 	apiPrefix := basePath + "/api/"
 
 	s := &Server{
 		db:              database,
-		models:          models,
+		reports:         reports,
 		pricing:         pricingData,
 		writer:          batchWriter,
 		registry:        registry,
@@ -259,34 +259,12 @@ func setNoStore(w http.ResponseWriter) {
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	since, _ := parseRange(r)
-	row, err := s.db.Summary(since)
+	result, err := s.reports.Summary(r.Context(), report.SummaryFilter{Since: since})
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	models, _ := s.db.Models(since)
-	var totalCost float64
-	imageModels, _ := s.db.ImageModels(since)
-	imageModelSet := map[string]struct{}{}
-	for _, row := range imageModels {
-		if row.Model != "" {
-			imageModelSet[row.Model] = struct{}{}
-		}
-	}
-	for _, m := range models {
-		cost, _ := s.pricing.CostWithCacheCreation(m.Model, m.InputTokens, m.OutputTokens, m.ReasoningTokens, m.CachedTokens, m.CacheCreationTokens)
-		if cost == 0 {
-			if _, handledAsImage := imageModelSet[m.Model]; handledAsImage {
-				continue
-			}
-		}
-		totalCost += cost
-	}
-	imageCost, _, _ := s.imageModelsCost(imageModels)
-	totalCost += imageCost
-	report := event.SummaryFromDB(row)
-	report.TotalCost = totalCost
-	writeJSON(w, report)
+	writeJSON(w, result)
 }
 
 func (s *Server) handleTimeseries(w http.ResponseWriter, r *http.Request) {
@@ -299,46 +277,15 @@ func (s *Server) handleTimeseries(w http.ResponseWriter, r *http.Request) {
 	case "1d":
 		bucketMin = 1440
 	}
-	rows, err := s.db.Timeseries(since, bucketMin)
+	rows, err := s.reports.Timeseries(r.Context(), report.TimeseriesFilter{Since: since, BucketMin: bucketMin})
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	report := event.TimeseriesFromDB(rows)
-	if report == nil {
-		report = []event.TimeseriesReport{}
+	if rows == nil {
+		rows = []report.TimeseriesReport{}
 	}
-	modelRows, err := s.db.ModelTimeseries(since, bucketMin)
-	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
-	type bucketCost struct {
-		cost           float64
-		unpricedModels int64
-	}
-	costs := make(map[string]*bucketCost)
-	for _, row := range modelRows {
-		acc := costs[row.Timestamp]
-		if acc == nil {
-			acc = &bucketCost{}
-			costs[row.Timestamp] = acc
-		}
-		cost, known := s.pricing.CostWithCacheCreation(row.Model, row.InputTokens, row.OutputTokens, row.ReasoningTokens, row.CachedTokens, row.CacheCreationTokens)
-		if known {
-			acc.cost += cost
-		} else {
-			acc.unpricedModels++
-		}
-	}
-	for i := range report {
-		if acc := costs[report[i].Timestamp]; acc != nil {
-			report[i].Cost = acc.cost
-			report[i].CostKnown = acc.unpricedModels == 0
-			report[i].UnpricedModels = acc.unpricedModels
-		}
-	}
-	writeJSON(w, report)
+	writeJSON(w, rows)
 }
 
 func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
@@ -353,7 +300,7 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	since, _ := parseRange(r)
-	models, err := s.models.Models(r.Context(), report.ModelsFilter{Since: since})
+	models, err := s.reports.Models(r.Context(), report.ModelsFilter{Since: since})
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return

@@ -3,17 +3,6 @@ package event
 // Report types are used by the query/reporting layer. They are independent of
 // the database schema and provide stable types for WebUI API responses.
 
-type SummaryReport struct {
-	TotalRequests        int64   `json:"total_requests"`
-	FailedRequests       int64   `json:"failed_requests"`
-	TotalInputTokens     int64   `json:"total_input_tokens"`
-	TotalOutputTokens    int64   `json:"total_output_tokens"`
-	TotalReasoningTokens int64   `json:"total_reasoning_tokens"`
-	TotalCachedTokens    int64   `json:"total_cached_tokens"`
-	TotalTokens          int64   `json:"total_tokens"`
-	TotalCost            float64 `json:"total_cost"`
-}
-
 type KeyReport struct {
 	KeyHash      string `json:"key_hash"`
 	RequestCount int64  `json:"request_count"`
@@ -21,23 +10,6 @@ type KeyReport struct {
 	InputTokens  int64  `json:"input_tokens"`
 	OutputTokens int64  `json:"output_tokens"`
 	TotalTokens  int64  `json:"total_tokens"`
-}
-
-type TimeseriesReport struct {
-	Timestamp           string  `json:"timestamp"`
-	Count               int64   `json:"count"`
-	FailedCount         int64   `json:"failed_count"`
-	InputTokens         int64   `json:"input_tokens"`
-	OutputTokens        int64   `json:"output_tokens"`
-	ReasoningTokens     int64   `json:"reasoning_tokens"`
-	CachedTokens        int64   `json:"cached_tokens"`
-	CacheCreationTokens int64   `json:"cache_creation_tokens"`
-	TotalTokens         int64   `json:"total_tokens"`
-	AvgLatencyMs        int64   `json:"avg_latency_ms"`
-	AvgTTFBMs           int64   `json:"avg_ttfb_ms"`
-	Cost                float64 `json:"cost"`
-	CostKnown           bool    `json:"cost_known"`
-	UnpricedModels      int64   `json:"unpriced_models"`
 }
 
 type ActivityReport struct {

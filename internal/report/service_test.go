@@ -11,11 +11,16 @@ import (
 )
 
 type stubModelsReader struct {
-	snapshot  *db.ModelsReportData
-	err       error
-	calls     int
-	lastSince time.Time
-	lastDone  bool
+	snapshot           *db.ModelsReportData
+	err                error
+	summarySnapshot    *db.SummaryReportData
+	summaryErr         error
+	timeseriesSnapshot *db.TimeseriesReportData
+	timeseriesErr      error
+	lastBucketMin      int
+	calls              int
+	lastSince          time.Time
+	lastDone           bool
 }
 
 func (s *stubModelsReader) ModelsReportSnapshot(ctx context.Context, since time.Time) (*db.ModelsReportData, error) {
@@ -29,6 +34,31 @@ func (s *stubModelsReader) ModelsReportSnapshot(ctx context.Context, since time.
 		return &db.ModelsReportData{}, nil
 	}
 	return s.snapshot, nil
+}
+
+func (s *stubModelsReader) SummaryReportSnapshot(ctx context.Context, since time.Time) (*db.SummaryReportData, error) {
+	if s.summaryErr != nil {
+		return nil, s.summaryErr
+	}
+	if s.summarySnapshot == nil {
+		return &db.SummaryReportData{}, nil
+	}
+	return s.summarySnapshot, nil
+}
+
+func (s *stubModelsReader) TimeseriesReportSnapshot(ctx context.Context, since time.Time, bucketMin int) (*db.TimeseriesReportData, error) {
+	s.lastBucketMin = bucketMin
+	if s.timeseriesErr != nil {
+		return nil, s.timeseriesErr
+	}
+	if s.timeseriesSnapshot == nil {
+		return &db.TimeseriesReportData{}, nil
+	}
+	return s.timeseriesSnapshot, nil
+}
+
+func testDependencies(reader *stubModelsReader) Dependencies {
+	return Dependencies{Models: reader, Summary: reader, Timeseries: reader}
 }
 
 type stubCostEngine struct {
@@ -90,7 +120,7 @@ func TestModelsMapsAndMergesSources(t *testing.T) {
 		},
 	}
 	cost := &stubCostEngine{cost: 1.25, known: true}
-	svc := NewService(reader, cost)
+	svc := NewService(testDependencies(reader), cost)
 
 	since := time.Now().Add(-time.Hour)
 	got, err := svc.Models(context.Background(), ModelsFilter{Since: since})
@@ -139,7 +169,7 @@ func TestModelsCostKnownForZeroTokenUnpriced(t *testing.T) {
 		}}},
 	}
 	cost := &stubCostEngine{cost: 0, known: false}
-	svc := NewService(reader, cost)
+	svc := NewService(testDependencies(reader), cost)
 
 	got, err := svc.Models(context.Background(), ModelsFilter{Since: time.Now().Add(-time.Hour)})
 	if err != nil {
@@ -153,7 +183,7 @@ func TestModelsCostKnownForZeroTokenUnpriced(t *testing.T) {
 func TestModelsSnapshotErrorIsAtomic(t *testing.T) {
 	want := errors.New("snapshot query failed")
 	reader := &stubModelsReader{err: want}
-	svc := NewService(reader, &stubCostEngine{})
+	svc := NewService(testDependencies(reader), &stubCostEngine{})
 
 	got, err := svc.Models(context.Background(), ModelsFilter{Since: time.Now()})
 	if !errors.Is(err, want) {
@@ -169,7 +199,7 @@ func TestModelsSnapshotErrorIsAtomic(t *testing.T) {
 
 func TestModelsEmptyResult(t *testing.T) {
 	reader := &stubModelsReader{}
-	svc := NewService(reader, &stubCostEngine{})
+	svc := NewService(testDependencies(reader), &stubCostEngine{})
 	got, err := svc.Models(context.Background(), ModelsFilter{Since: time.Now()})
 	if err != nil {
 		t.Fatalf("Models: %v", err)
@@ -183,7 +213,7 @@ func TestModelsUsesRequestContext(t *testing.T) {
 	reader := &stubModelsReader{
 		snapshot: &db.ModelsReportData{Models: []db.ModelRow{{Model: "gpt-4o"}}},
 	}
-	svc := NewService(reader, &stubCostEngine{known: true})
+	svc := NewService(testDependencies(reader), &stubCostEngine{known: true})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err := svc.Models(ctx, ModelsFilter{Since: time.Now()})
@@ -201,5 +231,5 @@ func TestNewServiceRequiresDependencies(t *testing.T) {
 			t.Fatal("expected panic for nil ModelsReader")
 		}
 	}()
-	_ = NewService(nil, &stubCostEngine{})
+	_ = NewService(Dependencies{}, &stubCostEngine{})
 }

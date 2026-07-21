@@ -2,6 +2,34 @@ package report
 
 import "ai-gateway-metering-proxy/internal/db"
 
+func summaryReportFromRow(row db.SummaryRow) SummaryReport {
+	return SummaryReport{
+		TotalRequests:        row.TotalRequests,
+		FailedRequests:       row.FailedRequests,
+		TotalInputTokens:     row.TotalInputTokens,
+		TotalOutputTokens:    row.TotalOutputTokens,
+		TotalReasoningTokens: row.TotalReasoningTokens,
+		TotalCachedTokens:    row.TotalCachedTokens,
+		TotalTokens:          row.TotalTokens,
+	}
+}
+
+func timeseriesReportFromRow(row db.TimeseriesRow) TimeseriesReport {
+	return TimeseriesReport{
+		Timestamp:           row.Timestamp,
+		Count:               row.Count,
+		FailedCount:         row.FailedCount,
+		InputTokens:         row.InputTokens,
+		OutputTokens:        row.OutputTokens,
+		ReasoningTokens:     row.ReasoningTokens,
+		CachedTokens:        row.CachedTokens,
+		CacheCreationTokens: row.CacheCreationTokens,
+		TotalTokens:         row.TotalTokens,
+		AvgLatencyMs:        row.AvgLatencyMs,
+		AvgTTFBMs:           row.AvgTTFBMs,
+	}
+}
+
 func modelReportFromRow(row db.ModelRow) ModelReport {
 	return ModelReport{
 		Model:               row.Model,

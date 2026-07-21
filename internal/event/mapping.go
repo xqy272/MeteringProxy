@@ -110,23 +110,6 @@ func valueOrDefault(value, fallback string) string {
 	return fallback
 }
 
-// SummaryFromDB converts a db.SummaryRow to a domain SummaryReport.
-func SummaryFromDB(row *db.SummaryRow) SummaryReport {
-	if row == nil {
-		return SummaryReport{}
-	}
-	return SummaryReport{
-		TotalRequests:        row.TotalRequests,
-		FailedRequests:       row.FailedRequests,
-		TotalInputTokens:     row.TotalInputTokens,
-		TotalOutputTokens:    row.TotalOutputTokens,
-		TotalReasoningTokens: row.TotalReasoningTokens,
-		TotalCachedTokens:    row.TotalCachedTokens,
-		TotalTokens:          row.TotalTokens,
-		TotalCost:            row.TotalCost,
-	}
-}
-
 // KeysFromDB converts db.KeyRow slice to domain KeyReport slice.
 func KeysFromDB(rows []db.KeyRow) []KeyReport {
 	result := make([]KeyReport, len(rows))
@@ -138,27 +121,6 @@ func KeysFromDB(rows []db.KeyRow) []KeyReport {
 			InputTokens:  r.InputTokens,
 			OutputTokens: r.OutputTokens,
 			TotalTokens:  r.TotalTokens,
-		}
-	}
-	return result
-}
-
-// TimeseriesFromDB converts db.TimeseriesRow slice to domain TimeseriesReport slice.
-func TimeseriesFromDB(rows []db.TimeseriesRow) []TimeseriesReport {
-	result := make([]TimeseriesReport, len(rows))
-	for i, r := range rows {
-		result[i] = TimeseriesReport{
-			Timestamp:           r.Timestamp,
-			Count:               r.Count,
-			FailedCount:         r.FailedCount,
-			InputTokens:         r.InputTokens,
-			OutputTokens:        r.OutputTokens,
-			ReasoningTokens:     r.ReasoningTokens,
-			CachedTokens:        r.CachedTokens,
-			CacheCreationTokens: r.CacheCreationTokens,
-			TotalTokens:         r.TotalTokens,
-			AvgLatencyMs:        r.AvgLatencyMs,
-			AvgTTFBMs:           r.AvgTTFBMs,
 		}
 	}
 	return result

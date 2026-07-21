@@ -16,13 +16,43 @@ type ModelsReader interface {
 	ModelsReportSnapshot(ctx context.Context, since time.Time) (*db.ModelsReportData, error)
 }
 
+type SummaryReader interface {
+	SummaryReportSnapshot(ctx context.Context, since time.Time) (*db.SummaryReportData, error)
+}
+
+type TimeseriesReader interface {
+	TimeseriesReportSnapshot(ctx context.Context, since time.Time, bucketMin int) (*db.TimeseriesReportData, error)
+}
+
+// Dependencies keeps each read capability narrow while giving the composition
+// root one explicit, compile-time checked wiring object.
+type Dependencies struct {
+	Models     ModelsReader
+	Summary    SummaryReader
+	Timeseries TimeseriesReader
+}
+
 // ModelsReporter is the WebUI-facing /api/models boundary.
 // Composition roots inject a concrete implementation (typically *Service).
 type ModelsReporter interface {
 	Models(ctx context.Context, filter ModelsFilter) ([]ModelReport, error)
 }
 
-// CostEngine is the pricing surface required by the models report.
+type SummaryReporter interface {
+	Summary(ctx context.Context, filter SummaryFilter) (SummaryReport, error)
+}
+
+type TimeseriesReporter interface {
+	Timeseries(ctx context.Context, filter TimeseriesFilter) ([]TimeseriesReport, error)
+}
+
+type CoreReporter interface {
+	ModelsReporter
+	SummaryReporter
+	TimeseriesReporter
+}
+
+// CostEngine is the pricing surface required by core cost reports.
 type CostEngine interface {
 	CostText(model string, usage pricing.TextTokenUsage) (float64, bool)
 	CostDimension(model, modality, channel, metric, direction, unit string, amount float64) (float64, bool)

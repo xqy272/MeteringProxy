@@ -6,21 +6,29 @@ import (
 )
 
 // Service orchestrates read-side report assembly for WebUI handlers.
-// It implements ModelsReporter.
+// It implements the core usage/cost reporter interfaces.
 type Service struct {
-	models ModelsReader
-	cost   CostEngine
+	models     ModelsReader
+	summary    SummaryReader
+	timeseries TimeseriesReader
+	cost       CostEngine
 }
 
 // NewService constructs a report service from narrow reader/pricing interfaces.
-func NewService(models ModelsReader, cost CostEngine) *Service {
-	if models == nil {
+func NewService(deps Dependencies, cost CostEngine) *Service {
+	if deps.Models == nil {
 		panic("report: ModelsReader is required")
+	}
+	if deps.Summary == nil {
+		panic("report: SummaryReader is required")
+	}
+	if deps.Timeseries == nil {
+		panic("report: TimeseriesReader is required")
 	}
 	if cost == nil {
 		panic("report: CostEngine is required")
 	}
-	return &Service{models: models, cost: cost}
+	return &Service{models: deps.Models, summary: deps.Summary, timeseries: deps.Timeseries, cost: cost}
 }
 
 // Models builds the /api/models report from one consistent DB snapshot, then
@@ -36,7 +44,7 @@ func (s *Service) Models(ctx context.Context, filter ModelsFilter) ([]ModelRepor
 	if err != nil {
 		return nil, err
 	}
-	costs := evaluateCostBuckets(s.cost, snapshot.TextCostBuckets, snapshot.ImageCostBuckets)
+	costs := evaluateCostBuckets(s.cost, snapshot.TextCostBuckets, snapshot.ImageCostBuckets, costGroupByModel)
 
 	out := make([]ModelReport, 0, len(snapshot.Models))
 	for _, row := range snapshot.Models {

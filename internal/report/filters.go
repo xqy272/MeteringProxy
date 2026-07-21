@@ -7,3 +7,12 @@ import "time"
 type ModelsFilter struct {
 	Since time.Time
 }
+
+type SummaryFilter struct {
+	Since time.Time
+}
+
+type TimeseriesFilter struct {
+	Since     time.Time
+	BucketMin int
+}
