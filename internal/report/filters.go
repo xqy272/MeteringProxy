@@ -55,3 +55,19 @@ type ModelAssetsFilter struct {
 type KeysFilter struct {
 	Since time.Time
 }
+
+type ActivityFilter struct {
+	Since   time.Time
+	KeyHash string
+}
+
+type RequestFilter struct {
+	Since      time.Time
+	KeyHash    string
+	Limit      int
+	StatusMin  int
+	StatusMax  int
+	Model      string
+	Endpoint   string
+	ErrorClass string
+}

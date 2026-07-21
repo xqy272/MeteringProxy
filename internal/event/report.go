@@ -3,27 +3,6 @@ package event
 // Report types are used by the query/reporting layer. They are independent of
 // the database schema and provide stable types for WebUI API responses.
 
-type ActivityReport struct {
-	SampleSize          int64   `json:"sample_size"`
-	SuccessCount        int64   `json:"success_count"`
-	FailedCount         int64   `json:"failed_count"`
-	FailureRate         float64 `json:"failure_rate"`
-	AvgLatencyMs        int64   `json:"avg_latency_ms"`
-	P95LatencyMs        int64   `json:"p95_latency_ms"`
-	AvgTTFBMs           int64   `json:"avg_ttfb_ms"`
-	P95TTFBMs           int64   `json:"p95_ttfb_ms"`
-	CaptureCaptured     int64   `json:"capture_captured"`
-	CaptureFailed       int64   `json:"capture_failed"`
-	CaptureSkipped      int64   `json:"capture_skipped"`
-	LatestErrorStatus   int     `json:"latest_error_status"`
-	LatestErrorAt       string  `json:"latest_error_at"`
-	LatestError         string  `json:"latest_error"`
-	LatestErrorClass    string  `json:"latest_error_class"`
-	LatestErrorCode     string  `json:"latest_error_code"`
-	LatestErrorEndpoint string  `json:"latest_error_endpoint"`
-	LatestErrorModel    string  `json:"latest_error_model"`
-}
-
 type RequestReport struct {
 	ID                    int64  `json:"id"`
 	CreatedAt             string `json:"created_at"`

@@ -40,6 +40,14 @@ type KeysReader interface {
 	KeysReportSnapshot(ctx context.Context, since time.Time) (*db.KeysReportData, error)
 }
 
+type ActivityReader interface {
+	ActivityReport(ctx context.Context, scope db.ReportScope) (*db.ActivityRow, error)
+}
+
+type RequestsReader interface {
+	RequestsReport(ctx context.Context, filter db.RequestFilter) ([]db.RequestRow, error)
+}
+
 type CaptureRuntimeReader interface {
 	Snapshot() (queueDepth, dropped, parseErrors, dbErrors int64)
 }
@@ -55,6 +63,8 @@ type Dependencies struct {
 	Capture     CaptureRuntimeReader
 	ModelAssets ModelAssetsReader
 	Keys        KeysReader
+	Activity    ActivityReader
+	Requests    RequestsReader
 	KeyLabels   map[string]string
 }
 
@@ -89,6 +99,14 @@ type KeysReporter interface {
 	Keys(ctx context.Context, filter KeysFilter) ([]KeyReport, error)
 }
 
+type ActivityReporter interface {
+	Activity(ctx context.Context, filter ActivityFilter) (ActivityReport, error)
+}
+
+type RequestsReporter interface {
+	Requests(ctx context.Context, filter RequestFilter) ([]RequestReport, error)
+}
+
 type CoreReporter interface {
 	ModelsReporter
 	SummaryReporter
@@ -97,6 +115,8 @@ type CoreReporter interface {
 	OverviewReporter
 	ModelAssetsReporter
 	KeysReporter
+	ActivityReporter
+	RequestsReporter
 }
 
 // CostEngine is the pricing surface required by core cost reports.

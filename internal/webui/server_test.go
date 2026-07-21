@@ -45,7 +45,7 @@ func newTestServerWithPricing(t *testing.T, basePath string) (*Server, *db.DB, *
 	modelsReporter := report.NewService(report.Dependencies{
 		Models: database, Summary: database, Timeseries: database, Images: database,
 		Overview: database, Capture: bw, ModelAssets: database,
-		Keys: database,
+		Keys: database, Activity: database, Requests: database,
 	}, pricingData)
 
 	s := New(database, modelsReporter, bw, registry, basePath)
@@ -85,6 +85,14 @@ type stubModelsReporter struct {
 	keysErr           error
 	keysCalls         int
 	keysFilter        report.KeysFilter
+	activityOut       report.ActivityReport
+	activityErr       error
+	activityCalls     int
+	activityFilter    report.ActivityFilter
+	requestsOut       []report.RequestReport
+	requestsErr       error
+	requestsCalls     int
+	requestsFilter    report.RequestFilter
 }
 
 func (s *stubModelsReporter) Models(ctx context.Context, filter report.ModelsFilter) ([]report.ModelReport, error) {
@@ -139,6 +147,18 @@ func (s *stubModelsReporter) Keys(ctx context.Context, filter report.KeysFilter)
 	return s.keysOut, s.keysErr
 }
 
+func (s *stubModelsReporter) Activity(ctx context.Context, filter report.ActivityFilter) (report.ActivityReport, error) {
+	s.activityCalls++
+	s.activityFilter = filter
+	return s.activityOut, s.activityErr
+}
+
+func (s *stubModelsReporter) Requests(ctx context.Context, filter report.RequestFilter) ([]report.RequestReport, error) {
+	s.requestsCalls++
+	s.requestsFilter = filter
+	return s.requestsOut, s.requestsErr
+}
+
 func TestNewDoesNotPanic(t *testing.T) {
 	s1, _ := newTestServer(t, "/metering")
 	s2, _ := newTestServer(t, "/stats")
@@ -172,7 +192,7 @@ func TestNewWithStaticFS_ServesIndexFromInjectedFS(t *testing.T) {
 	s := NewWithStaticFS(database, report.NewService(report.Dependencies{
 		Models: database, Summary: database, Timeseries: database, Images: database,
 		Overview: database, Capture: bw, ModelAssets: database,
-		Keys: database,
+		Keys: database, Activity: database, Requests: database,
 	}, pricingData), bw, registry, "/metering", staticFS)
 
 	// Index: placeholder injection.
@@ -893,7 +913,7 @@ func TestAPIActivity(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("GET /metering/api/activity: status %d, want 200", rec.Code)
 	}
-	var data event.ActivityReport
+	var data report.ActivityReport
 	if err := json.Unmarshal(rec.Body.Bytes(), &data); err != nil {
 		t.Fatalf("unmarshal activity: %v", err)
 	}
@@ -1263,7 +1283,7 @@ func TestAPIRequestsStatusCategories(t *testing.T) {
 		if rec.Code != 200 {
 			t.Fatalf("status %s: HTTP %d, want 200", tc.status, rec.Code)
 		}
-		var rows []event.RequestReport
+		var rows []report.RequestReport
 		if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
 			t.Fatalf("status %s: unmarshal: %v", tc.status, err)
 		}
@@ -1295,7 +1315,7 @@ func TestAPIRequestsErrorClassFilter(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("HTTP %d, want 200", rec.Code)
 	}
-	var rows []event.RequestReport
+	var rows []report.RequestReport
 	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
@@ -1320,7 +1340,7 @@ func TestAPIRequestsRangeAndTTFB(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("24h HTTP %d, want 200", rec.Code)
 	}
-	var rows []event.RequestReport
+	var rows []report.RequestReport
 	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
 		t.Fatalf("unmarshal 24h: %v", err)
 	}
@@ -1699,7 +1719,9 @@ func TestCoreReporterIsExplicitlyInjected(t *testing.T) {
 			Range: "from-model-assets-reporter",
 			Items: []report.ModelAssetItem{{Model: "asset-from-reporter", RequestCount: 29}},
 		},
-		keysOut: []report.KeyReport{{KeyHash: "from-keys-reporter", RequestCount: 31}},
+		keysOut:     []report.KeyReport{{KeyHash: "from-keys-reporter", RequestCount: 31}},
+		activityOut: report.ActivityReport{SampleSize: 37},
+		requestsOut: []report.RequestReport{{RequestID: "from-requests-reporter", Status: 418}},
 	}
 	s := New(database, stub, bw, registry, "/metering")
 
@@ -1794,6 +1816,25 @@ func TestCoreReporterIsExplicitlyInjected(t *testing.T) {
 	var keys []report.KeyReport
 	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &keys) != nil || len(keys) != 1 || keys[0].RequestCount != 31 || stub.keysCalls != 1 {
 		t.Fatalf("keys status=%d payload=%+v calls=%d", rec.Code, keys, stub.keysCalls)
+	}
+
+	req = httptest.NewRequest("GET", "/metering/api/activity?range=7d&key_hash=unknown", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	var activity report.ActivityReport
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &activity) != nil || activity.SampleSize != 37 || stub.activityCalls != 1 || stub.activityFilter.KeyHash != "unknown" {
+		t.Fatalf("activity status=%d payload=%+v calls=%d filter=%+v", rec.Code, activity, stub.activityCalls, stub.activityFilter)
+	}
+
+	req = httptest.NewRequest("GET", "/metering/api/requests?range=7d&key_hash="+validKey+"&limit=25&status=4xx&model=model-a&endpoint=profile:responses&error_class=rate_limited", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	var requests []report.RequestReport
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &requests) != nil || len(requests) != 1 || requests[0].Status != 418 || stub.requestsCalls != 1 {
+		t.Fatalf("requests status=%d payload=%+v calls=%d", rec.Code, requests, stub.requestsCalls)
+	}
+	if stub.requestsFilter.KeyHash != validKey || stub.requestsFilter.Limit != 25 || stub.requestsFilter.StatusMin != 400 || stub.requestsFilter.StatusMax != 500 || stub.requestsFilter.Model != "model-a" || stub.requestsFilter.Endpoint != "profile:responses" || stub.requestsFilter.ErrorClass != "rate_limited" {
+		t.Fatalf("requests filter=%+v", stub.requestsFilter)
 	}
 }
 

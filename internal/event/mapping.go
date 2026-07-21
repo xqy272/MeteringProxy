@@ -110,32 +110,6 @@ func valueOrDefault(value, fallback string) string {
 	return fallback
 }
 
-func ActivityFromDB(row *db.ActivityRow) ActivityReport {
-	if row == nil {
-		return ActivityReport{}
-	}
-	return ActivityReport{
-		SampleSize:          row.SampleSize,
-		SuccessCount:        row.SuccessCount,
-		FailedCount:         row.FailedCount,
-		FailureRate:         row.FailureRate,
-		AvgLatencyMs:        row.AvgLatencyMs,
-		P95LatencyMs:        row.P95LatencyMs,
-		AvgTTFBMs:           row.AvgTTFBMs,
-		P95TTFBMs:           row.P95TTFBMs,
-		CaptureCaptured:     row.CaptureCaptured,
-		CaptureFailed:       row.CaptureFailed,
-		CaptureSkipped:      row.CaptureSkipped,
-		LatestErrorStatus:   row.LatestErrorStatus,
-		LatestErrorAt:       row.LatestErrorAt,
-		LatestError:         row.LatestError,
-		LatestErrorClass:    row.LatestErrorClass,
-		LatestErrorCode:     row.LatestErrorCode,
-		LatestErrorEndpoint: row.LatestErrorEndpoint,
-		LatestErrorModel:    row.LatestErrorModel,
-	}
-}
-
 // RequestsFromDB converts db.RequestRow slice to domain RequestReport slice.
 func RequestsFromDB(rows []db.RequestRow) []RequestReport {
 	result := make([]RequestReport, len(rows))

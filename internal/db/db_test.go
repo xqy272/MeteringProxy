@@ -129,7 +129,7 @@ func TestMigrateAddsMissingColumnsToLegacyDB(t *testing.T) {
 		t.Fatalf("InsertHealthMetric after legacy migration: %v", err)
 	}
 
-	rows, err := d.Requests(10, 0, 0, "", "", "", time.Time{})
+	rows, err := d.RequestsReport(context.Background(), RequestFilter{Limit: 10})
 	if err != nil {
 		t.Fatalf("Requests after legacy migration: %v", err)
 	}
@@ -359,7 +359,7 @@ func TestApplySideUsageEventCopiesCacheCreationTokens(t *testing.T) {
 	if status != "matched" {
 		t.Fatalf("match status = %q, want matched", status)
 	}
-	rows, err := d.Requests(10, 0, 0, "", "", "", time.Time{})
+	rows, err := d.RequestsReport(context.Background(), RequestFilter{Limit: 10})
 	if err != nil {
 		t.Fatalf("Requests: %v", err)
 	}
@@ -403,7 +403,7 @@ func TestRequestsModelFilterUsesEffectiveModel(t *testing.T) {
 		t.Fatalf("InsertBatch: %v", err)
 	}
 
-	rows, err := d.Requests(10, 0, 0, "gpt-4o", "", "", now.Add(-time.Hour))
+	rows, err := d.RequestsReport(context.Background(), RequestFilter{Scope: ReportScope{Since: now.Add(-time.Hour)}, Limit: 10, Model: "gpt-4o"})
 	if err != nil {
 		t.Fatalf("Requests: %v", err)
 	}
@@ -435,7 +435,7 @@ func TestRequestsEndpointFilterSupportsProfiles(t *testing.T) {
 		t.Fatalf("InsertBatch: %v", err)
 	}
 
-	rows, err := d.Requests(10, 0, 0, "", "profile:gemini_generate_content", "", now.Add(-time.Hour))
+	rows, err := d.RequestsReport(context.Background(), RequestFilter{Scope: ReportScope{Since: now.Add(-time.Hour)}, Limit: 10, Endpoint: "profile:gemini_generate_content"})
 	if err != nil {
 		t.Fatalf("Requests profile filter: %v", err)
 	}
@@ -443,7 +443,7 @@ func TestRequestsEndpointFilterSupportsProfiles(t *testing.T) {
 		t.Fatalf("rows = %+v, want two Gemini profile rows", rows)
 	}
 
-	rows, err = d.Requests(10, 0, 0, "", "/v1/messages", "", now.Add(-time.Hour))
+	rows, err = d.RequestsReport(context.Background(), RequestFilter{Scope: ReportScope{Since: now.Add(-time.Hour)}, Limit: 10, Endpoint: "/v1/messages"})
 	if err != nil {
 		t.Fatalf("Requests endpoint filter: %v", err)
 	}
@@ -751,7 +751,7 @@ func TestRequests_StatusCategories(t *testing.T) {
 	insertRecord(t, d, ts(-30*time.Minute), "/v1/chat/completions", 500, "gpt-4o", 0, 0, 0)
 	insertRecord(t, d, ts(-15*time.Minute), "/v1/chat/completions", 502, "gpt-4o", 0, 0, 0)
 
-	all, err := d.Requests(100, 0, 0, "", "", "", time.Time{})
+	all, err := d.RequestsReport(context.Background(), RequestFilter{Limit: 100})
 	if err != nil {
 		t.Fatalf("Requests(all): %v", err)
 	}
@@ -759,7 +759,7 @@ func TestRequests_StatusCategories(t *testing.T) {
 		t.Errorf("all: got %d rows, want 7", len(all))
 	}
 
-	success, err := d.Requests(100, 200, 300, "", "", "", time.Time{})
+	success, err := d.RequestsReport(context.Background(), RequestFilter{Limit: 100, StatusMin: 200, StatusMax: 300})
 	if err != nil {
 		t.Fatalf("Requests(success): %v", err)
 	}
@@ -772,7 +772,7 @@ func TestRequests_StatusCategories(t *testing.T) {
 		}
 	}
 
-	clientErrors, err := d.Requests(100, 400, 500, "", "", "", time.Time{})
+	clientErrors, err := d.RequestsReport(context.Background(), RequestFilter{Limit: 100, StatusMin: 400, StatusMax: 500})
 	if err != nil {
 		t.Fatalf("Requests(4xx): %v", err)
 	}
@@ -785,7 +785,7 @@ func TestRequests_StatusCategories(t *testing.T) {
 		}
 	}
 
-	serverErrors, err := d.Requests(100, 500, 0, "", "", "", time.Time{})
+	serverErrors, err := d.RequestsReport(context.Background(), RequestFilter{Limit: 100, StatusMin: 500})
 	if err != nil {
 		t.Fatalf("Requests(5xx): %v", err)
 	}
@@ -826,7 +826,7 @@ func TestRequests_RangeFilter(t *testing.T) {
 	}
 
 	since24h := now.Add(-24 * time.Hour)
-	rows, err := d.Requests(100, 0, 0, "", "", "", since24h)
+	rows, err := d.RequestsReport(context.Background(), RequestFilter{Scope: ReportScope{Since: since24h}, Limit: 100})
 	if err != nil {
 		t.Fatalf("Requests with 24h range: %v", err)
 	}
@@ -838,7 +838,7 @@ func TestRequests_RangeFilter(t *testing.T) {
 	}
 
 	since7d := now.Add(-7 * 24 * time.Hour)
-	rowsAll, err := d.Requests(100, 0, 0, "", "", "", since7d)
+	rowsAll, err := d.RequestsReport(context.Background(), RequestFilter{Scope: ReportScope{Since: since7d}, Limit: 100})
 	if err != nil {
 		t.Fatalf("Requests with 7d range: %v", err)
 	}
@@ -846,7 +846,7 @@ func TestRequests_RangeFilter(t *testing.T) {
 		t.Errorf("7d range: got %d rows, want 2 (both records)", len(rowsAll))
 	}
 
-	rowsZeroSince, err := d.Requests(100, 0, 0, "", "", "", time.Time{})
+	rowsZeroSince, err := d.RequestsReport(context.Background(), RequestFilter{Limit: 100})
 	if err != nil {
 		t.Fatalf("Requests with zero since: %v", err)
 	}
@@ -899,7 +899,7 @@ func TestActivity(t *testing.T) {
 		t.Fatalf("InsertBatch: %v", err)
 	}
 
-	row, err := d.Activity(now.Add(-1 * time.Hour))
+	row, err := d.ActivityReport(context.Background(), ReportScope{Since: now.Add(-time.Hour)})
 	if err != nil {
 		t.Fatalf("Activity: %v", err)
 	}
@@ -945,7 +945,7 @@ func TestActivityUsesBoundedRecentSample(t *testing.T) {
 		t.Fatalf("InsertBatch: %v", err)
 	}
 
-	row, err := d.Activity(now.Add(-time.Hour))
+	row, err := d.ActivityReport(context.Background(), ReportScope{Since: now.Add(-time.Hour)})
 	if err != nil {
 		t.Fatalf("Activity: %v", err)
 	}
@@ -1162,7 +1162,7 @@ func TestInsertBatch_AllFieldsPopulated(t *testing.T) {
 		t.Fatalf("InsertBatch: %v", err)
 	}
 
-	rows, err := d.Requests(10, 0, 0, "", "", "", time.Time{})
+	rows, err := d.RequestsReport(context.Background(), RequestFilter{Limit: 10})
 	if err != nil {
 		t.Fatalf("Requests: %v", err)
 	}

@@ -251,6 +251,70 @@ type KeyReport struct {
 	LatestSeenAt          string                `json:"latest_seen_at"`
 }
 
+type ActivityReport struct {
+	SampleSize          int64   `json:"sample_size"`
+	SuccessCount        int64   `json:"success_count"`
+	FailedCount         int64   `json:"failed_count"`
+	FailureRate         float64 `json:"failure_rate"`
+	AvgLatencyMs        int64   `json:"avg_latency_ms"`
+	P95LatencyMs        int64   `json:"p95_latency_ms"`
+	AvgTTFBMs           int64   `json:"avg_ttfb_ms"`
+	P95TTFBMs           int64   `json:"p95_ttfb_ms"`
+	CaptureCaptured     int64   `json:"capture_captured"`
+	CaptureFailed       int64   `json:"capture_failed"`
+	CaptureSkipped      int64   `json:"capture_skipped"`
+	LatestErrorStatus   int     `json:"latest_error_status"`
+	LatestErrorAt       string  `json:"latest_error_at"`
+	LatestError         string  `json:"latest_error"`
+	LatestErrorClass    string  `json:"latest_error_class"`
+	LatestErrorCode     string  `json:"latest_error_code"`
+	LatestErrorEndpoint string  `json:"latest_error_endpoint"`
+	LatestErrorModel    string  `json:"latest_error_model"`
+}
+
+type RequestReport struct {
+	ID                    int64  `json:"id"`
+	CreatedAt             string `json:"created_at"`
+	RequestID             string `json:"request_id"`
+	Endpoint              string `json:"endpoint"`
+	EndpointProfile       string `json:"endpoint_profile"`
+	CaptureMode           string `json:"capture_mode"`
+	MeteringKind          string `json:"metering_kind"`
+	Method                string `json:"method"`
+	Status                int    `json:"status"`
+	LatencyMs             int64  `json:"latency_ms"`
+	TTFBMs                int64  `json:"ttfb_ms"`
+	Stream                bool   `json:"stream"`
+	ClientIPHash          string `json:"client_ip_hash"`
+	APIKeyHash            string `json:"api_key_hash"`
+	ModelRequested        string `json:"model_requested"`
+	ModelReturned         string `json:"model_returned"`
+	InputTokens           int64  `json:"input_tokens"`
+	OutputTokens          int64  `json:"output_tokens"`
+	ReasoningTokens       int64  `json:"reasoning_tokens"`
+	CachedTokens          int64  `json:"cached_tokens"`
+	CacheCreationTokens   int64  `json:"cache_creation_tokens"`
+	TotalTokens           int64  `json:"total_tokens"`
+	RequestBytes          int64  `json:"request_bytes"`
+	ResponseBytes         int64  `json:"response_bytes"`
+	CaptureOutcome        string `json:"capture_outcome"`
+	CaptureReason         string `json:"capture_reason"`
+	Error                 string `json:"error"`
+	ErrorClass            string `json:"error_class"`
+	ErrorType             string `json:"error_type"`
+	ErrorCode             string `json:"error_code"`
+	ErrorParam            string `json:"error_param"`
+	ErrorMessage          string `json:"error_message"`
+	ErrorMessageTruncated bool   `json:"error_message_truncated"`
+	ModelReturnedSource   string `json:"model_returned_source"`
+	UsageSource           string `json:"usage_source"`
+	TerminalEvent         string `json:"terminal_event"`
+	TerminalReason        string `json:"terminal_reason"`
+	SideUsageEventID      int64  `json:"side_usage_event_id"`
+	SideUsageMatchStatus  string `json:"side_usage_match_status"`
+	UsageConfidence       string `json:"usage_confidence"`
+}
+
 // ModelReport is the stable /api/models response item.
 // Field names and JSON shape match the previous event.ModelReport contract.
 type ModelReport struct {

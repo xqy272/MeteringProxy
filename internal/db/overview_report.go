@@ -101,11 +101,11 @@ func queryOverviewSelected(ctx context.Context, q reportQueryContext, since time
 	if err != nil {
 		return OverviewSelectedRow{}, err
 	}
-	row.P95LatencyMs, err = queryPercentileInt(ctx, q, since, "latency_ms", 0.95, activitySampleLimit)
+	row.P95LatencyMs, err = queryPercentileInt(ctx, q, ReportScope{Since: since}, "latency_ms", 0.95, activitySampleLimit)
 	if err != nil {
 		return OverviewSelectedRow{}, fmt.Errorf("overview selected latency percentile: %w", err)
 	}
-	row.P95TTFBMs, err = queryPercentileInt(ctx, q, since, "ttfb_ms", 0.95, activitySampleLimit)
+	row.P95TTFBMs, err = queryPercentileInt(ctx, q, ReportScope{Since: since}, "ttfb_ms", 0.95, activitySampleLimit)
 	if err != nil {
 		return OverviewSelectedRow{}, fmt.Errorf("overview selected ttfb percentile: %w", err)
 	}
@@ -121,7 +121,7 @@ func queryOverviewRecent(ctx context.Context, q reportQueryContext, since time.T
 		return OverviewRecentRow{}, err
 	}
 	var err error
-	row.P95LatencyMs, err = queryPercentileInt(ctx, q, since, "latency_ms", 0.95, activitySampleLimit)
+	row.P95LatencyMs, err = queryPercentileInt(ctx, q, ReportScope{Since: since}, "latency_ms", 0.95, activitySampleLimit)
 	if err != nil {
 		return OverviewRecentRow{}, fmt.Errorf("overview recent latency percentile: %w", err)
 	}
@@ -166,7 +166,7 @@ func queryOverviewCapture(ctx context.Context, q reportQueryContext, since time.
 	return failed, skipped, err
 }
 
-func queryPercentileInt(ctx context.Context, q reportQueryContext, since time.Time, column string, percentile float64, limit int) (int64, error) {
+func queryPercentileInt(ctx context.Context, q reportQueryContext, scope ReportScope, column string, percentile float64, limit int) (int64, error) {
 	switch column {
 	case "latency_ms", "ttfb_ms":
 	default:
@@ -175,17 +175,19 @@ func queryPercentileInt(ctx context.Context, q reportQueryContext, since time.Ti
 	if limit <= 0 {
 		limit = activitySampleLimit
 	}
+	where, args := reportScopeWhere(scope)
+	countArgs := append(append([]any{}, args...), limit)
 	var count int64
 	if err := q.QueryRowContext(ctx, `
 		WITH sampled AS (
 			SELECT `+column+`
 			FROM request_usage
-			WHERE created_at_unix >= ?
+			WHERE `+where+`
 			ORDER BY id DESC
 			LIMIT ?
 		)
 		SELECT COUNT(*) FROM sampled WHERE `+column+` > 0
-	`, since.Unix(), limit).Scan(&count); err != nil {
+	`, countArgs...).Scan(&count); err != nil {
 		return 0, err
 	}
 	if count == 0 {
@@ -199,11 +201,12 @@ func queryPercentileInt(ctx context.Context, q reportQueryContext, since time.Ti
 		offset = count - 1
 	}
 	var value int64
+	valueArgs := append(append([]any{}, args...), limit, offset)
 	err := q.QueryRowContext(ctx, `
 		WITH sampled AS (
 			SELECT `+column+`
 			FROM request_usage
-			WHERE created_at_unix >= ?
+			WHERE `+where+`
 			ORDER BY id DESC
 			LIMIT ?
 		)
@@ -212,6 +215,6 @@ func queryPercentileInt(ctx context.Context, q reportQueryContext, since time.Ti
 		WHERE `+column+` > 0
 		ORDER BY `+column+` ASC
 		LIMIT 1 OFFSET ?
-	`, since.Unix(), limit, offset).Scan(&value)
+	`, valueArgs...).Scan(&value)
 	return value, err
 }

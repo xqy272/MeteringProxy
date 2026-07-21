@@ -300,12 +300,17 @@ func (s *Server) handleTimeseries(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 	since, _ := parseRange(r)
-	row, err := s.db.Activity(since)
+	keyHash, err := parseKeyHashFilter(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	row, err := s.reports.Activity(r.Context(), report.ActivityFilter{Since: since, KeyHash: keyHash})
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	writeJSON(w, event.ActivityFromDB(row))
+	writeJSON(w, row)
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
@@ -360,17 +365,24 @@ func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {
 	endpoint := r.URL.Query().Get("endpoint")
 	errorClass := r.URL.Query().Get("error_class")
 	since, _ := parseRange(r)
-
-	rows, err := s.db.Requests(limit, statusMin, statusMax, model, endpoint, errorClass, since)
+	keyHash, err := parseKeyHashFilter(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	rows, err := s.reports.Requests(r.Context(), report.RequestFilter{
+		Since: since, KeyHash: keyHash, Limit: limit,
+		StatusMin: statusMin, StatusMax: statusMax,
+		Model: model, Endpoint: endpoint, ErrorClass: errorClass,
+	})
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	report := event.RequestsFromDB(rows)
-	if report == nil {
-		report = []event.RequestReport{}
+	if rows == nil {
+		rows = []report.RequestReport{}
 	}
-	writeJSON(w, report)
+	writeJSON(w, rows)
 }
 
 func (s *Server) handleMultimodalSummary(w http.ResponseWriter, r *http.Request) {

@@ -241,6 +241,7 @@ func main() {
 			Models: database, Summary: database, Timeseries: database, Images: database,
 			Overview: database, Capture: batchWriter, ModelAssets: database,
 			Keys: database, KeyLabels: cfg.KeyLabels,
+			Activity: database, Requests: database,
 		}, pricingData)
 		var webuiServer *webui.Server
 		if *devStatic {

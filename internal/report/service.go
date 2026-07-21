@@ -19,6 +19,8 @@ type Service struct {
 	capture     CaptureRuntimeReader
 	modelAssets ModelAssetsReader
 	keys        KeysReader
+	activity    ActivityReader
+	requests    RequestsReader
 	keyLabels   map[string]string
 	cost        CostEngine
 	now         func() time.Time
@@ -50,6 +52,12 @@ func NewService(deps Dependencies, cost CostEngine) *Service {
 	if deps.Keys == nil {
 		panic("report: KeysReader is required")
 	}
+	if deps.Activity == nil {
+		panic("report: ActivityReader is required")
+	}
+	if deps.Requests == nil {
+		panic("report: RequestsReader is required")
+	}
 	if cost == nil {
 		panic("report: CostEngine is required")
 	}
@@ -61,7 +69,7 @@ func NewService(deps Dependencies, cost CostEngine) *Service {
 		models: deps.Models, summary: deps.Summary, timeseries: deps.Timeseries,
 		images: deps.Images, overview: deps.Overview, capture: deps.Capture,
 		modelAssets: deps.ModelAssets,
-		keys:        deps.Keys, keyLabels: labels,
+		keys:        deps.Keys, activity: deps.Activity, requests: deps.Requests, keyLabels: labels,
 		cost: cost, now: time.Now,
 	}
 }
