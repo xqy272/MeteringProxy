@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"ai-gateway-metering-proxy/internal/db"
-	"ai-gateway-metering-proxy/internal/event"
 	"ai-gateway-metering-proxy/internal/report"
 
 	"gopkg.in/yaml.v3"
@@ -51,86 +50,12 @@ func (s *Server) handleIssues(w http.ResponseWriter, r *http.Request) {
 // normal capability and is never rendered as an error.
 func (s *Server) handleGatewayCapabilities(w http.ResponseWriter, r *http.Request) {
 	since, rangeKey := parseRange(r)
-
-	dbRows, _ := s.db.GatewayCapabilities(since)
-	byProfile := make(map[string]db.GatewayCapabilityRow, len(dbRows))
-	for _, row := range dbRows {
-		byProfile[row.EndpointProfile] = row
+	result, err := s.reports.GatewayCapabilities(r.Context(), report.GatewayFilter{Since: since, Range: rangeKey})
+	if err != nil {
+		writeReportQueryFailed(w, "gateway capabilities", err)
+		return
 	}
-
-	report := &event.GatewayCapabilitiesReport{
-		Range:    rangeKey,
-		Profiles: []event.GatewayCapabilityProfile{},
-	}
-
-	// Registry profiles first (capability matrix), then any DB-only profiles
-	// that are not in the registry (e.g. legacy endpoint_profile values).
-	seen := make(map[string]bool)
-	if s.registry != nil {
-		for _, p := range s.registry.Profiles() {
-			seen[p.Name] = true
-			row := byProfile[p.Name]
-			// The unknown_passthrough catch-all also absorbs DB rows whose
-			// endpoint_profile was empty (queried as "unknown").
-			if p.Name == "unknown_passthrough" {
-				if extra, ok := byProfile["unknown"]; ok {
-					row.RequestCount += extra.RequestCount
-					row.StreamCount += extra.StreamCount
-					row.MissingUsageCount += extra.MissingUsageCount
-					row.UsageMeteredCount += extra.UsageMeteredCount
-					row.RequestOnlyCount += extra.RequestOnlyCount
-					row.PassthroughCount += extra.PassthroughCount
-				}
-			}
-
-			var limitations []string
-			if p.StreamProtocol.UsesSSE {
-				limitations = append(limitations, "compressed_sse_not_metered")
-			}
-
-			report.Profiles = append(report.Profiles, event.GatewayCapabilityProfile{
-				Name:              p.Name,
-				DisplayName:       p.DisplayName(),
-				CaptureMode:       p.CaptureMode,
-				MeteringKind:      p.MeteringKind,
-				RequestCount:      row.RequestCount,
-				MissingUsageCount: row.MissingUsageCount,
-				StreamCount:       row.StreamCount,
-				KnownLimitations:  limitations,
-			})
-
-			report.Summary.TotalRequests += row.RequestCount
-			report.Summary.UsageMeteredReqs += row.UsageMeteredCount
-			report.Summary.RequestOnlyReqs += row.RequestOnlyCount
-			report.Summary.PassthroughReqs += row.PassthroughCount
-			report.Summary.StreamRequests += row.StreamCount
-			report.Summary.MissingUsageReqs += row.MissingUsageCount
-		}
-	}
-
-	// Any DB rows not matched by a registry profile (e.g. older endpoint names).
-	// "unknown" was already folded into unknown_passthrough above.
-	for name, row := range byProfile {
-		if seen[name] || name == "unknown" {
-			continue
-		}
-		report.Profiles = append(report.Profiles, event.GatewayCapabilityProfile{
-			Name:              name,
-			DisplayName:       name,
-			CaptureMode:       event.CapturePassthrough,
-			RequestCount:      row.RequestCount,
-			MissingUsageCount: row.MissingUsageCount,
-			StreamCount:       row.StreamCount,
-		})
-		report.Summary.TotalRequests += row.RequestCount
-		report.Summary.UsageMeteredReqs += row.UsageMeteredCount
-		report.Summary.RequestOnlyReqs += row.RequestOnlyCount
-		report.Summary.PassthroughReqs += row.PassthroughCount
-		report.Summary.StreamRequests += row.StreamCount
-		report.Summary.MissingUsageReqs += row.MissingUsageCount
-	}
-
-	writeJSON(w, report)
+	writeJSON(w, result)
 }
 
 // ---------- CPA Auth Mirror + Cooldown + Provider Quota (4.3.6) ----------
@@ -263,11 +188,17 @@ func (s *Server) handleProviderQuotaDiagnostics(w http.ResponseWriter, r *http.R
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	events := s.recentQuotaDiagnostics(limit)
+	events, eventsStatus, eventsPartial, err := s.recentQuotaDiagnostics(r.Context(), limit)
+	if err != nil {
+		writeReportQueryFailed(w, "provider quota diagnostics", err)
+		return
+	}
 	writeJSON(w, map[string]any{
-		"status":  "ok",
-		"enabled": s.quotaPoller != nil,
-		"events":  events,
+		"status":        "ok",
+		"enabled":       s.quotaPoller != nil,
+		"events":        events,
+		"events_status": eventsStatus,
+		"partial":       eventsPartial,
 	})
 }
 

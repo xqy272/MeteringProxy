@@ -11,21 +11,26 @@ import (
 // Service orchestrates read-side report assembly for WebUI handlers.
 // It implements the core usage/cost reporter interfaces.
 type Service struct {
-	models      ModelsReader
-	summary     SummaryReader
-	timeseries  TimeseriesReader
-	images      ImagesReader
-	overview    OverviewReader
-	capture     CaptureRuntimeReader
-	modelAssets ModelAssetsReader
-	keys        KeysReader
-	activity    ActivityReader
-	requests    RequestsReader
-	issues      IssueReader
-	sideChannel SideChannelStatusReader
-	keyLabels   map[string]string
-	cost        CostEngine
-	now         func() time.Time
+	models        ModelsReader
+	summary       SummaryReader
+	timeseries    TimeseriesReader
+	images        ImagesReader
+	overview      OverviewReader
+	capture       CaptureRuntimeReader
+	modelAssets   ModelAssetsReader
+	keys          KeysReader
+	activity      ActivityReader
+	requests      RequestsReader
+	issues        IssueReader
+	multimodal    MultimodalReader
+	imageRequests ImageRequestsReader
+	errors        ErrorsReader
+	gateway       GatewayReader
+	profiles      ProfileSource
+	sideChannel   SideChannelStatusReader
+	keyLabels     map[string]string
+	cost          CostEngine
+	now           func() time.Time
 }
 
 // NewService constructs a report service from narrow reader/pricing interfaces.
@@ -63,6 +68,18 @@ func NewService(deps Dependencies, cost CostEngine) *Service {
 	if deps.Issues == nil {
 		panic("report: IssueReader is required")
 	}
+	if deps.Multimodal == nil {
+		panic("report: MultimodalReader is required")
+	}
+	if deps.ImageRequests == nil {
+		panic("report: ImageRequestsReader is required")
+	}
+	if deps.Errors == nil {
+		panic("report: ErrorsReader is required")
+	}
+	if deps.Gateway == nil {
+		panic("report: GatewayReader is required")
+	}
 	if cost == nil {
 		panic("report: CostEngine is required")
 	}
@@ -75,6 +92,8 @@ func NewService(deps Dependencies, cost CostEngine) *Service {
 		images: deps.Images, overview: deps.Overview, capture: deps.Capture,
 		modelAssets: deps.ModelAssets,
 		keys:        deps.Keys, activity: deps.Activity, requests: deps.Requests, issues: deps.Issues,
+		multimodal: deps.Multimodal, imageRequests: deps.ImageRequests, errors: deps.Errors,
+		gateway: deps.Gateway, profiles: deps.Profiles,
 		sideChannel: deps.SideChannel, keyLabels: labels,
 		cost: cost, now: time.Now,
 	}

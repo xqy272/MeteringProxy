@@ -19,14 +19,13 @@ type IssueFilter struct {
 // IssuesReportData carries per-source issue rows and query/scan errors.
 // Report assembly decides atomic failure vs partial; DB never swallows errors.
 type IssuesReportData struct {
-	RequestUsage    []IssueRow
-	RequestUsageErr error
-	SideChannel     []IssueRow
-	SideChannelErr  error
-	Credential      []IssueRow
-	CredentialErr   error
-	Quota           []IssueRow
-	QuotaErr        error
+	RequestUsage   []IssueRow
+	SideChannel    []IssueRow
+	SideChannelErr error
+	Credential     []IssueRow
+	CredentialErr  error
+	Quota          []IssueRow
+	QuotaErr       error
 }
 
 // IssuesReport loads multi-source issue rows with context and typed scope/filter.
@@ -81,40 +80,6 @@ func (db *DB) IssuesReport(ctx context.Context, filter IssueFilter) (*IssuesRepo
 
 func isContextError(err error) bool {
 	return err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
-}
-
-// Issues preserves the pre-report assembly behavior for legacy callers/tests:
-// request_usage failure is fatal; optional source failures are omitted.
-func (db *DB) Issues(since time.Time, limit int) ([]IssueRow, error) {
-	data, err := db.IssuesReport(context.Background(), IssueFilter{
-		Scope:         ReportScope{Since: since},
-		Limit:         limit,
-		IncludeGlobal: true,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if data.RequestUsageErr != nil {
-		return nil, data.RequestUsageErr
-	}
-	result := append([]IssueRow(nil), data.RequestUsage...)
-	if data.SideChannelErr == nil {
-		result = append(result, data.SideChannel...)
-	}
-	if data.CredentialErr == nil {
-		result = append(result, data.Credential...)
-	}
-	if data.QuotaErr == nil {
-		result = append(result, data.Quota...)
-	}
-	sortIssueRows(result)
-	if limit <= 0 || limit > 100 {
-		limit = 20
-	}
-	if len(result) > limit {
-		result = result[:limit]
-	}
-	return result, nil
 }
 
 // ErrorTimelineReport is the context-aware form of ErrorTimeline.

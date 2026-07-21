@@ -48,6 +48,25 @@ func ts(d time.Duration) string {
 	return time.Now().Add(d).Format(time.RFC3339)
 }
 
+func issuesCombined(t *testing.T, d *DB, since time.Time, limit int) []IssueRow {
+	t.Helper()
+	data, err := d.IssuesReport(context.Background(), IssueFilter{Scope: ReportScope{Since: since}, Limit: limit, IncludeGlobal: true})
+	if err != nil {
+		t.Fatalf("IssuesReport: %v", err)
+	}
+	rows := append([]IssueRow{}, data.RequestUsage...)
+	if data.SideChannelErr == nil {
+		rows = append(rows, data.SideChannel...)
+	}
+	if data.CredentialErr == nil {
+		rows = append(rows, data.Credential...)
+	}
+	if data.QuotaErr == nil {
+		rows = append(rows, data.Quota...)
+	}
+	return rows
+}
+
 func TestOpenAndMigrate(t *testing.T) {
 	d := newTestDB(t)
 	if d.read == nil {
@@ -191,7 +210,7 @@ func TestMultimodalAndImageReports(t *testing.T) {
 		t.Fatalf("InsertBatch: %v", err)
 	}
 
-	mm, err := d.MultimodalSummary(now.Add(-time.Hour))
+	mm, err := d.MultimodalSummaryReport(context.Background(), now.Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("MultimodalSummary: %v", err)
 	}
@@ -213,7 +232,7 @@ func TestMultimodalAndImageReports(t *testing.T) {
 		t.Fatalf("image models = %+v", models)
 	}
 
-	requests, err := d.ImageRequests(10, now.Add(-time.Hour))
+	requests, err := d.ImageRequestsReport(context.Background(), 10, now.Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("ImageRequests: %v", err)
 	}
@@ -475,10 +494,7 @@ func TestIssuesAggregatesByEffectiveModelAndUsesLatestSample(t *testing.T) {
 		t.Fatalf("InsertBatch: %v", err)
 	}
 
-	rows, err := d.Issues(now.Add(-time.Hour), 20)
-	if err != nil {
-		t.Fatalf("Issues: %v", err)
-	}
+	rows := issuesCombined(t, d, now.Add(-time.Hour), 20)
 	if len(rows) != 2 {
 		t.Fatalf("issues = %+v, want 2 grouped rows", rows)
 	}
@@ -532,10 +548,7 @@ func TestIssuesIncludeCurrentCredentialAndQuotaState(t *testing.T) {
 		t.Fatalf("UpsertQuotaCurrent: %v", err)
 	}
 
-	rows, err := d.Issues(time.Now().UTC().Add(-time.Hour), 20)
-	if err != nil {
-		t.Fatalf("Issues: %v", err)
-	}
+	rows := issuesCombined(t, d, time.Now().UTC().Add(-time.Hour), 20)
 	classes := map[string]bool{}
 	for _, row := range rows {
 		classes[row.Class] = true
@@ -622,15 +635,12 @@ func TestIssuesIncludeQuotaRefreshFailures(t *testing.T) {
 		t.Fatalf("InsertQuotaRefreshEvent: %v", err)
 	}
 
-	rows, err := d.Issues(now.Add(-time.Hour), 20)
-	if err != nil {
-		t.Fatalf("Issues: %v", err)
-	}
+	rows := issuesCombined(t, d, now.Add(-time.Hour), 20)
 	if len(rows) != 1 || rows[0].Class != "quota_refresh_failed" || rows[0].SourceGroup != "quota" || rows[0].Message != "api_call_unavailable" {
 		t.Fatalf("issues = %+v, want quota_refresh_failed from refresh event", rows)
 	}
 
-	events, err := d.RecentQuotaRefreshEvents(now.Add(-time.Hour), 5)
+	events, err := d.RecentQuotaRefreshEvents(context.Background(), now.Add(-time.Hour), 5)
 	if err != nil {
 		t.Fatalf("RecentQuotaRefreshEvents: %v", err)
 	}
@@ -687,10 +697,7 @@ func TestSeedDemoIncludesCredentialAndQuotaRows(t *testing.T) {
 		t.Fatalf("quota demo rows = %+v, want supported, low/exhausted, unsupported, 5h, and weekly examples", quotaRows)
 	}
 
-	issues, err := d.Issues(time.Now().UTC().Add(-time.Hour), 50)
-	if err != nil {
-		t.Fatalf("Issues: %v", err)
-	}
+	issues := issuesCombined(t, d, time.Now().UTC().Add(-time.Hour), 50)
 	classes := map[string]bool{}
 	for _, row := range issues {
 		classes[row.Class] = true
@@ -965,15 +972,19 @@ func TestHealthMetrics(t *testing.T) {
 		t.Fatalf("InsertHealthMetric: %v", err)
 	}
 
-	h, err := d.LatestHealth()
+	h, err := d.LatestHealthReport(context.Background())
 	if err != nil {
 		t.Fatalf("LatestHealth: %v", err)
+	}
+	if h == nil {
+		// empty DB is a valid empty snapshot.
+		h = &HealthRow{}
 	}
 	if h.QueueDepth != 5 || h.DroppedEvents != 10 || h.ParseErrors != 2 || h.DBErrors != 1 {
 		t.Errorf("health = %+v, want queue=5 dropped=10 parse=2 db=1", h)
 	}
 
-	rows, err := d.ErrorTimeline(time.Now().Add(-24 * time.Hour))
+	rows, err := d.ErrorTimelineReport(context.Background(), time.Now().Add(-24*time.Hour))
 	if err != nil {
 		t.Fatalf("ErrorTimeline: %v", err)
 	}
@@ -986,7 +997,7 @@ func TestHealthMetrics(t *testing.T) {
 	if err := d.InsertHealthMetric(ts(-5*time.Minute), 5, 12, 2, 5, 0); err != nil {
 		t.Fatalf("InsertHealthMetric second: %v", err)
 	}
-	rows, err = d.ErrorTimeline(time.Now().Add(-24 * time.Hour))
+	rows, err = d.ErrorTimelineReport(context.Background(), time.Now().Add(-24*time.Hour))
 	if err != nil {
 		t.Fatalf("ErrorTimeline second: %v", err)
 	}
@@ -1008,7 +1019,7 @@ func TestErrorTimelineHandlesCounterReset(t *testing.T) {
 		t.Fatalf("InsertHealthMetric reset: %v", err)
 	}
 
-	rows, err := d.ErrorTimeline(now.Add(-time.Hour))
+	rows, err := d.ErrorTimelineReport(context.Background(), now.Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("ErrorTimeline: %v", err)
 	}
@@ -1029,7 +1040,7 @@ func TestErrorTimelineBaselineMissingWhenNoPriorRow(t *testing.T) {
 		t.Fatalf("InsertHealthMetric: %v", err)
 	}
 
-	rows, err := d.ErrorTimeline(now.Add(-time.Hour))
+	rows, err := d.ErrorTimelineReport(context.Background(), now.Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("ErrorTimeline: %v", err)
 	}
@@ -1058,7 +1069,7 @@ func TestErrorTimelineBaselinePresentWhenPriorRowExists(t *testing.T) {
 		t.Fatalf("InsertHealthMetric in-range: %v", err)
 	}
 
-	rows, err := d.ErrorTimeline(now.Add(-time.Hour))
+	rows, err := d.ErrorTimelineReport(context.Background(), now.Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("ErrorTimeline: %v", err)
 	}

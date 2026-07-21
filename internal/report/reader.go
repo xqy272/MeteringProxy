@@ -6,6 +6,7 @@ import (
 
 	"ai-gateway-metering-proxy/internal/db"
 	"ai-gateway-metering-proxy/internal/pricing"
+	"ai-gateway-metering-proxy/internal/profile"
 )
 
 // ModelsReader is the narrow DB reader surface required by the models report.
@@ -53,6 +54,31 @@ type IssueReader interface {
 	ErrorTimelineReport(ctx context.Context, since time.Time) ([]db.ErrorTimelineRow, error)
 }
 
+type MultimodalReader interface {
+	MultimodalSummaryReport(ctx context.Context, since time.Time) ([]db.MultimodalSummaryRow, error)
+}
+
+type ImageRequestsReader interface {
+	ImageRequestsReport(ctx context.Context, limit int, since time.Time) ([]db.RequestRow, error)
+}
+
+type ErrorsReader interface {
+	ErrorTimelineReport(ctx context.Context, since time.Time) ([]db.ErrorTimelineRow, error)
+	ErrorTimelineFromRequestsReport(ctx context.Context, since time.Time) ([]db.ErrorTimelineRow, error)
+	LatestHealthReport(ctx context.Context) (*db.HealthRow, error)
+}
+
+type GatewayReader interface {
+	GatewayCapabilitiesReport(ctx context.Context, since time.Time) ([]db.GatewayCapabilityRow, error)
+}
+
+// ProfileSource supplies static registry metadata for metadata/gateway reports.
+// Defined by report as the consumer; *profile.Registry implements it.
+type ProfileSource interface {
+	EndpointMetas() []profile.EndpointMeta
+	GatewayProfiles() []profile.GatewayProfileInfo
+}
+
 // SideChannelStatusReader is optional runtime status for side-channel disconnect system issues.
 type SideChannelStatusReader interface {
 	Snapshot() (connected bool, lastAt time.Time, lastErr string)
@@ -65,19 +91,24 @@ type CaptureRuntimeReader interface {
 // Dependencies keeps each read capability narrow while giving the composition
 // root one explicit, compile-time checked wiring object.
 type Dependencies struct {
-	Models      ModelsReader
-	Summary     SummaryReader
-	Timeseries  TimeseriesReader
-	Images      ImagesReader
-	Overview    OverviewReader
-	Capture     CaptureRuntimeReader
-	ModelAssets ModelAssetsReader
-	Keys        KeysReader
-	Activity    ActivityReader
-	Requests    RequestsReader
-	Issues      IssueReader
-	SideChannel SideChannelStatusReader
-	KeyLabels   map[string]string
+	Models        ModelsReader
+	Summary       SummaryReader
+	Timeseries    TimeseriesReader
+	Images        ImagesReader
+	Overview      OverviewReader
+	Capture       CaptureRuntimeReader
+	ModelAssets   ModelAssetsReader
+	Keys          KeysReader
+	Activity      ActivityReader
+	Requests      RequestsReader
+	Issues        IssueReader
+	Multimodal    MultimodalReader
+	ImageRequests ImageRequestsReader
+	Errors        ErrorsReader
+	Gateway       GatewayReader
+	Profiles      ProfileSource
+	SideChannel   SideChannelStatusReader
+	KeyLabels     map[string]string
 }
 
 // ModelsReporter is the WebUI-facing /api/models boundary.
@@ -123,6 +154,30 @@ type IssuesReporter interface {
 	Issues(ctx context.Context, filter IssueFilter) (IssuesReport, error)
 }
 
+type MultimodalReporter interface {
+	MultimodalSummary(ctx context.Context, filter MultimodalFilter) ([]MultimodalSummaryReport, error)
+}
+
+type ImageRequestsReporter interface {
+	ImageRequests(ctx context.Context, filter ImageRequestsFilter) ([]RequestReport, error)
+}
+
+type ErrorsReporter interface {
+	Errors(ctx context.Context, filter ErrorsFilter) (ErrorsReport, error)
+}
+
+type HealthReporter interface {
+	Health(ctx context.Context, filter HealthFilter) (HealthDashboardReport, error)
+}
+
+type MetadataReporter interface {
+	Metadata(ctx context.Context, filter MetadataFilter) (MetadataReport, error)
+}
+
+type GatewayReporter interface {
+	GatewayCapabilities(ctx context.Context, filter GatewayFilter) (GatewayCapabilitiesReport, error)
+}
+
 type CoreReporter interface {
 	ModelsReporter
 	SummaryReporter
@@ -134,6 +189,12 @@ type CoreReporter interface {
 	ActivityReporter
 	RequestsReporter
 	IssuesReporter
+	MultimodalReporter
+	ImageRequestsReporter
+	ErrorsReporter
+	HealthReporter
+	MetadataReporter
+	GatewayReporter
 }
 
 // CostEngine is the pricing surface required by core cost reports.

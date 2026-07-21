@@ -34,28 +34,6 @@ func (s eventSink) InsertEvents(events []event.Event) error {
 	return s.records.InsertBatch(records)
 }
 
-// ReportStore is the read-side interface for querying usage reports.
-// The WebUI depends on this, not on concrete SQL details.
-type ReportStore interface {
-	Summary(since time.Time) (*db.SummaryRow, error)
-	Models(since time.Time) ([]db.ModelRow, error)
-	ModelSourceCounts(since time.Time, model string) (map[string]int64, map[string]int64, error)
-	Timeseries(since time.Time, bucketMin int) ([]db.TimeseriesRow, error)
-	ModelTimeseries(since time.Time, bucketMin int) ([]db.ModelTimeseriesRow, error)
-	ErrorTimeline(since time.Time) ([]db.ErrorTimelineRow, error)
-	ErrorTimelineFromRequests(since time.Time) ([]db.ErrorTimelineRow, error)
-	LatestHealth() (*db.HealthRow, error)
-	Issues(since time.Time, limit int) ([]db.IssueRow, error)
-	CaptureOutcomeCounts(since time.Time) (captured, skipped, failed int64, err error)
-	AllCredentialHealth() ([]db.CredentialHealthRow, error)
-	AllQuotaCurrent() ([]db.QuotaCurrentRow, error)
-	RecentQuotaRefreshEvents(since time.Time, limit int) ([]db.QuotaRefreshEventRow, error)
-	SideUsageStatusCounts(since time.Time) (map[string]int64, error)
-	MultimodalSummary(since time.Time) ([]db.MultimodalSummaryRow, error)
-	ImageRequests(limit int, since time.Time) ([]db.RequestRow, error)
-	GatewayCapabilities(since time.Time) ([]db.GatewayCapabilityRow, error)
-}
-
 // HealthWriter is the write-side interface for health metrics.
 type HealthWriter interface {
 	InsertHealthMetric(ts string, queueDepth int, dropped, parseErrors, dbErrors, sseLineSkips int64) error

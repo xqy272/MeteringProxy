@@ -11,45 +11,55 @@ import (
 )
 
 type stubModelsReader struct {
-	snapshot            *db.ModelsReportData
-	err                 error
-	summarySnapshot     *db.SummaryReportData
-	summaryErr          error
-	timeseriesSnapshot  *db.TimeseriesReportData
-	timeseriesErr       error
-	imageSnapshot       *db.ImageReportData
-	imageErr            error
-	imageCalls          int
-	imageSince          time.Time
-	imageDone           bool
-	overviewSnapshot    *db.OverviewReportData
-	overviewErr         error
-	overviewCalls       int
-	overviewSince       time.Time
-	overviewRecent      time.Time
-	runtimeQueueDepth   int64
-	runtimeDropped      int64
-	runtimeParseErrors  int64
-	runtimeDBErrors     int64
-	modelAssetsSnapshot *db.ModelAssetsReportData
-	modelAssetsErr      error
-	keysSnapshot        *db.KeysReportData
-	keysErr             error
-	activityRow         *db.ActivityRow
-	activityErr         error
-	requestRows         []db.RequestRow
-	requestErr          error
-	requestFilter       db.RequestFilter
-	issuesData          *db.IssuesReportData
-	issuesErr           error
-	issueFilter         db.IssueFilter
-	errorTimeline       []db.ErrorTimelineRow
-	errorTimelineErr    error
-	lastBucketMin       int
-	calls               int
-	lastSince           time.Time
-	lastDone            bool
-	lastKeyHash         string
+	snapshot                *db.ModelsReportData
+	err                     error
+	summarySnapshot         *db.SummaryReportData
+	summaryErr              error
+	timeseriesSnapshot      *db.TimeseriesReportData
+	timeseriesErr           error
+	imageSnapshot           *db.ImageReportData
+	imageErr                error
+	imageCalls              int
+	imageSince              time.Time
+	imageDone               bool
+	overviewSnapshot        *db.OverviewReportData
+	overviewErr             error
+	overviewCalls           int
+	overviewSince           time.Time
+	overviewRecent          time.Time
+	runtimeQueueDepth       int64
+	runtimeDropped          int64
+	runtimeParseErrors      int64
+	runtimeDBErrors         int64
+	modelAssetsSnapshot     *db.ModelAssetsReportData
+	modelAssetsErr          error
+	keysSnapshot            *db.KeysReportData
+	keysErr                 error
+	activityRow             *db.ActivityRow
+	activityErr             error
+	requestRows             []db.RequestRow
+	requestErr              error
+	requestFilter           db.RequestFilter
+	issuesData              *db.IssuesReportData
+	issuesErr               error
+	issueFilter             db.IssueFilter
+	errorTimeline           []db.ErrorTimelineRow
+	errorTimelineErr        error
+	errorTimelineFromReq    []db.ErrorTimelineRow
+	errorTimelineFromReqErr error
+	latestHealth            *db.HealthRow
+	latestHealthErr         error
+	multimodalRows          []db.MultimodalSummaryRow
+	multimodalErr           error
+	imageRequestRows        []db.RequestRow
+	imageRequestErr         error
+	gatewayRows             []db.GatewayCapabilityRow
+	gatewayErr              error
+	lastBucketMin           int
+	calls                   int
+	lastSince               time.Time
+	lastDone                bool
+	lastKeyHash             string
 }
 
 func (s *stubModelsReader) ModelsReportSnapshot(ctx context.Context, scope db.ReportScope) (*db.ModelsReportData, error) {
@@ -176,6 +186,41 @@ func (s *stubModelsReader) ErrorTimelineReport(ctx context.Context, since time.T
 	return s.errorTimeline, nil
 }
 
+func (s *stubModelsReader) MultimodalSummaryReport(ctx context.Context, since time.Time) ([]db.MultimodalSummaryRow, error) {
+	if s.multimodalErr != nil {
+		return nil, s.multimodalErr
+	}
+	return s.multimodalRows, nil
+}
+
+func (s *stubModelsReader) ImageRequestsReport(ctx context.Context, limit int, since time.Time) ([]db.RequestRow, error) {
+	if s.imageRequestErr != nil {
+		return nil, s.imageRequestErr
+	}
+	return s.imageRequestRows, nil
+}
+
+func (s *stubModelsReader) ErrorTimelineFromRequestsReport(ctx context.Context, since time.Time) ([]db.ErrorTimelineRow, error) {
+	if s.errorTimelineFromReqErr != nil {
+		return nil, s.errorTimelineFromReqErr
+	}
+	return s.errorTimelineFromReq, nil
+}
+
+func (s *stubModelsReader) LatestHealthReport(ctx context.Context) (*db.HealthRow, error) {
+	if s.latestHealthErr != nil {
+		return nil, s.latestHealthErr
+	}
+	return s.latestHealth, nil
+}
+
+func (s *stubModelsReader) GatewayCapabilitiesReport(ctx context.Context, since time.Time) ([]db.GatewayCapabilityRow, error) {
+	if s.gatewayErr != nil {
+		return nil, s.gatewayErr
+	}
+	return s.gatewayRows, nil
+}
+
 func testDependencies(reader *stubModelsReader) Dependencies {
 	return Dependencies{
 		Models: reader, Summary: reader, Timeseries: reader, Images: reader,
@@ -185,6 +230,7 @@ func testDependencies(reader *stubModelsReader) Dependencies {
 		Activity:    reader,
 		Requests:    reader,
 		Issues:      reader,
+		Multimodal:  reader, ImageRequests: reader, Errors: reader, Gateway: reader,
 	}
 }
 

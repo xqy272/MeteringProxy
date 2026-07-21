@@ -1,11 +1,8 @@
 package event
 
 import (
-	"encoding/json"
 	"testing"
 	"time"
-
-	"ai-gateway-metering-proxy/internal/db"
 )
 
 func TestEventToRecord_BasicMapping(t *testing.T) {
@@ -85,51 +82,5 @@ func TestEventConstants_Distinct(t *testing.T) {
 	modes := map[string]bool{CapturePassthrough: true, CaptureRequestOnly: true, CaptureUsageMetered: true}
 	if len(modes) != 3 {
 		t.Error("capture modes should be distinct")
-	}
-}
-
-func TestMetadataReport_JSON(t *testing.T) {
-	meta := MetadataReport{
-		Endpoints: []EndpointMeta{
-			{Name: "chat_completions", Path: "/v1/chat/completions", Method: "POST", DisplayName: "Chat Completions", MeteringKind: MeteringLLMTokens, CaptureMode: CaptureUsageMetered},
-		},
-		Ranges: []RangeMeta{
-			{Key: "24h", Label: "24 Hours", Bucket: "10m"},
-		},
-		Buckets: []BucketMeta{
-			{Key: "10m", Label: "10 Minutes"},
-		},
-		MeteringKinds: []string{MeteringLLMTokens},
-		CaptureModes:  []string{CaptureUsageMetered},
-	}
-
-	data, err := json.Marshal(meta)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	var unmarshalled MetadataReport
-	if err := json.Unmarshal(data, &unmarshalled); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if len(unmarshalled.Endpoints) != 1 {
-		t.Errorf("endpoints = %d, want 1", len(unmarshalled.Endpoints))
-	}
-}
-
-func TestRequestsFromDBComputesUsageConfidence(t *testing.T) {
-	rows := []db.RequestRow{
-		{UsageSource: UsageSourceHTTPResponse, CaptureOutcome: OutcomeCaptured, InputTokens: 1},
-		{UsageSource: UsageSourceCliproxySide, CaptureOutcome: OutcomeCaptured, InputTokens: 1},
-		{SideUsageMatchStatus: "conflict", InputTokens: 1},
-		{CaptureMode: CaptureUsageMetered, CaptureOutcome: OutcomeSkipped},
-		{CaptureMode: CaptureRequestOnly, CaptureOutcome: OutcomeCaptured},
-		{CaptureMode: CapturePassthrough, CaptureOutcome: OutcomeCaptured},
-	}
-	reports := RequestsFromDB(rows)
-	want := []string{"observed", "side_channel", "conflict", "missing_usage", "request_only", "unsupported"}
-	for i := range want {
-		if reports[i].UsageConfidence != want[i] {
-			t.Fatalf("row %d UsageConfidence = %q, want %q", i, reports[i].UsageConfidence, want[i])
-		}
 	}
 }

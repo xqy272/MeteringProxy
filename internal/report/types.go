@@ -398,3 +398,147 @@ type IssuesReport struct {
 	Partial bool                 `json:"partial"`
 	Sources IssuesSourceStatuses `json:"sources"`
 }
+
+// MultimodalSummaryReport is the stable /api/multimodal/summary item.
+type MultimodalSummaryReport struct {
+	Modality      string  `json:"modality"`
+	Channel       string  `json:"channel"`
+	Metric        string  `json:"metric"`
+	Direction     string  `json:"direction"`
+	Unit          string  `json:"unit"`
+	Amount        float64 `json:"amount"`
+	RequestCount  int64   `json:"request_count"`
+	UnpricedCount int64   `json:"unpriced_count"`
+}
+
+// ErrorTimelinePoint is one combined errors timeline bucket.
+type ErrorTimelinePoint struct {
+	Timestamp       string `json:"timestamp"`
+	Count           int64  `json:"count"`
+	ParseErrors     int64  `json:"parse_errors"`
+	DBErrors        int64  `json:"db_errors"`
+	DroppedEvents   int64  `json:"dropped_events"`
+	BaselineMissing bool   `json:"baseline_missing,omitempty"`
+}
+
+// Source status values for multi-source dashboard reports.
+const (
+	SourceComplete      = "complete"
+	SourceUnavailable   = "unavailable"
+	SourceEmpty         = "empty"
+	SourceNotApplicable = "not_applicable"
+)
+
+// ErrorsSourceStatuses is the additive multi-source status envelope for /api/errors.
+type ErrorsSourceStatuses struct {
+	HealthMetrics string `json:"health_metrics"`
+	RequestUsage  string `json:"request_usage"`
+	LatestHealth  string `json:"latest_health"`
+}
+
+// ErrorsReport is the stable /api/errors response. Old fields are preserved;
+// Partial and SourceStatuses are additive.
+type ErrorsReport struct {
+	Timeline           []ErrorTimelinePoint `json:"timeline"`
+	Source             string               `json:"source"`
+	BucketCount        int                  `json:"bucket_count"`
+	NonzeroBucketCount int                  `json:"nonzero_bucket_count"`
+	QueueDepth         int64                `json:"queue_depth"`
+	ParseErrors        int64                `json:"parse_errors"`
+	DBErrors           int64                `json:"db_errors"`
+	DroppedEvents      int64                `json:"dropped_events"`
+	Partial            bool                 `json:"partial"`
+	SourceStatuses     ErrorsSourceStatuses `json:"source_statuses"`
+}
+
+// HealthSnapshot is the nested latest_health object in /api/health.
+type HealthSnapshot struct {
+	Timestamp     string `json:"timestamp"`
+	QueueDepth    int64  `json:"queue_depth"`
+	DroppedEvents int64  `json:"dropped_events"`
+	ParseErrors   int64  `json:"parse_errors"`
+	DBErrors      int64  `json:"db_errors"`
+	SSELineSkips  int64  `json:"sse_line_skips"`
+}
+
+// HealthSourceStatuses is the additive multi-source status for /api/health.
+type HealthSourceStatuses struct {
+	Runtime      string `json:"runtime"`
+	LatestHealth string `json:"latest_health"`
+}
+
+// HealthDashboardReport is the stable /api/health response.
+type HealthDashboardReport struct {
+	QueueDepth      int64                `json:"queue_depth"`
+	DroppedEvents   int64                `json:"dropped_events"`
+	ParseErrors     int64                `json:"parse_errors"`
+	DBWriteErrors   int64                `json:"db_write_errors"`
+	LatestHealth    HealthSnapshot       `json:"latest_health"`
+	MeteringEnabled bool                 `json:"metering_enabled"`
+	CaptureDisabled bool                 `json:"capture_disabled"`
+	Partial         bool                 `json:"partial"`
+	SourceStatuses  HealthSourceStatuses `json:"source_statuses"`
+}
+
+// RangeMeta is a fixed time-range option for metadata.
+type RangeMeta struct {
+	Key    string `json:"key"`
+	Label  string `json:"label"`
+	Bucket string `json:"bucket"`
+}
+
+// BucketMeta is a fixed bucket option for metadata.
+type BucketMeta struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+}
+
+// EndpointMeta is the metadata API endpoint description.
+// Defined here for report JSON stability; profile.EndpointMeta is the source shape.
+type EndpointMeta struct {
+	Name         string `json:"name"`
+	Path         string `json:"path"`
+	FilterValue  string `json:"filter_value"`
+	Method       string `json:"method"`
+	DisplayName  string `json:"display_name"`
+	MeteringKind string `json:"metering_kind"`
+	CaptureMode  string `json:"capture_mode"`
+}
+
+// MetadataReport is the stable /api/metadata response.
+type MetadataReport struct {
+	Endpoints     []EndpointMeta `json:"endpoints"`
+	Ranges        []RangeMeta    `json:"ranges"`
+	Buckets       []BucketMeta   `json:"buckets"`
+	MeteringKinds []string       `json:"metering_kinds"`
+	CaptureModes  []string       `json:"capture_modes"`
+}
+
+// GatewayCapabilitySummary is the summary block of /api/gateway/capabilities.
+type GatewayCapabilitySummary struct {
+	TotalRequests    int64 `json:"total_requests"`
+	UsageMeteredReqs int64 `json:"usage_metered_requests"`
+	RequestOnlyReqs  int64 `json:"request_only_requests"`
+	PassthroughReqs  int64 `json:"passthrough_requests"`
+	StreamRequests   int64 `json:"stream_requests"`
+	MissingUsageReqs int64 `json:"missing_usage_requests"`
+}
+
+// GatewayCapabilityProfile is one profile row in /api/gateway/capabilities.
+type GatewayCapabilityProfile struct {
+	Name              string   `json:"name"`
+	DisplayName       string   `json:"display_name"`
+	CaptureMode       string   `json:"capture_mode"`
+	MeteringKind      string   `json:"metering_kind"`
+	RequestCount      int64    `json:"request_count"`
+	MissingUsageCount int64    `json:"missing_usage_count"`
+	StreamCount       int64    `json:"stream_count"`
+	KnownLimitations  []string `json:"known_limitations,omitempty"`
+}
+
+// GatewayCapabilitiesReport is the stable /api/gateway/capabilities response.
+type GatewayCapabilitiesReport struct {
+	Range    string                     `json:"range"`
+	Summary  GatewayCapabilitySummary   `json:"summary"`
+	Profiles []GatewayCapabilityProfile `json:"profiles"`
+}

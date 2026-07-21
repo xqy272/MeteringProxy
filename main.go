@@ -101,7 +101,6 @@ func main() {
 	defer batchWriter.Stop()
 
 	// Wire store interface boundaries.
-	var reportStore store.ReportStore = database
 	var healthWriter store.HealthWriter = database
 
 	// Health metrics reporter (every 60s) with WAL checkpoint scheduling.
@@ -246,13 +245,16 @@ func main() {
 			Overview: database, Capture: batchWriter, ModelAssets: database,
 			Keys: database, KeyLabels: cfg.KeyLabels,
 			Activity: database, Requests: database, Issues: database,
+			Multimodal: database, ImageRequests: database, Errors: database, Gateway: database,
+			Profiles:    proxyHandler.Registry(),
 			SideChannel: sideChannel,
 		}, pricingData)
+		diag := webui.DiagnosticsReaders{Quota: database, Obs: database}
 		var webuiServer *webui.Server
 		if *devStatic {
-			webuiServer = webui.NewWithStaticFS(reportStore, modelsReporter, batchWriter, proxyHandler.Registry(), cfg.WebUI.BasePath, os.DirFS("internal/webui/static"))
+			webuiServer = webui.NewWithStaticFS(modelsReporter, batchWriter, cfg.WebUI.BasePath, os.DirFS("internal/webui/static"), diag)
 		} else {
-			webuiServer = webui.New(reportStore, modelsReporter, batchWriter, proxyHandler.Registry(), cfg.WebUI.BasePath)
+			webuiServer = webui.New(modelsReporter, batchWriter, cfg.WebUI.BasePath, diag)
 		}
 		webuiServer.SetMeteringEnabledFunc(func() bool { return cfg.MeteringEnabled })
 		webuiServer.SetCorrelationMode(cfg.Observability.Correlation.SideChannelMerge)

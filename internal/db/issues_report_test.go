@@ -64,9 +64,6 @@ func TestIssuesReportFiltersExactKeyAndExcludesGlobalSources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IssuesReport keyA: %v", err)
 	}
-	if data.RequestUsageErr != nil {
-		t.Fatalf("request_usage err: %v", data.RequestUsageErr)
-	}
 	if len(data.RequestUsage) != 1 || data.RequestUsage[0].APIKeyHash != keyA || data.RequestUsage[0].Class != "rate_limited" {
 		t.Fatalf("keyA request_usage = %+v", data.RequestUsage)
 	}
@@ -79,8 +76,8 @@ func TestIssuesReportFiltersExactKeyAndExcludesGlobalSources(t *testing.T) {
 		Scope: ReportScope{Since: now.Add(-time.Hour), KeyHash: keyB},
 		Limit: 20, IncludeGlobal: false,
 	})
-	if err != nil || dataB.RequestUsageErr != nil {
-		t.Fatalf("IssuesReport keyB: %v / %v", err, dataB.RequestUsageErr)
+	if err != nil {
+		t.Fatalf("IssuesReport keyB: %v", err)
 	}
 	if len(dataB.RequestUsage) != 1 || dataB.RequestUsage[0].APIKeyHash != keyB || dataB.RequestUsage[0].Class != "auth_failed" {
 		t.Fatalf("keyB request_usage = %+v", dataB.RequestUsage)
@@ -91,8 +88,8 @@ func TestIssuesReportFiltersExactKeyAndExcludesGlobalSources(t *testing.T) {
 		Scope: ReportScope{Since: now.Add(-time.Hour), KeyHash: "unknown"},
 		Limit: 20, IncludeGlobal: false,
 	})
-	if err != nil || dataU.RequestUsageErr != nil {
-		t.Fatalf("IssuesReport unknown: %v / %v", err, dataU.RequestUsageErr)
+	if err != nil {
+		t.Fatalf("IssuesReport unknown: %v", err)
 	}
 	if len(dataU.RequestUsage) != 1 || dataU.RequestUsage[0].RequestID != "u-1" || dataU.RequestUsage[0].APIKeyHash != "" {
 		t.Fatalf("unknown request_usage = %+v", dataU.RequestUsage)
@@ -103,8 +100,8 @@ func TestIssuesReportFiltersExactKeyAndExcludesGlobalSources(t *testing.T) {
 		Scope: ReportScope{Since: now.Add(-time.Hour)},
 		Limit: 50, IncludeGlobal: true,
 	})
-	if err != nil || global.RequestUsageErr != nil {
-		t.Fatalf("IssuesReport global: %v / %v", err, global.RequestUsageErr)
+	if err != nil {
+		t.Fatalf("IssuesReport global: %v", err)
 	}
 	if global.SideChannelErr != nil || global.CredentialErr != nil || global.QuotaErr != nil {
 		t.Fatalf("optional errs: side=%v cred=%v quota=%v", global.SideChannelErr, global.CredentialErr, global.QuotaErr)

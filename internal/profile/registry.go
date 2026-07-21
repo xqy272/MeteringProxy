@@ -365,3 +365,21 @@ func (r *Registry) MeteredProfiles() []*EndpointProfile {
 	}
 	return result
 }
+
+// EndpointMetas returns metadata API endpoint descriptors for all profiles.
+func (r *Registry) EndpointMetas() []EndpointMeta {
+	out := make([]EndpointMeta, 0, len(r.profiles))
+	for _, p := range r.profiles {
+		out = append(out, p.ToEndpointMeta())
+	}
+	return out
+}
+
+// GatewayProfiles returns static capability-matrix entries for gateway reports.
+func (r *Registry) GatewayProfiles() []GatewayProfileInfo {
+	out := make([]GatewayProfileInfo, 0, len(r.profiles))
+	for _, p := range r.profiles {
+		out = append(out, p.GatewayProfileInfo())
+	}
+	return out
+}

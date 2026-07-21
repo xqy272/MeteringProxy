@@ -78,3 +78,28 @@ type IssueFilter struct {
 	Limit   int
 	Range   string
 }
+
+type MultimodalFilter struct {
+	Since time.Time
+}
+
+type ImageRequestsFilter struct {
+	Since time.Time
+	Limit int
+}
+
+type ErrorsFilter struct {
+	Since   time.Time
+	Nonzero bool
+}
+
+type HealthFilter struct {
+	MeteringEnabled bool
+}
+
+type MetadataFilter struct{}
+
+type GatewayFilter struct {
+	Since time.Time
+	Range string
+}

@@ -72,13 +72,13 @@ func (p *EndpointProfile) IsMetered() bool {
 	return p.CaptureMode != event.CapturePassthrough
 }
 
-// ToEndpointMeta converts this profile to an event.EndpointMeta for metadata API.
-func (p *EndpointProfile) ToEndpointMeta() event.EndpointMeta {
+// ToEndpointMeta converts this profile to metadata API endpoint description.
+func (p *EndpointProfile) ToEndpointMeta() EndpointMeta {
 	filterValue := p.PathPrefix
 	if p.PathMatcher != nil {
 		filterValue = "profile:" + p.Name
 	}
-	return event.EndpointMeta{
+	return EndpointMeta{
 		Name:         p.Name,
 		Path:         p.PathPrefix,
 		FilterValue:  filterValue,
@@ -86,5 +86,20 @@ func (p *EndpointProfile) ToEndpointMeta() event.EndpointMeta {
 		DisplayName:  p.DisplayName(),
 		MeteringKind: p.MeteringKind,
 		CaptureMode:  p.CaptureMode,
+	}
+}
+
+// GatewayProfileInfo builds the static capability descriptor for gateway reports.
+func (p *EndpointProfile) GatewayProfileInfo() GatewayProfileInfo {
+	var limitations []string
+	if p.StreamProtocol.UsesSSE {
+		limitations = append(limitations, "compressed_sse_not_metered")
+	}
+	return GatewayProfileInfo{
+		Name:             p.Name,
+		DisplayName:      p.DisplayName(),
+		CaptureMode:      p.CaptureMode,
+		MeteringKind:     p.MeteringKind,
+		KnownLimitations: limitations,
 	}
 }

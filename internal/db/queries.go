@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -151,26 +152,8 @@ func classSeverity(class string) string {
 	}
 }
 
-func (db *DB) CaptureOutcomeCounts(since time.Time) (captured, skipped, failed int64, err error) {
-	if err := db.read.QueryRow(`
-		SELECT COUNT(*) FROM request_usage
-		WHERE created_at_unix >= ? AND capture_outcome = 'captured'
-	`, since.Unix()).Scan(&captured); err != nil {
-		return 0, 0, 0, fmt.Errorf("capture outcome count captured: %w", err)
-	}
-	if err := db.read.QueryRow(`
-		SELECT COUNT(*) FROM request_usage
-		WHERE created_at_unix >= ? AND capture_outcome = 'skipped'
-	`, since.Unix()).Scan(&skipped); err != nil {
-		return 0, 0, 0, fmt.Errorf("capture outcome count skipped: %w", err)
-	}
-	if err := db.read.QueryRow(`
-		SELECT COUNT(*) FROM request_usage
-		WHERE created_at_unix >= ? AND capture_outcome = 'failed'
-	`, since.Unix()).Scan(&failed); err != nil {
-		return 0, 0, 0, fmt.Errorf("capture outcome count failed: %w", err)
-	}
-	return captured, skipped, failed, nil
+func (db *DB) CaptureOutcomeCounts(ctx context.Context, since time.Time) (captured, skipped, failed int64, err error) {
+	return db.CaptureOutcomeCountsReport(ctx, since)
 }
 
 // GatewayCapabilityRow is one per-endpoint_profile aggregate for the gateway
@@ -234,45 +217,4 @@ func (db *DB) VerifySaltFingerprint(fingerprint, dbPath, saltPath string) error 
 		)
 	}
 	return nil
-}
-
-// GatewayCapabilities aggregates request_usage by endpoint_profile for the
-// gateway capability view. Rows cover only profiles that had traffic in the
-// range; the webui layer merges in zero-traffic profiles from the registry.
-func (db *DB) GatewayCapabilities(since time.Time) ([]GatewayCapabilityRow, error) {
-	rows, err := db.read.Query(`
-		SELECT
-			COALESCE(NULLIF(endpoint_profile, ''), 'unknown') AS endpoint_profile,
-			COUNT(*) AS request_count,
-			SUM(CASE WHEN stream = 1 THEN 1 ELSE 0 END) AS stream_count,
-			SUM(CASE WHEN capture_mode = 'usage_metered' AND capture_outcome != 'captured' THEN 1 ELSE 0 END) AS missing_usage_count,
-			SUM(CASE WHEN capture_mode = 'usage_metered' THEN 1 ELSE 0 END) AS usage_metered_count,
-			SUM(CASE WHEN capture_mode = 'request_only' THEN 1 ELSE 0 END) AS request_only_count,
-			SUM(CASE WHEN capture_mode = 'passthrough' THEN 1 ELSE 0 END) AS passthrough_count
-		FROM request_usage
-		WHERE created_at_unix >= ?
-		GROUP BY COALESCE(NULLIF(endpoint_profile, ''), 'unknown')
-	`, since.Unix())
-	if err != nil {
-		return nil, fmt.Errorf("gateway capabilities query: %w", err)
-	}
-	defer rows.Close()
-
-	var result []GatewayCapabilityRow
-	for rows.Next() {
-		var r GatewayCapabilityRow
-		if err := rows.Scan(
-			&r.EndpointProfile,
-			&r.RequestCount,
-			&r.StreamCount,
-			&r.MissingUsageCount,
-			&r.UsageMeteredCount,
-			&r.RequestOnlyCount,
-			&r.PassthroughCount,
-		); err != nil {
-			return nil, fmt.Errorf("gateway capabilities scan: %w", err)
-		}
-		result = append(result, r)
-	}
-	return result, rows.Err()
 }

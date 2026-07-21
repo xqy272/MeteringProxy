@@ -1,8 +1,10 @@
 package webui
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"html"
 	"io/fs"
 	"log"
@@ -13,21 +15,36 @@ import (
 	"time"
 
 	"ai-gateway-metering-proxy/internal/db"
-	"ai-gateway-metering-proxy/internal/event"
-	"ai-gateway-metering-proxy/internal/profile"
 	"ai-gateway-metering-proxy/internal/report"
-	"ai-gateway-metering-proxy/internal/store"
 	"ai-gateway-metering-proxy/internal/writer"
 )
 
 //go:embed static/*
 var staticFiles embed.FS
 
+// QuotaDiagnosticsReader is the narrow DB surface for quota diagnostic lists.
+// Defined by webui as the consumer; *db.DB implements it.
+type QuotaDiagnosticsReader interface {
+	RecentQuotaRefreshEvents(ctx context.Context, since time.Time, limit int) ([]db.QuotaRefreshEventRow, error)
+}
+
+// ObservabilityReader is the narrow DB surface for observability capture/side-channel counts.
+type ObservabilityReader interface {
+	SideUsageStatusCounts(ctx context.Context, since time.Time) (map[string]int64, error)
+	CaptureOutcomeCounts(ctx context.Context, since time.Time) (captured, skipped, failed int64, err error)
+}
+
+// DiagnosticsReaders groups remaining WebUI-owned CPA/observability DB reads.
+type DiagnosticsReaders struct {
+	Quota QuotaDiagnosticsReader
+	Obs   ObservabilityReader
+}
+
 type Server struct {
-	db        store.ReportStore
 	reports   report.CoreReporter
+	quotaDiag QuotaDiagnosticsReader
+	obs       ObservabilityReader
 	writer    *writer.BatchWriter
-	registry  *profile.Registry
 	basePath  string
 	apiPrefix string
 	mux       *http.ServeMux
@@ -53,19 +70,19 @@ type Server struct {
 
 // New creates a Server that serves static files from the embedded filesystem.
 // models is required and must be wired by the composition root.
-func New(database store.ReportStore, reports report.CoreReporter, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string) *Server {
+func New(reports report.CoreReporter, batchWriter *writer.BatchWriter, basePath string, diag DiagnosticsReaders) *Server {
 	staticFS, _ := fs.Sub(staticFiles, "static")
-	return newServer(database, reports, batchWriter, registry, basePath, staticFS)
+	return newServer(reports, batchWriter, basePath, staticFS, diag)
 }
 
 // NewWithStaticFS creates a Server that serves static files from the given
 // filesystem. Use this for local development (os.DirFS on the static/ directory)
 // or testing with custom asset sets.
-func NewWithStaticFS(database store.ReportStore, reports report.CoreReporter, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string, staticFS fs.FS) *Server {
-	return newServer(database, reports, batchWriter, registry, basePath, staticFS)
+func NewWithStaticFS(reports report.CoreReporter, batchWriter *writer.BatchWriter, basePath string, staticFS fs.FS, diag DiagnosticsReaders) *Server {
+	return newServer(reports, batchWriter, basePath, staticFS, diag)
 }
 
-func newServer(database store.ReportStore, reports report.CoreReporter, batchWriter *writer.BatchWriter, registry *profile.Registry, basePath string, staticFS fs.FS) *Server {
+func newServer(reports report.CoreReporter, batchWriter *writer.BatchWriter, basePath string, staticFS fs.FS, diag DiagnosticsReaders) *Server {
 	if reports == nil {
 		panic("webui: core reporter is required")
 	}
@@ -73,10 +90,10 @@ func newServer(database store.ReportStore, reports report.CoreReporter, batchWri
 	apiPrefix := basePath + "/api/"
 
 	s := &Server{
-		db:              database,
 		reports:         reports,
+		quotaDiag:       diag.Quota,
+		obs:             diag.Obs,
 		writer:          batchWriter,
-		registry:        registry,
 		basePath:        basePath,
 		apiPrefix:       apiPrefix,
 		staticFS:        staticFS,
@@ -410,13 +427,13 @@ func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleMultimodalSummary(w http.ResponseWriter, r *http.Request) {
 	since, _ := parseRange(r)
-	rows, err := s.db.MultimodalSummary(since)
+	rows, err := s.reports.MultimodalSummary(r.Context(), report.MultimodalFilter{Since: since})
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		writeReportQueryFailed(w, "multimodal summary", err)
 		return
 	}
 	if rows == nil {
-		rows = []db.MultimodalSummaryRow{}
+		rows = []report.MultimodalSummaryReport{}
 	}
 	writeJSON(w, rows)
 }
@@ -450,179 +467,57 @@ func (s *Server) handleImageRequests(w http.ResponseWriter, r *http.Request) {
 		limit = 100
 	}
 	since, _ := parseRange(r)
-	rows, err := s.db.ImageRequests(limit, since)
+	rows, err := s.reports.ImageRequests(r.Context(), report.ImageRequestsFilter{Since: since, Limit: limit})
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		writeReportQueryFailed(w, "image requests", err)
 		return
 	}
-	report := event.RequestsFromDB(rows)
-	if report == nil {
-		report = []event.RequestReport{}
+	if rows == nil {
+		rows = []report.RequestReport{}
 	}
-	writeJSON(w, report)
+	writeJSON(w, rows)
 }
 
 func (s *Server) handleErrors(w http.ResponseWriter, r *http.Request) {
 	since, _ := parseRange(r)
-
-	type errorResp struct {
-		Timeline           []event.ErrorTimelineReport `json:"timeline"`
-		Source             string                      `json:"source"`
-		BucketCount        int                         `json:"bucket_count"`
-		NonzeroBucketCount int                         `json:"nonzero_bucket_count"`
-		QueueDepth         int64                       `json:"queue_depth"`
-		ParseErrors        int64                       `json:"parse_errors"`
-		DBErrors           int64                       `json:"db_errors"`
-		DroppedEvents      int64                       `json:"dropped_events"`
+	nonzero := r.URL.Query().Get("nonzero") == "true"
+	result, err := s.reports.Errors(r.Context(), report.ErrorsFilter{Since: since, Nonzero: nonzero})
+	if err != nil {
+		writeReportQueryFailed(w, "errors", err)
+		return
 	}
-
-	writeErrResp := func(source string, timeline []event.ErrorTimelineReport) {
-		latestHealth, _ := s.db.LatestHealth()
-		bucketCount := len(timeline)
-		nonzeroTimeline := filterNonzeroErrors(timeline)
-		nonzeroBucketCount := len(nonzeroTimeline)
-		if r.URL.Query().Get("nonzero") == "true" {
-			timeline = nonzeroTimeline
-		}
-		resp := errorResp{
-			Timeline:           timeline,
-			Source:             source,
-			BucketCount:        bucketCount,
-			NonzeroBucketCount: nonzeroBucketCount,
-		}
-		if latestHealth != nil {
-			resp.QueueDepth = latestHealth.QueueDepth
-			resp.ParseErrors = latestHealth.ParseErrors
-			resp.DBErrors = latestHealth.DBErrors
-			resp.DroppedEvents = latestHealth.DroppedEvents
-		}
-		if resp.Timeline == nil {
-			resp.Timeline = []event.ErrorTimelineReport{}
-		}
-		writeJSON(w, resp)
-	}
-
-	var sources []string
-	var timelines [][]event.ErrorTimelineReport
-	healthRows, err := s.db.ErrorTimeline(since)
-	if err == nil && len(healthRows) > 0 {
-		sources = append(sources, "health_metrics")
-		timelines = append(timelines, event.ErrorTimelineFromDB(healthRows))
-	}
-
-	reqErrorRows, err := s.db.ErrorTimelineFromRequests(since)
-	if err == nil && len(reqErrorRows) > 0 {
-		sources = append(sources, "request_usage")
-		timelines = append(timelines, event.ErrorTimelineFromDB(reqErrorRows))
-	}
-
-	source := "request_usage"
-	if len(sources) > 0 {
-		source = strings.Join(sources, "+")
-	}
-	writeErrResp(source, combineErrorTimelines(timelines...))
-}
-
-func filterNonzeroErrors(rows []event.ErrorTimelineReport) []event.ErrorTimelineReport {
-	if len(rows) == 0 {
-		return []event.ErrorTimelineReport{}
-	}
-	filtered := make([]event.ErrorTimelineReport, 0, len(rows))
-	for _, r := range rows {
-		if r.Count+r.ParseErrors+r.DBErrors+r.DroppedEvents > 0 {
-			filtered = append(filtered, r)
-		}
-	}
-	return filtered
-}
-
-func combineErrorTimelines(groups ...[]event.ErrorTimelineReport) []event.ErrorTimelineReport {
-	byTimestamp := map[string]*event.ErrorTimelineReport{}
-	for _, rows := range groups {
-		for _, row := range rows {
-			key := row.Timestamp
-			if key == "" {
-				key = "unknown"
-			}
-			existing := byTimestamp[key]
-			if existing == nil {
-				copy := row
-				byTimestamp[key] = &copy
-				continue
-			}
-			existing.Count += row.Count
-			existing.ParseErrors += row.ParseErrors
-			existing.DBErrors += row.DBErrors
-			existing.DroppedEvents += row.DroppedEvents
-		}
-	}
-
-	combined := make([]event.ErrorTimelineReport, 0, len(byTimestamp))
-	for _, row := range byTimestamp {
-		combined = append(combined, *row)
-	}
-	sort.Slice(combined, func(i, j int) bool {
-		return combined[i].Timestamp < combined[j].Timestamp
-	})
-	return combined
+	writeJSON(w, result)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	queueDepth, dropped, parseErrors, dbErrors := s.writer.Snapshot()
-	latestHealth, _ := s.db.LatestHealth()
-	meteringEnabled := s.meteringEnabled()
-	resp := map[string]any{
-		"queue_depth":      queueDepth,
-		"dropped_events":   dropped,
-		"parse_errors":     parseErrors,
-		"db_write_errors":  dbErrors,
-		"latest_health":    event.HealthFromDB(latestHealth),
-		"metering_enabled": meteringEnabled,
-		"capture_disabled": !meteringEnabled,
+	result, err := s.reports.Health(r.Context(), report.HealthFilter{MeteringEnabled: s.meteringEnabled()})
+	if err != nil {
+		writeReportQueryFailed(w, "health", err)
+		return
 	}
-	writeJSON(w, resp)
+	writeJSON(w, result)
 }
 
 func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
-	meta := event.MetadataReport{
-		Ranges: []event.RangeMeta{
-			{Key: "24h", Label: "Last 24 Hours", Bucket: "1h"},
-			{Key: "today", Label: "Today", Bucket: "1h"},
-			{Key: "7d", Label: "Last 7 Days", Bucket: "1h"},
-			{Key: "30d", Label: "Last 30 Days", Bucket: "1d"},
-		},
-		Buckets: []event.BucketMeta{
-			{Key: "1h", Label: "1 Hour"},
-			{Key: "1d", Label: "1 Day"},
-		},
-		MeteringKinds: []string{
-			event.MeteringLLMTokens,
-			event.MeteringImageTokens,
-			event.MeteringEmbeddingTokens,
-			event.MeteringAudioSeconds,
-			event.MeteringRequestOnly,
-			event.MeteringNone,
-		},
-		CaptureModes: []string{
-			event.CaptureUsageMetered,
-			event.CapturePassthrough,
-			event.CaptureRequestOnly,
-		},
+	result, err := s.reports.Metadata(r.Context(), report.MetadataFilter{})
+	if err != nil {
+		writeReportQueryFailed(w, "metadata", err)
+		return
 	}
-
-	if s.registry != nil {
-		for _, p := range s.registry.Profiles() {
-			meta.Endpoints = append(meta.Endpoints, p.ToEndpointMeta())
-		}
-	}
-
-	writeJSON(w, meta)
+	writeJSON(w, result)
 }
 
 func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
 	diagnostics := []db.QuotaRefreshEventRow{}
+	diagStatus := "not_applicable"
+	diagPartial := false
 	if s.quotaPoller != nil {
-		diagnostics = s.recentQuotaDiagnostics(12)
+		var err error
+		diagnostics, diagStatus, diagPartial, err = s.recentQuotaDiagnostics(r.Context(), 12)
+		if err != nil {
+			writeReportQueryFailed(w, "quota diagnostics", err)
+			return
+		}
 	}
 	credRows, credTime := []db.CredentialHealthRow{}, time.Time{}
 	if s.credPoller != nil {
@@ -735,6 +630,8 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
 			"items":                quotaRows,
 			"credential_items":     credRows,
 			"diagnostics":          diagnostics,
+			"diagnostics_status":   diagStatus,
+			"partial":              diagPartial,
 		}
 		writeJSON(w, resp)
 		return
@@ -790,6 +687,8 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
 			"items":                credRows,
 			"quota_items":          quotaRows,
 			"diagnostics":          diagnostics,
+			"diagnostics_status":   diagStatus,
+			"partial":              diagPartial,
 		}
 		writeJSON(w, resp)
 		return
@@ -804,6 +703,8 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
 		"providers":            []any{},
 		"items":                []any{},
 		"diagnostics":          diagnostics,
+		"diagnostics_status":   diagStatus,
+		"partial":              diagPartial,
 	})
 }
 
@@ -843,7 +744,11 @@ func (s *Server) handleQuotaDiagnostics(w http.ResponseWriter, r *http.Request) 
 	if s.quotaPoller != nil {
 		quotaRows, quotaTime, apiCallAvailable = s.quotaPoller.Snapshot()
 	}
-	events := s.recentQuotaDiagnostics(limit)
+	events, eventsStatus, eventsPartial, err := s.recentQuotaDiagnostics(r.Context(), limit)
+	if err != nil {
+		writeReportQueryFailed(w, "quota diagnostics", err)
+		return
+	}
 	checkedAt := quotaTime
 	if checkedAt.IsZero() {
 		checkedAt = credTime
@@ -858,6 +763,8 @@ func (s *Server) handleQuotaDiagnostics(w http.ResponseWriter, r *http.Request) 
 		"credentials":               credentialDiagnosticsSummary(credRows),
 		"quota":                     quotaDiagnosticsSummary(quotaRows),
 		"events":                    events,
+		"events_status":             eventsStatus,
+		"partial":                   eventsPartial,
 	})
 }
 
@@ -865,8 +772,15 @@ func (s *Server) handleObservability(w http.ResponseWriter, r *http.Request) {
 	credRows := []db.CredentialHealthRow{}
 	credTime := time.Time{}
 	quotaDiagnostics := []db.QuotaRefreshEventRow{}
+	quotaDiagStatus := "not_applicable"
+	quotaDiagPartial := false
 	if s.quotaPoller != nil {
-		quotaDiagnostics = s.recentQuotaDiagnostics(6)
+		var err error
+		quotaDiagnostics, quotaDiagStatus, quotaDiagPartial, err = s.recentQuotaDiagnostics(r.Context(), 6)
+		if err != nil {
+			writeReportQueryFailed(w, "observability", err)
+			return
+		}
 	}
 
 	resp := map[string]any{
@@ -891,19 +805,38 @@ func (s *Server) handleObservability(w http.ResponseWriter, r *http.Request) {
 
 	if s.usageQueuePoller != nil {
 		connected, lastAt, lastErr := s.usageQueuePoller.Snapshot()
-		counts, _ := s.db.SideUsageStatusCounts(time.Now().Add(-1 * time.Hour))
-		resp["side_channel"] = map[string]any{
+		side := map[string]any{
 			"enabled":          true,
 			"connected":        connected,
 			"merge_mode":       s.correlationMode,
 			"last_event_at":    formatRFC3339OrEmpty(lastAt),
 			"last_received_at": formatRFC3339OrEmpty(lastAt),
 			"last_error":       lastErr,
-			"matched_1h":       counts["matched"],
-			"unmatched_1h":     counts["unmatched"],
-			"stored_only_1h":   counts["stored_only"],
-			"conflicts_1h":     counts["conflict"],
+			"matched_1h":       int64(0),
+			"unmatched_1h":     int64(0),
+			"stored_only_1h":   int64(0),
+			"conflicts_1h":     int64(0),
+			"counts_status":    "not_applicable",
 		}
+		if s.obs != nil {
+			counts, err := s.obs.SideUsageStatusCounts(r.Context(), time.Now().Add(-1*time.Hour))
+			if err != nil {
+				if isContextError(err) {
+					writeReportQueryFailed(w, "observability", err)
+					return
+				}
+				log.Printf("observability side usage counts failed: %v", err)
+				side["counts_status"] = "unavailable"
+				side["partial"] = true
+			} else {
+				side["counts_status"] = "complete"
+				side["matched_1h"] = counts["matched"]
+				side["unmatched_1h"] = counts["unmatched"]
+				side["stored_only_1h"] = counts["stored_only"]
+				side["conflicts_1h"] = counts["conflict"]
+			}
+		}
+		resp["side_channel"] = side
 	}
 
 	if s.writer != nil {
@@ -914,7 +847,25 @@ func (s *Server) handleObservability(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	captured1h, skipped1h, failed1h, _ := s.db.CaptureOutcomeCounts(time.Now().Add(-1 * time.Hour))
+	captured1h, skipped1h, failed1h := int64(0), int64(0), int64(0)
+	captureStatus := "not_applicable"
+	capturePartial := false
+	if s.obs != nil {
+		var err error
+		captured1h, skipped1h, failed1h, err = s.obs.CaptureOutcomeCounts(r.Context(), time.Now().Add(-1*time.Hour))
+		if err != nil {
+			if isContextError(err) {
+				writeReportQueryFailed(w, "observability", err)
+				return
+			}
+			log.Printf("observability capture outcome counts failed: %v", err)
+			captureStatus = "unavailable"
+			capturePartial = true
+			captured1h, skipped1h, failed1h = 0, 0, 0
+		} else {
+			captureStatus = "complete"
+		}
+	}
 	resp["request_capture"] = map[string]any{
 		"parse_errors":       getMapVal(resp["request_capture"], "parse_errors"),
 		"dropped_events":     getMapVal(resp["request_capture"], "dropped_events"),
@@ -923,6 +874,8 @@ func (s *Server) handleObservability(w http.ResponseWriter, r *http.Request) {
 		"failed_1h":          failed1h,
 		"capture_skipped_1h": skipped1h,
 		"capture_failed_1h":  failed1h,
+		"counts_status":      captureStatus,
+		"partial":            capturePartial,
 	}
 
 	if s.credPoller != nil {
@@ -1010,24 +963,34 @@ func (s *Server) handleObservability(w http.ResponseWriter, r *http.Request) {
 			"error_count":          errorCount,
 			"latest_event":         latestQuotaDiagnostic(quotaDiagnostics),
 			"last_error":           latestQuotaDiagnosticError(quotaDiagnostics),
+			"diagnostics_status":   quotaDiagStatus,
+			"partial":              quotaDiagPartial,
 		}
 	}
 
 	writeJSON(w, resp)
 }
 
-func (s *Server) recentQuotaDiagnostics(limit int) []db.QuotaRefreshEventRow {
-	if s.db == nil {
-		return []db.QuotaRefreshEventRow{}
+func (s *Server) recentQuotaDiagnostics(ctx context.Context, limit int) (rows []db.QuotaRefreshEventRow, status string, partial bool, err error) {
+	if s.quotaDiag == nil {
+		return []db.QuotaRefreshEventRow{}, "not_applicable", false, nil
 	}
-	rows, err := s.db.RecentQuotaRefreshEvents(time.Now().Add(-72*time.Hour), limit)
+	rows, err = s.quotaDiag.RecentQuotaRefreshEvents(ctx, time.Now().Add(-72*time.Hour), limit)
 	if err != nil {
-		return []db.QuotaRefreshEventRow{}
+		if isContextError(err) {
+			return nil, "", false, err
+		}
+		log.Printf("quota diagnostics query failed: %v", err)
+		return []db.QuotaRefreshEventRow{}, "unavailable", true, nil
 	}
 	if rows == nil {
-		return []db.QuotaRefreshEventRow{}
+		rows = []db.QuotaRefreshEventRow{}
 	}
-	return rows
+	return rows, "complete", false, nil
+}
+
+func isContextError(err error) bool {
+	return err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
 }
 
 func latestQuotaDiagnostic(rows []db.QuotaRefreshEventRow) map[string]any {

@@ -29,11 +29,6 @@ func (s *Service) Issues(ctx context.Context, filter IssueFilter) (IssuesReport,
 	if err != nil {
 		return IssuesReport{}, err
 	}
-	if data.RequestUsageErr != nil {
-		// Compatibility path if a reader still envelopes core failure.
-		return IssuesReport{}, data.RequestUsageErr
-	}
-
 	sources := IssuesSourceStatuses{
 		RequestUsage:     IssueSourceComplete,
 		SideChannel:      IssueSourceNotApplicable,

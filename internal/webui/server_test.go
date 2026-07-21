@@ -46,9 +46,11 @@ func newTestServerWithPricing(t *testing.T, basePath string) (*Server, *db.DB, *
 		Models: database, Summary: database, Timeseries: database, Images: database,
 		Overview: database, Capture: bw, ModelAssets: database,
 		Keys: database, Activity: database, Requests: database, Issues: database,
+		Multimodal: database, ImageRequests: database, Errors: database, Gateway: database,
+		Profiles: registry,
 	}, pricingData)
 
-	s := New(database, modelsReporter, bw, registry, basePath)
+	s := New(modelsReporter, bw, basePath, DiagnosticsReaders{Quota: database, Obs: database})
 	return s, database, pricingData
 }
 
@@ -97,6 +99,18 @@ type stubModelsReporter struct {
 	issuesErr         error
 	issuesCalls       int
 	issuesFilter      report.IssueFilter
+	gatewayOut        report.GatewayCapabilitiesReport
+	gatewayErr        error
+	multimodalOut     []report.MultimodalSummaryReport
+	multimodalErr     error
+	imageRequestsOut  []report.RequestReport
+	imageRequestsErr  error
+	errorsOut         report.ErrorsReport
+	errorsErr         error
+	healthOut         report.HealthDashboardReport
+	healthErr         error
+	metadataOut       report.MetadataReport
+	metadataErr       error
 }
 
 func (s *stubModelsReporter) Models(ctx context.Context, filter report.ModelsFilter) ([]report.ModelReport, error) {
@@ -172,6 +186,52 @@ func (s *stubModelsReporter) Issues(ctx context.Context, filter report.IssueFilt
 	return s.issuesOut, nil
 }
 
+func (s *stubModelsReporter) MultimodalSummary(ctx context.Context, filter report.MultimodalFilter) ([]report.MultimodalSummaryReport, error) {
+	if s.multimodalErr != nil {
+		return nil, s.multimodalErr
+	}
+	return s.multimodalOut, nil
+}
+func (s *stubModelsReporter) ImageRequests(ctx context.Context, filter report.ImageRequestsFilter) ([]report.RequestReport, error) {
+	if s.imageRequestsErr != nil {
+		return nil, s.imageRequestsErr
+	}
+	return s.imageRequestsOut, nil
+}
+func (s *stubModelsReporter) Errors(ctx context.Context, filter report.ErrorsFilter) (report.ErrorsReport, error) {
+	if s.errorsErr != nil {
+		return report.ErrorsReport{}, s.errorsErr
+	}
+	return s.errorsOut, nil
+}
+func (s *stubModelsReporter) Health(ctx context.Context, filter report.HealthFilter) (report.HealthDashboardReport, error) {
+	if s.healthErr != nil {
+		return report.HealthDashboardReport{}, s.healthErr
+	}
+	if s.healthOut.MeteringEnabled || s.healthOut.CaptureDisabled || s.healthOut.QueueDepth != 0 {
+		return s.healthOut, nil
+	}
+	return report.HealthDashboardReport{MeteringEnabled: filter.MeteringEnabled, CaptureDisabled: !filter.MeteringEnabled}, nil
+}
+func (s *stubModelsReporter) Metadata(ctx context.Context, filter report.MetadataFilter) (report.MetadataReport, error) {
+	if s.metadataErr != nil {
+		return report.MetadataReport{}, s.metadataErr
+	}
+	if len(s.metadataOut.Endpoints)+len(s.metadataOut.Ranges)+len(s.metadataOut.Buckets) > 0 {
+		return s.metadataOut, nil
+	}
+	return report.MetadataReport{Endpoints: []report.EndpointMeta{}, Ranges: []report.RangeMeta{}, Buckets: []report.BucketMeta{}}, nil
+}
+func (s *stubModelsReporter) GatewayCapabilities(ctx context.Context, filter report.GatewayFilter) (report.GatewayCapabilitiesReport, error) {
+	if s.gatewayErr != nil {
+		return report.GatewayCapabilitiesReport{}, s.gatewayErr
+	}
+	if s.gatewayOut.Range != "" || len(s.gatewayOut.Profiles) > 0 {
+		return s.gatewayOut, nil
+	}
+	return report.GatewayCapabilitiesReport{Range: filter.Range, Profiles: []report.GatewayCapabilityProfile{}}, nil
+}
+
 func TestNewDoesNotPanic(t *testing.T) {
 	s1, _ := newTestServer(t, "/metering")
 	s2, _ := newTestServer(t, "/stats")
@@ -202,11 +262,13 @@ func TestNewWithStaticFS_ServesIndexFromInjectedFS(t *testing.T) {
 		},
 	}
 
-	s := NewWithStaticFS(database, report.NewService(report.Dependencies{
+	s := NewWithStaticFS(report.NewService(report.Dependencies{
 		Models: database, Summary: database, Timeseries: database, Images: database,
 		Overview: database, Capture: bw, ModelAssets: database,
 		Keys: database, Activity: database, Requests: database, Issues: database,
-	}, pricingData), bw, registry, "/metering", staticFS)
+		Multimodal: database, ImageRequests: database, Errors: database, Gateway: database,
+		Profiles: registry,
+	}, pricingData), bw, "/metering", staticFS, DiagnosticsReaders{Quota: database, Obs: database})
 
 	// Index: placeholder injection.
 	req := httptest.NewRequest("GET", "/metering", nil)
@@ -1035,39 +1097,39 @@ func TestGatewayCapabilities(t *testing.T) {
 		t.Fatalf("GET /metering/api/gateway/capabilities: status %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	var report event.GatewayCapabilitiesReport
-	if err := json.Unmarshal(rec.Body.Bytes(), &report); err != nil {
+	var caps report.GatewayCapabilitiesReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &caps); err != nil {
 		t.Fatalf("invalid JSON: %v; body=%s", err, rec.Body.String())
 	}
 
-	if report.Range != "24h" {
-		t.Errorf("Range = %q, want 24h", report.Range)
+	if caps.Range != "24h" {
+		t.Errorf("Range = %q, want 24h", caps.Range)
 	}
 
 	// Summary: 5 total, 3 usage_metered, 1 request_only, 1 passthrough,
 	// 1 stream, 1 missing usage.
-	if report.Summary.TotalRequests != 5 {
-		t.Errorf("TotalRequests = %d, want 5", report.Summary.TotalRequests)
+	if caps.Summary.TotalRequests != 5 {
+		t.Errorf("TotalRequests = %d, want 5", caps.Summary.TotalRequests)
 	}
-	if report.Summary.UsageMeteredReqs != 3 {
-		t.Errorf("UsageMeteredReqs = %d, want 3", report.Summary.UsageMeteredReqs)
+	if caps.Summary.UsageMeteredReqs != 3 {
+		t.Errorf("UsageMeteredReqs = %d, want 3", caps.Summary.UsageMeteredReqs)
 	}
-	if report.Summary.RequestOnlyReqs != 1 {
-		t.Errorf("RequestOnlyReqs = %d, want 1", report.Summary.RequestOnlyReqs)
+	if caps.Summary.RequestOnlyReqs != 1 {
+		t.Errorf("RequestOnlyReqs = %d, want 1", caps.Summary.RequestOnlyReqs)
 	}
-	if report.Summary.PassthroughReqs != 1 {
-		t.Errorf("PassthroughReqs = %d, want 1", report.Summary.PassthroughReqs)
+	if caps.Summary.PassthroughReqs != 1 {
+		t.Errorf("PassthroughReqs = %d, want 1", caps.Summary.PassthroughReqs)
 	}
-	if report.Summary.StreamRequests != 1 {
-		t.Errorf("StreamRequests = %d, want 1", report.Summary.StreamRequests)
+	if caps.Summary.StreamRequests != 1 {
+		t.Errorf("StreamRequests = %d, want 1", caps.Summary.StreamRequests)
 	}
-	if report.Summary.MissingUsageReqs != 1 {
-		t.Errorf("MissingUsageReqs = %d, want 1", report.Summary.MissingUsageReqs)
+	if caps.Summary.MissingUsageReqs != 1 {
+		t.Errorf("MissingUsageReqs = %d, want 1", caps.Summary.MissingUsageReqs)
 	}
 
 	// Find specific profiles and verify counts.
-	byName := make(map[string]event.GatewayCapabilityProfile, len(report.Profiles))
-	for _, p := range report.Profiles {
+	byName := make(map[string]report.GatewayCapabilityProfile, len(caps.Profiles))
+	for _, p := range caps.Profiles {
 		byName[p.Name] = p
 	}
 
@@ -1150,16 +1212,16 @@ func TestGatewayCapabilitiesEmptyDB(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("status %d, want 200", rec.Code)
 	}
-	var report event.GatewayCapabilitiesReport
-	if err := json.Unmarshal(rec.Body.Bytes(), &report); err != nil {
+	var caps report.GatewayCapabilitiesReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &caps); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
 	// Empty DB should still list all registry profiles with zero counts.
-	if len(report.Profiles) == 0 {
+	if len(caps.Profiles) == 0 {
 		t.Error("expected profiles from registry even with empty DB")
 	}
-	if report.Summary.TotalRequests != 0 {
-		t.Errorf("TotalRequests = %d, want 0", report.Summary.TotalRequests)
+	if caps.Summary.TotalRequests != 0 {
+		t.Errorf("TotalRequests = %d, want 0", caps.Summary.TotalRequests)
 	}
 }
 
@@ -1388,7 +1450,7 @@ func TestAPIErrorsSource(t *testing.T) {
 		Source             string                      `json:"source"`
 		BucketCount        int                         `json:"bucket_count"`
 		NonzeroBucketCount int                         `json:"nonzero_bucket_count"`
-		Timeline           []event.ErrorTimelineReport `json:"timeline"`
+		Timeline           []report.ErrorTimelinePoint `json:"timeline"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal fallback errors: %v", err)
@@ -1692,14 +1754,12 @@ func TestNewRequiresCoreReporter(t *testing.T) {
 	bw := writer.New(store.NewEventSink(database), 100, 10, time.Nanosecond)
 	bw.Start()
 	t.Cleanup(func() { bw.Stop() })
-	registry := profile.NewRegistry()
-
 	defer func() {
 		if recover() == nil {
 			t.Fatal("expected panic when core reporter is nil")
 		}
 	}()
-	_ = New(database, nil, bw, registry, "/metering")
+	_ = New(nil, bw, "/metering", DiagnosticsReaders{Quota: database, Obs: database})
 }
 
 func TestCoreReporterIsExplicitlyInjected(t *testing.T) {
@@ -1712,8 +1772,6 @@ func TestCoreReporterIsExplicitlyInjected(t *testing.T) {
 	bw := writer.New(store.NewEventSink(database), 100, 10, time.Nanosecond)
 	bw.Start()
 	t.Cleanup(func() { bw.Stop() })
-	registry := profile.NewRegistry()
-
 	stub := &stubModelsReporter{
 		out: []report.ModelReport{{
 			Model:        "from-injected-reporter",
@@ -1748,7 +1806,7 @@ func TestCoreReporterIsExplicitlyInjected(t *testing.T) {
 			},
 		},
 	}
-	s := New(database, stub, bw, registry, "/metering")
+	s := New(stub, bw, "/metering", DiagnosticsReaders{Quota: database, Obs: database})
 
 	req := httptest.NewRequest("GET", "/metering/api/models?range=24h", nil)
 	rec := httptest.NewRecorder()
@@ -2013,12 +2071,10 @@ func TestAPIModelsReporterErrorIsNonSuccessWithoutBodyContract(t *testing.T) {
 	bw := writer.New(store.NewEventSink(database), 100, 10, time.Nanosecond)
 	bw.Start()
 	t.Cleanup(func() { bw.Stop() })
-	registry := profile.NewRegistry()
-
 	// Force a reporter failure. Do not assert raw internal error text; that is
 	// not part of the public API contract for this slice.
 	stub := &stubModelsReporter{err: errors.New("internal boom must not become a contract")}
-	s := New(database, stub, bw, registry, "/metering")
+	s := New(stub, bw, "/metering", DiagnosticsReaders{Quota: database, Obs: database})
 
 	req := httptest.NewRequest("GET", "/metering/api/models?range=24h", nil)
 	rec := httptest.NewRecorder()
@@ -2117,11 +2173,9 @@ func TestAPIIssuesDoesNotLeakInternalErrors(t *testing.T) {
 	bw := writer.New(store.NewEventSink(database), 100, 10, time.Nanosecond)
 	bw.Start()
 	t.Cleanup(func() { bw.Stop() })
-	registry := profile.NewRegistry()
-
 	secret := `SQL error: no such table request_usage at C:\secret\path\usage.sqlite`
 	stub := &stubModelsReporter{issuesErr: errors.New(secret)}
-	s := New(database, stub, bw, registry, "/metering")
+	s := New(stub, bw, "/metering", DiagnosticsReaders{Quota: database, Obs: database})
 
 	req := httptest.NewRequest("GET", "/metering/api/issues?range=24h", nil)
 	rec := httptest.NewRecorder()
@@ -2161,5 +2215,36 @@ func TestAPIIssuesDoesNotLeakInternalErrors(t *testing.T) {
 	}
 	if stub.issuesCalls != 1 {
 		t.Fatalf("issuesCalls=%d, want 1 (invalid key must not call reporter)", stub.issuesCalls)
+	}
+}
+
+func TestGatewayCapabilitiesDoesNotLeakDBError(t *testing.T) {
+	database, err := db.Open(t.TempDir() + "/test.sqlite")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+	bw := writer.New(store.NewEventSink(database), 100, 10, time.Nanosecond)
+	bw.Start()
+	t.Cleanup(func() { bw.Stop() })
+
+	secret := `SQL error at C:\secret\path\usage.sqlite`
+	stub := &stubModelsReporter{}
+	// override via local type embedding is hard; use failing gateway through custom stub fields.
+	// Extend stub with gatewayErr.
+	stub.gatewayErr = errors.New(secret)
+	s := New(stub, bw, "/metering", DiagnosticsReaders{Quota: database, Obs: database})
+	req := httptest.NewRequest("GET", "/metering/api/gateway/capabilities?range=24h", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, secret) || strings.Contains(body, `C:\secret`) || strings.Contains(body, "SQL error") {
+		t.Fatalf("leaked internal error: %s", body)
+	}
+	if !strings.Contains(body, "report_query_failed") {
+		t.Fatalf("expected report_query_failed, body=%s", body)
 	}
 }
