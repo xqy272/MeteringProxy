@@ -3,8 +3,10 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func writeConfig(t *testing.T, body string) string {
@@ -269,5 +271,255 @@ cliproxy_management:
 `)
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected invalid usage_queue.transport error")
+	}
+}
+
+const (
+	validKeyHashA = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	validKeyHashB = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+)
+
+func TestLoadKeyLabelsMissingFieldCompatible(t *testing.T) {
+	path := writeConfig(t, `
+upstream: "http://127.0.0.1:8317"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.KeyLabels == nil {
+		t.Fatal("KeyLabels = nil, want empty map")
+	}
+	if len(cfg.KeyLabels) != 0 {
+		t.Fatalf("KeyLabels len = %d, want 0", len(cfg.KeyLabels))
+	}
+}
+
+func TestLoadKeyLabelsEmptyMapCompatible(t *testing.T) {
+	path := writeConfig(t, `
+upstream: "http://127.0.0.1:8317"
+key_labels: {}
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.KeyLabels == nil {
+		t.Fatal("KeyLabels = nil, want empty map")
+	}
+	if len(cfg.KeyLabels) != 0 {
+		t.Fatalf("KeyLabels len = %d, want 0", len(cfg.KeyLabels))
+	}
+}
+
+func TestLoadKeyLabelsValidMapping(t *testing.T) {
+	path := writeConfig(t, `
+upstream: "http://127.0.0.1:8317"
+key_labels:
+  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": "friend-a"
+  "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789": "self"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.KeyLabels[validKeyHashA]; got != "friend-a" {
+		t.Fatalf("label A = %q, want friend-a", got)
+	}
+	if got := cfg.KeyLabels[validKeyHashB]; got != "self" {
+		t.Fatalf("label B = %q, want self", got)
+	}
+}
+
+func TestLoadKeyLabelsTrimsLabel(t *testing.T) {
+	path := writeConfig(t, `
+upstream: "http://127.0.0.1:8317"
+key_labels:
+  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": "  friend-a  "
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.KeyLabels[validKeyHashA]; got != "friend-a" {
+		t.Fatalf("label = %q, want friend-a", got)
+	}
+}
+
+func TestLoadKeyLabelsAllowsDuplicateLabels(t *testing.T) {
+	path := writeConfig(t, `
+upstream: "http://127.0.0.1:8317"
+key_labels:
+  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": "shared"
+  "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789": "shared"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.KeyLabels[validKeyHashA] != "shared" || cfg.KeyLabels[validKeyHashB] != "shared" {
+		t.Fatalf("KeyLabels = %#v, want both shared", cfg.KeyLabels)
+	}
+}
+
+func TestLoadKeyLabelsRejectsUnknownHash(t *testing.T) {
+	path := writeConfig(t, `
+upstream: "http://127.0.0.1:8317"
+key_labels:
+  "unknown": "nope"
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for unknown hash")
+	}
+	if !strings.Contains(err.Error(), "key_labels.unknown") {
+		t.Fatalf("error = %v, want path key_labels.unknown", err)
+	}
+}
+
+func TestLoadKeyLabelsRejectsHashLength63And65(t *testing.T) {
+	for _, n := range []int{63, 65} {
+		hash := strings.Repeat("a", n)
+		body := "upstream: \"http://127.0.0.1:8317\"\nkey_labels:\n  \"" + hash + "\": \"label\"\n"
+		path := writeConfig(t, body)
+		_, err := Load(path)
+		if err == nil {
+			t.Fatalf("expected error for hash len %d", n)
+		}
+		if !strings.Contains(err.Error(), "64 lowercase hex") {
+			t.Fatalf("error = %v, want 64 lowercase hex message", err)
+		}
+	}
+}
+
+func TestLoadKeyLabelsRejectsUppercaseHash(t *testing.T) {
+	upper := strings.ToUpper(validKeyHashA)
+	body := "upstream: \"http://127.0.0.1:8317\"\nkey_labels:\n  \"" + upper + "\": \"label\"\n"
+	path := writeConfig(t, body)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for uppercase hash")
+	}
+	if !strings.Contains(err.Error(), "key_labels."+upper) {
+		t.Fatalf("error = %v, want stable path with uppercase hash", err)
+	}
+}
+
+func TestLoadKeyLabelsRejectsNonHexHash(t *testing.T) {
+	bad := strings.Repeat("g", 64)
+	body := "upstream: \"http://127.0.0.1:8317\"\nkey_labels:\n  \"" + bad + "\": \"label\"\n"
+	path := writeConfig(t, body)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for non-hex hash")
+	}
+	if !strings.Contains(err.Error(), "key_labels."+bad) {
+		t.Fatalf("error = %v, want stable path", err)
+	}
+}
+
+func TestLoadKeyLabelsRejectsWhitespaceWrappedHash(t *testing.T) {
+	body := "upstream: \"http://127.0.0.1:8317\"\nkey_labels:\n  \" " + validKeyHashA + " \": \"label\"\n"
+	path := writeConfig(t, body)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for whitespace-wrapped hash")
+	}
+	if !strings.Contains(err.Error(), "key_labels") {
+		t.Fatalf("error = %v, want key_labels path", err)
+	}
+	if !strings.Contains(err.Error(), "64 lowercase hex") {
+		t.Fatalf("error = %v, want hash format message", err)
+	}
+}
+
+func TestLoadKeyLabelsRejectsEmptyLabel(t *testing.T) {
+	path := writeConfig(t, `
+upstream: "http://127.0.0.1:8317"
+key_labels:
+  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": "   "
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for empty label")
+	}
+	if !strings.Contains(err.Error(), "key_labels."+validKeyHashA) {
+		t.Fatalf("error = %v, want stable path", err)
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("error = %v, want empty label message", err)
+	}
+}
+
+func TestLoadKeyLabelsRejectsControlRune(t *testing.T) {
+	// YAML double-quoted scalar turns \t into a real tab control rune.
+	body := "upstream: \"http://127.0.0.1:8317\"\nkey_labels:\n  \"" + validKeyHashA + "\": \"bad\\tlabel\"\n"
+	path := writeConfig(t, body)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for control rune in label")
+	}
+	if !strings.Contains(err.Error(), "key_labels."+validKeyHashA) {
+		t.Fatalf("error = %v, want stable path", err)
+	}
+	if !strings.Contains(err.Error(), "control") {
+		t.Fatalf("error = %v, want control character message", err)
+	}
+}
+
+func TestLoadKeyLabelsAccepts80RunesRejects81(t *testing.T) {
+	label80 := strings.Repeat("?", 80)
+	if utf8.RuneCountInString(label80) != 80 {
+		t.Fatalf("fixture rune count = %d", utf8.RuneCountInString(label80))
+	}
+	bodyOK := "upstream: \"http://127.0.0.1:8317\"\nkey_labels:\n  \"" + validKeyHashA + "\": \"" + label80 + "\"\n"
+	pathOK := writeConfig(t, bodyOK)
+	cfg, err := Load(pathOK)
+	if err != nil {
+		t.Fatalf("Load 80-rune label: %v", err)
+	}
+	if got := cfg.KeyLabels[validKeyHashA]; got != label80 {
+		t.Fatalf("label not preserved for 80 runes")
+	}
+
+	label81 := strings.Repeat("?", 81)
+	bodyBad := "upstream: \"http://127.0.0.1:8317\"\nkey_labels:\n  \"" + validKeyHashA + "\": \"" + label81 + "\"\n"
+	pathBad := writeConfig(t, bodyBad)
+	_, err = Load(pathBad)
+	if err == nil {
+		t.Fatal("expected error for 81-rune label")
+	}
+	if !strings.Contains(err.Error(), "key_labels."+validKeyHashA) {
+		t.Fatalf("error = %v, want stable path", err)
+	}
+	if !strings.Contains(err.Error(), "80") {
+		t.Fatalf("error = %v, want 80-character limit message", err)
+	}
+}
+
+func TestLoadKeyLabelsErrorsDoNotLeakCredentials(t *testing.T) {
+	secretSalt := "super-secret-salt-value-do-not-leak"
+	secretMgmtKey := "mgmt-key-plaintext-should-not-appear"
+	body := "upstream: \"http://127.0.0.1:8317\"\n" +
+		"salt_file: \"/data/" + secretSalt + "\"\n" +
+		"cliproxy_management:\n" +
+		"  enabled: false\n" +
+		"  key_file: \"/secrets/" + secretMgmtKey + "\"\n" +
+		"key_labels:\n" +
+		"  \"unknown\": \"nope\"\n"
+	path := writeConfig(t, body)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, secretSalt) {
+		t.Fatalf("error leaked salt path secret: %v", err)
+	}
+	if strings.Contains(msg, secretMgmtKey) {
+		t.Fatalf("error leaked management key path secret: %v", err)
+	}
+	if !strings.Contains(msg, "key_labels.unknown") {
+		t.Fatalf("error = %v, want stable key_labels path", err)
 	}
 }

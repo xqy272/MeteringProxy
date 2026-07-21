@@ -6,26 +6,32 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Listen                  string                   `yaml:"listen"`
-	Upstream                string                   `yaml:"upstream"`
-	Database                string                   `yaml:"database"`
-	SaltFile                string                   `yaml:"salt_file"`
-	QueueCapacity           int                      `yaml:"queue_capacity"`
-	BatchSize               int                      `yaml:"batch_size"`
-	FlushInterval           time.Duration            `yaml:"flush_interval"`
-	MaxNonstreamSampleBytes int64                    `yaml:"max_nonstream_sample_bytes"`
-	MeteringEnabled         bool                     `yaml:"metering_enabled"`
-	WebUI                   WebUIConfig              `yaml:"webui"`
-	PricingFile             string                   `yaml:"pricing_file"`
-	RequestMetadata         RequestMetadataConfig    `yaml:"request_metadata"`
-	ProxyTransport          ProxyTransportConfig     `yaml:"proxy_transport"`
-	Observability           ObservabilityConfig      `yaml:"observability"`
-	CLIProxyManagement      CLIProxyManagementConfig `yaml:"cliproxy_management"`
+	Listen                  string        `yaml:"listen"`
+	Upstream                string        `yaml:"upstream"`
+	Database                string        `yaml:"database"`
+	SaltFile                string        `yaml:"salt_file"`
+	QueueCapacity           int           `yaml:"queue_capacity"`
+	BatchSize               int           `yaml:"batch_size"`
+	FlushInterval           time.Duration `yaml:"flush_interval"`
+	MaxNonstreamSampleBytes int64         `yaml:"max_nonstream_sample_bytes"`
+	MeteringEnabled         bool          `yaml:"metering_enabled"`
+	WebUI                   WebUIConfig   `yaml:"webui"`
+	PricingFile             string        `yaml:"pricing_file"`
+	// KeyLabels maps a full API key HMAC-SHA256 hash (64 lowercase hex) to a
+	// display label. Loaded at process start only; missing or empty maps are
+	// valid and leave all keys unlabeled.
+	KeyLabels          map[string]string        `yaml:"key_labels"`
+	RequestMetadata    RequestMetadataConfig    `yaml:"request_metadata"`
+	ProxyTransport     ProxyTransportConfig     `yaml:"proxy_transport"`
+	Observability      ObservabilityConfig      `yaml:"observability"`
+	CLIProxyManagement CLIProxyManagementConfig `yaml:"cliproxy_management"`
 }
 
 type WebUIConfig struct {
@@ -135,6 +141,8 @@ const (
 	maxProxyIdleConnsPerHost = 10_000
 	maxProxyIdleTimeout      = 1 * time.Hour
 	maxProxyHandshakeTimeout = 5 * time.Minute
+
+	maxKeyLabelRunes = 80
 )
 
 func Load(path string) (*Config, error) {
@@ -380,6 +388,9 @@ func Load(path string) (*Config, error) {
 			return nil, err
 		}
 	}
+	if err := normalizeKeyLabels(cfg); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 
@@ -463,4 +474,78 @@ func validateCLIProxyManagement(cfg CLIProxyManagementConfig) error {
 		return fmt.Errorf("cliproxy_management.key_file is not readable: %w", err)
 	}
 	return nil
+}
+
+// normalizeKeyLabels validates and trims key_labels into a stable map of
+// full 64-char lowercase hex hashes to non-empty display labels.
+func normalizeKeyLabels(cfg *Config) error {
+	if cfg.KeyLabels == nil || len(cfg.KeyLabels) == 0 {
+		cfg.KeyLabels = map[string]string{}
+		return nil
+	}
+
+	normalized := make(map[string]string, len(cfg.KeyLabels))
+	for hash, label := range cfg.KeyLabels {
+		path := keyLabelsPath(hash)
+		if hash == "unknown" {
+			return fmt.Errorf("%s: hash must not be unknown", path)
+		}
+		if !isFullLowerHexHash(hash) {
+			return fmt.Errorf("%s: hash must be exactly 64 lowercase hex characters", path)
+		}
+		trimmed := strings.TrimSpace(label)
+		if trimmed == "" {
+			return fmt.Errorf("%s: label must not be empty after trim", path)
+		}
+		if labelHasControlRune(trimmed) {
+			return fmt.Errorf("%s: label must not contain control characters", path)
+		}
+		if utf8.RuneCountInString(trimmed) > maxKeyLabelRunes {
+			return fmt.Errorf("%s: label must not exceed %d characters", path, maxKeyLabelRunes)
+		}
+		normalized[hash] = trimmed
+	}
+	cfg.KeyLabels = normalized
+	return nil
+}
+
+func keyLabelsPath(hash string) string {
+	if hash == "" || !isSafeConfigPathSegment(hash) {
+		return "key_labels"
+	}
+	return "key_labels." + hash
+}
+
+func isSafeConfigPathSegment(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if unicode.IsControl(r) || unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func isFullLowerHexHash(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func labelHasControlRune(s string) bool {
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			return true
+		}
+	}
+	return false
 }

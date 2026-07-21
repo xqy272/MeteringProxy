@@ -11,3 +11,7 @@ webui:
   enabled: true
   base_path: "/metering"
 pricing_file: "/data/pricing.yaml"
+# Optional: map full HMAC-SHA256 API key hashes (64 lowercase hex chars) to display labels.
+# Do not put plaintext API keys here. Labels load at process start only; no hot reload.
+# key_labels:
+#   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": "friend-a"
