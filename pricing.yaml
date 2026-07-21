@@ -48,10 +48,14 @@ pricing:
     input_per_1m: 0.14
     cached_input_per_1m: 0.0028
     output_per_1m: 0.28
+    aliases:
+      - ds-openai-flash
   deepseek-v4-pro:
     input_per_1m: 0.435
     cached_input_per_1m: 0.003625
     output_per_1m: 0.87
+    aliases:
+      - ds-openai-pro
   # Google Gemini models (Standard tier; thinking tokens are included in output price)
   gemini-3.5-flash:
     input_per_1m: 1.50
@@ -85,6 +89,13 @@ pricing:
     cached_input_per_1m: 0.28
     output_per_1m: 3.92
 
+  # xAI Grok models
+  grok-4.5:
+    # Confirmed flat low tier only; no unverified long_context threshold.
+    input_per_1m: 2.00
+    cached_input_per_1m: 0.30
+    output_per_1m: 6.00
+
 multimodal_pricing:
   # OpenAI multimodal models
   gpt-image-2:
@@ -116,3 +127,12 @@ multimodal_pricing:
   gpt-realtime-whisper:
     audio_seconds:
       per_second: 0.00028
+  grok-imagine-image-quality:
+    aliases:
+      - grok-imagine-image
+    image:
+      per_image_input: 0.01
+      per_image_output:
+        default: 0.05
+        "1K": 0.05
+        "2K": 0.07

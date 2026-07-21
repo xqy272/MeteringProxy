@@ -3,6 +3,7 @@ package pricing
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -519,5 +520,756 @@ func TestCanonicalize(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("canonicalize(%q) = %q, want %q", tc.input, got, tc.want)
 		}
+	}
+}
+
+func TestLoad_DefaultPricingYAML(t *testing.T) {
+	root := filepath.Join("..", "..", "pricing.yaml")
+	p, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load default pricing.yaml: %v", err)
+	}
+
+	// DeepSeek aliases
+	if _, known := p.Cost("ds-openai-flash", 1000, 1000, 0, 0); !known {
+		t.Fatal("ds-openai-flash alias should resolve")
+	}
+	if _, known := p.Cost("ds-openai-pro", 1000, 1000, 0, 0); !known {
+		t.Fatal("ds-openai-pro alias should resolve")
+	}
+
+	// grok-4.5 flat low tier, no long_context
+	mp, ok := p.Models["grok-4.5"]
+	if !ok {
+		t.Fatal("grok-4.5 missing from default pricing.yaml")
+	}
+	if mp.InputPer1M != 2.00 || mp.CachedInputPer1M != 0.30 || mp.OutputPer1M != 6.00 {
+		t.Fatalf("grok-4.5 prices = %+v", mp)
+	}
+	if mp.LongContext != nil {
+		t.Fatal("grok-4.5 must not include long_context")
+	}
+
+	// Gemini long_context must not be present yet
+	g, ok := p.Models["gemini-3.1-pro-preview"]
+	if !ok {
+		t.Fatal("gemini-3.1-pro-preview missing")
+	}
+	if g.LongContext != nil {
+		t.Fatal("default pricing.yaml must not enable Gemini long_context yet")
+	}
+
+	// Imagine per-image
+	cost, known, defaulted := p.CostImages("grok-imagine-image", 2, 1, "1024x1024")
+	if !known {
+		t.Fatal("grok-imagine-image alias should price images")
+	}
+	if defaulted {
+		t.Fatal("1024x1024 should not default")
+	}
+	expected := 2*0.01 + 1*0.05
+	if diff := cost - expected; diff < -0.0001 || diff > 0.0001 {
+		t.Fatalf("imagine cost = %.6f, want %.6f", cost, expected)
+	}
+	cost2, known, defaulted := p.CostImages("grok-imagine-image-quality", 0, 1, "2048x2048")
+	if !known || defaulted {
+		t.Fatalf("2K image known=%v defaulted=%v", known, defaulted)
+	}
+	if diff := cost2 - 0.07; diff < -0.0001 || diff > 0.0001 {
+		t.Fatalf("2K cost = %.6f, want 0.07", cost2)
+	}
+}
+
+func TestParse_RejectsUnknownField(t *testing.T) {
+	_, err := Parse([]byte(`
+pricing:
+  gpt-4o:
+    input_per_1m: 1.0
+    output_per_1m: 2.0
+    unknown_field: 1
+`))
+	if err == nil {
+		t.Fatal("expected unknown field error")
+	}
+	if !strings.Contains(err.Error(), "unknown_field") && !strings.Contains(strings.ToLower(err.Error()), "field") {
+		t.Fatalf("error should mention unknown field: %v", err)
+	}
+}
+
+func TestParse_RejectsMultipleDocuments(t *testing.T) {
+	_, err := Parse([]byte(`
+pricing:
+  gpt-4o:
+    input_per_1m: 1.0
+    output_per_1m: 2.0
+---
+pricing: {}
+`))
+	if err == nil {
+		t.Fatal("expected multi-document error")
+	}
+	if !strings.Contains(err.Error(), "multiple YAML documents") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParse_RejectsNegativePrice(t *testing.T) {
+	_, err := Parse([]byte(`
+pricing:
+  gpt-4o:
+    input_per_1m: -1
+    output_per_1m: 2.0
+`))
+	if err == nil {
+		t.Fatal("expected negative price error")
+	}
+	if !strings.Contains(err.Error(), "pricing.gpt-4o.input_per_1m") {
+		t.Fatalf("error path missing: %v", err)
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "password") || strings.Contains(strings.ToLower(err.Error()), "secret") {
+		t.Fatalf("error must not include credentials: %v", err)
+	}
+}
+
+func TestParse_RejectsInvalidLongContextThreshold(t *testing.T) {
+	_, err := Parse([]byte(`
+pricing:
+  gemini-3.1-pro-preview:
+    input_per_1m: 2.0
+    output_per_1m: 12.0
+    long_context:
+      threshold_input_tokens: 0
+      input_per_1m: 4.0
+      output_per_1m: 18.0
+`))
+	if err == nil {
+		t.Fatal("expected threshold error")
+	}
+	if !strings.Contains(err.Error(), "threshold_input_tokens") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParse_RejectsDuplicateAlias(t *testing.T) {
+	_, err := Parse([]byte(`
+pricing:
+  a:
+    input_per_1m: 1
+    output_per_1m: 1
+    aliases: [shared]
+  b:
+    input_per_1m: 2
+    output_per_1m: 2
+    aliases: [shared]
+`))
+	if err == nil {
+		t.Fatal("expected duplicate alias error")
+	}
+	if !strings.Contains(err.Error(), "duplicate alias") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParse_RejectsAliasCanonicalConflict(t *testing.T) {
+	_, err := Parse([]byte(`
+pricing:
+  a:
+    input_per_1m: 1
+    output_per_1m: 1
+  b:
+    input_per_1m: 2
+    output_per_1m: 2
+    aliases: [a]
+`))
+	if err == nil {
+		t.Fatal("expected alias/canonical conflict")
+	}
+	if !strings.Contains(err.Error(), "conflicts with canonical") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParse_RejectsPerImageOutputMissingDefault(t *testing.T) {
+	_, err := Parse([]byte(`
+multimodal_pricing:
+  img:
+    image:
+      per_image_output:
+        "1K": 0.05
+`))
+	if err == nil {
+		t.Fatal("expected missing default error")
+	}
+	if !strings.Contains(err.Error(), "default") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParse_RejectsUnsupportedResolutionKey(t *testing.T) {
+	_, err := Parse([]byte(`
+multimodal_pricing:
+  img:
+    image:
+      per_image_output:
+        default: 0.05
+        "4K": 0.20
+`))
+	if err == nil {
+		t.Fatal("expected unsupported key error")
+	}
+	if !strings.Contains(err.Error(), "unsupported resolution key") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func geminiTierFixture(t *testing.T) *Pricing {
+	t.Helper()
+	p, err := Parse([]byte(`
+pricing:
+  gemini-3.1-pro-preview:
+    input_per_1m: 2.00
+    cached_input_per_1m: 0.20
+    output_per_1m: 12.00
+    cache_creation_per_1m: 2.50
+    reasoning_per_1m: 1.00
+    long_context:
+      threshold_input_tokens: 200000
+      input_per_1m: 4.00
+      cached_input_per_1m: 0.40
+      output_per_1m: 18.00
+      cache_creation_per_1m: 5.00
+      reasoning_per_1m: 2.00
+`))
+	if err != nil {
+		t.Fatalf("Parse fixture: %v", err)
+	}
+	return p
+}
+
+func TestCostText_LongContextThresholdBoundaries(t *testing.T) {
+	p := geminiTierFixture(t)
+	const threshold int64 = 200000
+
+	// threshold-1 => short
+	cost, known := p.CostText("gemini-3.1-pro-preview", TextTokenUsage{
+		InputTokens:        threshold - 1,
+		OutputTokens:       1000,
+		RequestInputTokens: threshold - 1,
+	})
+	if !known {
+		t.Fatal("expected known")
+	}
+	wantShort := float64(threshold-1)/1_000_000.0*2.00 + 1000/1_000_000.0*12.00
+	if diff := cost - wantShort; diff < -0.0001 || diff > 0.0001 {
+		t.Fatalf("threshold-1 cost=%.8f want=%.8f", cost, wantShort)
+	}
+
+	// exact threshold => long
+	cost, known = p.CostText("gemini-3.1-pro-preview", TextTokenUsage{
+		InputTokens:        threshold,
+		OutputTokens:       1000,
+		RequestInputTokens: threshold,
+	})
+	if !known {
+		t.Fatal("expected known")
+	}
+	wantLong := float64(threshold)/1_000_000.0*4.00 + 1000/1_000_000.0*18.00
+	if diff := cost - wantLong; diff < -0.0001 || diff > 0.0001 {
+		t.Fatalf("threshold cost=%.8f want=%.8f", cost, wantLong)
+	}
+
+	// threshold+1 => long
+	cost, known = p.CostText("gemini-3.1-pro-preview", TextTokenUsage{
+		InputTokens:        threshold + 1,
+		OutputTokens:       1000,
+		RequestInputTokens: threshold + 1,
+	})
+	if !known {
+		t.Fatal("expected known")
+	}
+	wantLongPlus := float64(threshold+1)/1_000_000.0*4.00 + 1000/1_000_000.0*18.00
+	if diff := cost - wantLongPlus; diff < -0.0001 || diff > 0.0001 {
+		t.Fatalf("threshold+1 cost=%.8f want=%.8f", cost, wantLongPlus)
+	}
+}
+
+func TestCostText_TwoShortRequestsDoNotBecomeLong(t *testing.T) {
+	p := geminiTierFixture(t)
+	// Two short requests of 150k each: sum 300k > 200k, but each is short.
+	reqA := TextTokenUsage{InputTokens: 150000, OutputTokens: 100, RequestInputTokens: 150000}
+	reqB := TextTokenUsage{InputTokens: 150000, OutputTokens: 100, RequestInputTokens: 150000}
+	costA, _ := p.CostText("gemini-3.1-pro-preview", reqA)
+	costB, _ := p.CostText("gemini-3.1-pro-preview", reqB)
+	sum := costA + costB
+	wantEach := 150000/1_000_000.0*2.00 + 100/1_000_000.0*12.00
+	want := 2 * wantEach
+	if diff := sum - want; diff < -0.0001 || diff > 0.0001 {
+		t.Fatalf("sum=%.8f want=%.8f", sum, want)
+	}
+
+	// Aggregate Cost path must remain on base/short prices even with sum > threshold.
+	agg, known := p.Cost("gemini-3.1-pro-preview", 300000, 200, 0, 0)
+	if !known {
+		t.Fatal("expected known")
+	}
+	wantBase := 300000/1_000_000.0*2.00 + 200/1_000_000.0*12.00
+	if diff := agg - wantBase; diff < -0.0001 || diff > 0.0001 {
+		t.Fatalf("aggregate Cost should use base tier: got=%.8f want=%.8f", agg, wantBase)
+	}
+	// And must not equal long-tier on the aggregate sum.
+	longOnAgg := 300000/1_000_000.0*4.00 + 200/1_000_000.0*18.00
+	if agg == longOnAgg {
+		t.Fatal("aggregate Cost incorrectly applied long tier")
+	}
+}
+
+func TestCostText_CachedReasoningCacheCreationTiers(t *testing.T) {
+	p := geminiTierFixture(t)
+
+	// short tier with cached + reasoning + cache creation
+	short, known := p.CostText("gemini-3.1-pro-preview", TextTokenUsage{
+		InputTokens:         1000,
+		OutputTokens:        500,
+		ReasoningTokens:     100,
+		CachedTokens:        200,
+		CacheCreationTokens: 50,
+		RequestInputTokens:  1000,
+	})
+	if !known {
+		t.Fatal("expected known")
+	}
+	// non-cached = 1000-50-200 = 750
+	wantShort := 750/1_000_000.0*2.00 + 200/1_000_000.0*0.20 + 50/1_000_000.0*2.50 + 400/1_000_000.0*12.00 + 100/1_000_000.0*1.00
+	if diff := short - wantShort; diff < -0.0001 || diff > 0.0001 {
+		t.Fatalf("short special cost=%.8f want=%.8f", short, wantShort)
+	}
+
+	// long tier
+	long, known := p.CostText("gemini-3.1-pro-preview", TextTokenUsage{
+		InputTokens:         250000,
+		OutputTokens:        500,
+		ReasoningTokens:     100,
+		CachedTokens:        200,
+		CacheCreationTokens: 50,
+		RequestInputTokens:  250000,
+	})
+	if !known {
+		t.Fatal("expected known")
+	}
+	// non-cached = 250000-50-200 = 249750
+	wantLong := 249750/1_000_000.0*4.00 + 200/1_000_000.0*0.40 + 50/1_000_000.0*5.00 + 400/1_000_000.0*18.00 + 100/1_000_000.0*2.00
+	if diff := long - wantLong; diff < -0.0001 || diff > 0.0001 {
+		t.Fatalf("long special cost=%.8f want=%.8f", long, wantLong)
+	}
+}
+
+func TestNormalizeImageSize(t *testing.T) {
+	cases := []struct {
+		in        string
+		want      string
+		defaulted bool
+	}{
+		{"1024x1024", "1K", false},
+		{"1024", "1K", false},
+		{"1K", "1K", false},
+		{"1k", "1K", false},
+		{"2048x2048", "2K", false},
+		{"2K", "2K", false},
+		{"2k", "2K", false},
+		{"default", "default", false},
+		{"", "default", true},
+		{"4096x4096", "default", true},
+		{"unknown", "default", true},
+	}
+	for _, tc := range cases {
+		got, def := NormalizeImageSize(tc.in)
+		if got != tc.want || def != tc.defaulted {
+			t.Fatalf("NormalizeImageSize(%q)=(%q,%v) want (%q,%v)", tc.in, got, def, tc.want, tc.defaulted)
+		}
+	}
+}
+
+func TestCostText_LongOmitsOptionalDoesNotInheritShort(t *testing.T) {
+	p, err := Parse([]byte(`
+pricing:
+  tiered:
+    input_per_1m: 1.00
+    cached_input_per_1m: 0.10
+    output_per_1m: 2.00
+    reasoning_per_1m: 9.00
+    cache_creation_per_1m: 8.00
+    long_context:
+      threshold_input_tokens: 1000
+      input_per_1m: 4.00
+      cached_input_per_1m: 0.40
+      output_per_1m: 6.00
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	cost, known := p.CostText("tiered", TextTokenUsage{
+		InputTokens:         2000,
+		OutputTokens:        500,
+		ReasoningTokens:     100,
+		CacheCreationTokens: 50,
+		RequestInputTokens:  2000,
+	})
+	if !known {
+		t.Fatal("expected known")
+	}
+	// non-cached=1950 long input; cache creation falls back to long input; all output at long output
+	want := 1950/1_000_000.0*4.00 + 50/1_000_000.0*4.00 + 500/1_000_000.0*6.00
+	if diff := cost - want; diff < -0.0001 || diff > 0.0001 {
+		t.Fatalf("cost=%.8f want=%.8f", cost, want)
+	}
+	wrong := 1950/1_000_000.0*4.00 + 50/1_000_000.0*8.00 + 400/1_000_000.0*6.00 + 100/1_000_000.0*9.00
+	if diff := cost - wrong; diff > -0.0001 && diff < 0.0001 {
+		t.Fatal("cost matches short specialty inheritance")
+	}
+}
+
+func TestParse_RejectsNullLongContext(t *testing.T) {
+	_, err := Parse([]byte(`
+pricing:
+  m:
+    input_per_1m: 1.0
+    output_per_1m: 2.0
+    long_context: null
+`))
+	if err == nil {
+		t.Fatal("expected long_context null to be rejected")
+	}
+	if !strings.Contains(err.Error(), "pricing.m.long_context") {
+		t.Fatalf("error path should include long_context: %v", err)
+	}
+}
+
+func TestParse_RequiredFieldsTable(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		wantSub string
+	}{
+		{
+			name: "base missing input",
+			body: `
+pricing:
+  m:
+    output_per_1m: 1.0
+`,
+			wantSub: "pricing.m.input_per_1m",
+		},
+		{
+			name: "base missing output",
+			body: `
+pricing:
+  m:
+    input_per_1m: 1.0
+`,
+			wantSub: "pricing.m.output_per_1m",
+		},
+		{
+			name: "long missing input",
+			body: `
+pricing:
+  m:
+    input_per_1m: 1.0
+    output_per_1m: 2.0
+    long_context:
+      threshold_input_tokens: 10
+      output_per_1m: 4.0
+`,
+			wantSub: "pricing.m.long_context.input_per_1m",
+		},
+		{
+			name: "long missing output",
+			body: `
+pricing:
+  m:
+    input_per_1m: 1.0
+    output_per_1m: 2.0
+    long_context:
+      threshold_input_tokens: 10
+      input_per_1m: 4.0
+`,
+			wantSub: "pricing.m.long_context.output_per_1m",
+		},
+		{
+			name: "long missing threshold",
+			body: `
+pricing:
+  m:
+    input_per_1m: 1.0
+    output_per_1m: 2.0
+    long_context:
+      input_per_1m: 4.0
+      output_per_1m: 6.0
+`,
+			wantSub: "pricing.m.long_context.threshold_input_tokens",
+		},
+		{
+			name: "explicit zero base prices allowed",
+			body: `
+pricing:
+  m:
+    input_per_1m: 0
+    output_per_1m: 0
+`,
+			wantSub: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse([]byte(tc.body))
+			if tc.wantSub == "" {
+				if err != nil {
+					t.Fatalf("expected success, got %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tc.wantSub)
+			}
+		})
+	}
+}
+
+func TestParse_RejectsNaNAndInf(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		sub  string
+	}{
+		{
+			name: "nan",
+			body: `
+pricing:
+  m:
+    input_per_1m: .nan
+    output_per_1m: 1.0
+`,
+			sub: "pricing.m.input_per_1m",
+		},
+		{
+			name: "inf",
+			body: `
+pricing:
+  m:
+    input_per_1m: 1.0
+    output_per_1m: .inf
+`,
+			sub: "pricing.m.output_per_1m",
+		},
+		{
+			name: "neg inf",
+			body: `
+pricing:
+  m:
+    input_per_1m: -.inf
+    output_per_1m: 1.0
+`,
+			sub: "pricing.m.input_per_1m",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse([]byte(tc.body))
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tc.sub) {
+				t.Fatalf("error %q missing path %q", err.Error(), tc.sub)
+			}
+		})
+	}
+}
+
+func TestParse_RejectsNullOrEmptyPerImageOutput(t *testing.T) {
+	bodies := []string{
+		"multimodal_pricing:\n  img:\n    image:\n      per_image_output: null\n",
+		"multimodal_pricing:\n  img:\n    image:\n      per_image_output: {}\n",
+	}
+	for _, body := range bodies {
+		_, err := Parse([]byte(body))
+		if err == nil {
+			t.Fatalf("expected error for body %q", body)
+		}
+		if !strings.Contains(err.Error(), "per_image_output") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+}
+
+func TestCostImages_Coverage(t *testing.T) {
+	p, err := Parse([]byte(`
+multimodal_pricing:
+  imag:
+    aliases: [imag-alias]
+    image:
+      per_image_input: 0.01
+      per_image_output:
+        default: 0.05
+        "1K": 0.05
+        "2K": 0.07
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	cost, known, def := p.CostImages("imag", 3, 0, "1K")
+	if !known || def || cost != 0.03 {
+		t.Fatalf("input images cost=%v known=%v def=%v", cost, known, def)
+	}
+
+	cost, known, def = p.CostImages("imag-alias", 0, 2, "1024x1024")
+	if !known || def || diffAbs(cost, 0.10) {
+		t.Fatalf("1K output cost=%v known=%v def=%v", cost, known, def)
+	}
+	cost, known, def = p.CostImages("imag", 0, 2, "2K")
+	if !known || def || diffAbs(cost, 0.14) {
+		t.Fatalf("2K output cost=%v known=%v def=%v", cost, known, def)
+	}
+	cost, known, def = p.CostImages("imag", 0, 1, "")
+	if !known || !def || diffAbs(cost, 0.05) {
+		t.Fatalf("defaulted output cost=%v known=%v def=%v", cost, known, def)
+	}
+
+	cost, known, _ = p.CostImages("imag", 0, 0, "1K")
+	if !known || cost != 0 {
+		t.Fatalf("zero counts cost=%v known=%v", cost, known)
+	}
+	cost, known, _ = p.CostImages("totally-unknown", 0, 0, "1K")
+	if !known || cost != 0 {
+		t.Fatalf("zero counts unknown model cost=%v known=%v", cost, known)
+	}
+	cost, known, _ = p.CostImages("imag", -5, -3, "1K")
+	if !known || cost != 0 {
+		t.Fatalf("negative counts cost=%v known=%v", cost, known)
+	}
+
+	pFree, err := Parse([]byte(`
+multimodal_pricing:
+  imag:
+    image:
+      per_image_input: 0
+      per_image_output:
+        default: 0.05
+`))
+	if err != nil {
+		t.Fatalf("Parse free: %v", err)
+	}
+	cost, known, _ = pFree.CostImages("imag", 2, 0, "1K")
+	if !known || cost != 0 {
+		t.Fatalf("explicit free input cost=%v known=%v", cost, known)
+	}
+
+	pOutOnly, err := Parse([]byte(`
+multimodal_pricing:
+  imag:
+    image:
+      per_image_output:
+        default: 0.05
+        "1K": 0.05
+`))
+	if err != nil {
+		t.Fatalf("Parse out-only: %v", err)
+	}
+	cost, known, _ = pOutOnly.CostImages("imag", 2, 1, "1K")
+	if known {
+		t.Fatal("missing per_image_input should make known=false when input count positive")
+	}
+	if diffAbs(cost, 0.05) {
+		t.Fatalf("should keep known output subtotal, got %v", cost)
+	}
+
+	pInOnly, err := Parse([]byte(`
+multimodal_pricing:
+  imag:
+    image:
+      per_image_input: 0.01
+`))
+	if err != nil {
+		t.Fatalf("Parse in-only: %v", err)
+	}
+	cost, known, _ = pInOnly.CostImages("imag", 2, 1, "1K")
+	if known {
+		t.Fatal("missing per_image_output should be unknown when output count positive")
+	}
+	if diffAbs(cost, 0.02) {
+		t.Fatalf("should keep known input subtotal, got %v", cost)
+	}
+	cost, known, _ = pInOnly.CostImages("imag", 2, 0, "1K")
+	if !known || cost != 0.02 {
+		t.Fatalf("input-only cost=%v known=%v", cost, known)
+	}
+
+	cost, known, _ = p.CostImages("nope", 1, 0, "1K")
+	if known || cost != 0 {
+		t.Fatalf("unknown model cost=%v known=%v", cost, known)
+	}
+}
+
+func TestHasMultimodal(t *testing.T) {
+	p, err := Parse([]byte(`
+multimodal_pricing:
+  imag-canonical:
+    aliases: [imag-alias]
+    image:
+      per_image_input: 0.01
+      per_image_output:
+        default: 0.05
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !p.HasMultimodal("imag-canonical") {
+		t.Fatal("canonical should hit multimodal")
+	}
+	if !p.HasMultimodal("imag-alias") {
+		t.Fatal("alias should hit multimodal")
+	}
+	if p.HasMultimodal("missing-model") {
+		t.Fatal("unknown should not hit multimodal")
+	}
+	p2, err := Parse([]byte(`
+multimodal_pricing:
+  imag-base:
+    image:
+      per_image_input: 0.01
+      per_image_output:
+        default: 0.05
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !p2.HasMultimodal("imag-base-2026-03-18") {
+		t.Fatal("canonicalized date suffix should hit multimodal")
+	}
+}
+
+func diffAbs(a, b float64) bool {
+	d := a - b
+	return d < -0.0001 || d > 0.0001
+}
+
+func TestNewPricing_StillUsableEmpty(t *testing.T) {
+	p := NewPricing()
+	if err := p.Validate(); err != nil {
+		t.Fatalf("empty Validate: %v", err)
+	}
+	_, known := p.CostText("x", TextTokenUsage{InputTokens: 1, RequestInputTokens: 1})
+	if known {
+		t.Fatal("empty should not know models")
+	}
+	_, known, _ = p.CostImages("x", 1, 1, "1K")
+	if known {
+		t.Fatal("empty should not know multimodal models")
+	}
+	if p.HasMultimodal("x") {
+		t.Fatal("empty HasMultimodal should be false")
 	}
 }
