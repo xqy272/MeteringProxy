@@ -241,6 +241,73 @@ function isAbortError(err) {
 async function fetchJSONSignal(path, signal) {
   return fetchJSON(path, signal ? { signal } : undefined);
 }
+function issueSourceStatusLabel(source) {
+  const raw=String(source||'').trim().toLowerCase();
+  if(!raw) return '';
+  const key='key_detail.issue_source_status.'+raw;
+  const label=t(key);
+  return label===key ? raw : label;
+}
+function focusKeyRow(hash) {
+  if(!hash) return;
+  const tbody=$('keys-table');
+  if(!tbody) return;
+  const row=[...tbody.querySelectorAll('tr[data-key-hash]')].find(el=>el.dataset.keyHash===String(hash));
+  if(row && typeof row.focus==='function'){
+    try { row.focus({ preventScroll:true }); } catch(_) { row.focus(); }
+  }
+}
+function setKeyDetailEmptyState(mode, message) {
+  const emptyEl=$('key-detail-empty');
+  const bodyEl=$('key-detail-body');
+  if(!emptyEl) return;
+  if(mode==='hide'){
+    emptyEl.classList.add('hidden');
+    emptyEl.hidden=true;
+    return;
+  }
+  emptyEl.classList.remove('hidden');
+  emptyEl.hidden=false;
+  if(bodyEl){
+    bodyEl.classList.add('hidden');
+    bodyEl.hidden=true;
+  }
+  if(mode==='unavailable'){
+    emptyEl.innerHTML=`<div class="empty-state error-text"><strong>${esc(t('key_detail.stale_title'))}</strong><span>${esc(message||t('key_detail.section_unavailable'))}</span></div>`;
+  } else {
+    emptyEl.innerHTML=`<div class="empty-state"><strong>${esc(t('key_detail.empty_title'))}</strong><span>${esc(t('key_detail.empty_detail'))}</span></div>`;
+  }
+}
+function markKeyDetailUnavailable(message) {
+  if(!selectedKeyHash) return;
+  if(keyDetailAbort){
+    try { keyDetailAbort.abort(); } catch(_) {}
+    keyDetailAbort=null;
+  }
+  keyDetailGeneration += 1;
+  lastKeyTSRows=[];
+  lastKeyTSBucket='';
+  showKeyDetailShell();
+  renderKeyDetailHeader(selectedKeySnapshot || { key_hash:selectedKeyHash, label:'' });
+  setKeyDetailEmptyState('unavailable', message);
+}
+function fmtKeyTrendTotal(list, meta, total) {
+  if(keyDetailUsageMode!=='cost') return meta.fmtFull(total);
+  const states=(list||[]).map(costStateOf);
+  const anyUnavailable=states.some(s=>s==='unavailable');
+  const anyIncomplete=states.some(s=>s!=='complete');
+  if(anyUnavailable && states.every(s=>s==='unavailable')) return t('cost.unavailable_value');
+  if(anyIncomplete && !(Number(total)>0)) {
+    return anyUnavailable ? t('cost.unavailable_value') : t('cost.partial_unknown');
+  }
+  return meta.fmtFull(total);
+}
+function fmtKeyTrendPoint(value, state) {
+  if(keyDetailUsageMode!=='cost') return null;
+  if(state==='unavailable') return t('cost.unavailable_value');
+  if(state==='partial' && !(Number(value)>0)) return t('cost.partial_unknown');
+  return null;
+}
 function quotaCredentialLabel(value) {
   const s=String(value||'');
   if(!s) return '-';
@@ -944,6 +1011,7 @@ function bindKeyDetailControls() {
 }
 
 function clearKeySelection() {
+  const prevHash = selectedKeyHash;
   selectedKeyHash = null;
   selectedKeySnapshot = null;
   lastKeyTSRows = [];
@@ -955,6 +1023,7 @@ function clearKeySelection() {
   keyDetailGeneration += 1;
   renderKeysTable();
   hideKeyDetail();
+  focusKeyRow(prevHash);
 }
 
 function selectKey(keyHash) {
@@ -1007,7 +1076,7 @@ function renderKeysTable() {
   const tbody=$('keys-table');
   if(!tbody) return;
   const rows=Array.isArray(latestKeysRows)?latestKeysRows:[];
-  setText('keys-summary', t('summary.keys',{count:rows.length})+(selectedKeyHash?` · ${t('key_detail.selected')}`:''));
+  setText('keys-summary', t('summary.keys',{count:rows.length})+(selectedKeyHash?` \u00b7 ${t('key_detail.selected')}`:''));
   if(!rows.length){
     tbody.innerHTML=emptyRow(7,t('state.no_key_data'),t('state.key_hint'));
     return;
@@ -1020,7 +1089,7 @@ function renderKeysTable() {
     const failPct=req>0 ? ((fail/req)*100).toFixed(1)+'%' : '0%';
     const label=keyLabelText(r);
     const short=shortHash(hash);
-    return `<tr class="key-row${selected?' is-selected':''}" data-key-hash="${esc(hash)}" tabindex="0" role="button" aria-selected="${selected?'true':'false'}" aria-label="${esc(t('key_detail.open_aria',{label}))}">
+    return `<tr class="key-row${selected?' is-selected':''}" data-key-hash="${esc(hash)}" tabindex="0" role="button" aria-pressed="${selected?'true':'false'}" aria-label="${esc(t('key_detail.open_aria',{label}))}">
       <td>
         <div class="key-label-cell">
           <div class="key-label-primary" title="${esc(label)}">${esc(label)}</div>
@@ -1066,9 +1135,12 @@ async function copySelectedKeyHash() {
       ta.style.position='fixed';
       ta.style.left='-9999px';
       document.body.appendChild(ta);
-      ta.select();
-      if(!document.execCommand('copy')) throw new Error('copy failed');
-      document.body.removeChild(ta);
+      try {
+        ta.select();
+        if(!document.execCommand('copy')) throw new Error('copy failed');
+      } finally {
+        if(ta.parentNode) ta.parentNode.removeChild(ta);
+      }
     }
     if(status) status.textContent = t('key_detail.copy_ok');
   } catch (_) {
@@ -1209,9 +1281,10 @@ function renderKeyIssues(data, err) {
   const items=Array.isArray(data && data.items)?data.items:[];
   const partial=!!(data && data.partial);
   const source=data && data.sources ? data.sources.request_usage : '';
-  const sourceNote=source?t('key_detail.issue_source',{source:source}):'';
+  const sourceLabel=issueSourceStatusLabel(source);
+  const sourceNote=sourceLabel?t('key_detail.issue_source',{source:sourceLabel}):'';
   setText('kd-issues-summary', items.length
-    ? t('key_detail.issues_summary',{count:fmtFull(items.length)})+(partial?` · ${t('status.partial')}`:'')+(sourceNote?` · ${sourceNote}`:'')
+    ? t('key_detail.issues_summary',{count:fmtFull(items.length)})+(partial?` \u00b7 ${t('status.partial')}`:'')+(sourceNote?` \u00b7 ${sourceNote}`:'')
     : t('issues.empty'));
   if(!items.length){
     list.innerHTML=`<div class="empty-state"><strong>${esc(t('issues.empty'))}</strong><span>${esc(t('key_detail.issues_empty_detail'))}</span></div>`;
@@ -1228,7 +1301,7 @@ function renderKeyIssues(data, err) {
           <span class="issue-label">${esc(label)}</span>
           <span class="issue-count mono">${esc(fmtFull(item.count||0))}</span>
         </div>
-        <div class="key-issue-meta">${esc([fmtShort(item.latest_at), bits.join(' / ')].filter(Boolean).join(' · ')||'-')}</div>
+        <div class="key-issue-meta">${esc([fmtShort(item.latest_at), bits.join(' / ')].filter(Boolean).join(' \u00b7 ')||'-')}</div>
       </div>
     </div>`;
   }).join('');
@@ -1317,6 +1390,7 @@ function renderKeyTrend(rows, bucket, err) {
   const values=list.map(meta.value);
   const maxV=Math.max(...values,1);
   const total=values.reduce((s,v)=>s+v,0);
+  const totalLabel=fmtKeyTrendTotal(list, meta, total);
   const slot=pW/list.length;
   const barW=Math.max(2,Math.min(28,slot*.6));
   const yFor=v=>dims.h-dims.b-pH*Number(v||0)/maxV;
@@ -1326,8 +1400,9 @@ function renderKeyTrend(rows, bucket, err) {
     const state=costStateOf(r);
     const partialMark = keyDetailUsageMode==='cost' && state!=='complete';
     const cls = partialMark ? 'chart-bar chart-bar-rect is-partial' : 'chart-bar chart-bar-rect';
+    const pointLabel=fmtKeyTrendPoint(v, state);
     const tipRows=[
-      [keyDetailUsageMode, meta.label, keyDetailUsageMode==='cost' ? (state==='unavailable'?t('cost.unavailable_value'):meta.fmtFull(v)) : meta.fmtFull(v)],
+      [keyDetailUsageMode, meta.label, pointLabel!=null?pointLabel:meta.fmtFull(v)],
       ['tokens', t('tooltip.tokens'), fmtFull(r.total_tokens||0)]
     ];
     if(keyDetailUsageMode==='cost' && state!=='complete'){
@@ -1350,11 +1425,11 @@ function renderKeyTrend(rows, bucket, err) {
   setText('kd-trend-summary', t('key_detail.trend_summary',{
     count:list.length,
     bucket:bucket||'-',
-    value:meta.fmtFull(total),
+    value:totalLabel,
     partial:fmtFull(partialBuckets)
   }));
   setText('kd-trend-left', fmtShort(list[0].timestamp));
-  setText('kd-trend-right', meta.fmtFull(total));
+  setText('kd-trend-right', totalLabel);
 }
 
 async function loadKeyDetail() {
@@ -1381,8 +1456,7 @@ async function loadKeyDetail() {
 
   if(!row){
     renderKeyDetailHeader(selectedKeySnapshot || {key_hash:hash,label:''});
-    if(emptyEl){ emptyEl.classList.remove('hidden'); emptyEl.hidden=false; }
-    if(bodyEl){ bodyEl.classList.add('hidden'); bodyEl.hidden=true; }
+    setKeyDetailEmptyState('empty');
     // still clear stale section bodies
     lastKeyTSRows=[]; lastKeyTSBucket='';
     return;
@@ -1390,7 +1464,7 @@ async function loadKeyDetail() {
 
   selectedKeySnapshot = row;
   renderKeyDetailHeader(row);
-  if(emptyEl){ emptyEl.classList.add('hidden'); emptyEl.hidden=true; }
+  setKeyDetailEmptyState('hide');
   if(bodyEl){ bodyEl.classList.remove('hidden'); bodyEl.hidden=false; }
   // provisional summary before scoped fetches complete
   renderKeySummary(row, null);
@@ -2152,7 +2226,7 @@ function markFailed(failures) {
   const fm=new Map(failures.map(f=>[f.name,f.error]));
   if(fm.has('models')){const mt=$('models-table');if(mt)mt.innerHTML=errorRow(7,fm.get('models').message);const dc=$('model-distribution-chart');if(dc)dc.innerHTML=`<div class="empty-state error-text">${esc(fm.get('models').message)}</div>`;}
   if(fm.has('images')){const it=$('images-models-table');if(it)it.innerHTML=errorRow(9,fm.get('images').message);setText('images-summary',fm.get('images').message);}
-  if(fm.has('keys'))$('keys-table').innerHTML=errorRow(7,fm.get('keys').message);
+  if(fm.has('keys')){const keysErr=fm.get('keys');const kt=$('keys-table');if(kt)kt.innerHTML=errorRow(7,keysErr&&keysErr.message);if(selectedKeyHash) markKeyDetailUnavailable(keysErr&&keysErr.message);}
   if(fm.has('requests'))$('requests-table').innerHTML=errorRow(11,fm.get('requests').message);
   if(fm.has('issues')){$('issues-state').classList.remove('hidden');$('issues-state').innerHTML=`<div class="issues-empty error-text">${esc(fm.get('issues').message)}</div>`;const io=$('issues-overview');if(io)io.innerHTML='';$('issues-list').innerHTML=`<div class="issue-class-placeholder">${esc(t('issues.select_severity_hint'))}</div>`;}
   if(fm.has('timeseries')){const el=$('usage-trend-chart');if(el)el.innerHTML=`<div class="empty-state error-text">${esc(fm.get('timeseries').message)}</div>`;}

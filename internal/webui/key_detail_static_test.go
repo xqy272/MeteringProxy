@@ -78,6 +78,11 @@ func TestKeyDetailStaticContracts(t *testing.T) {
 		"clearKeySelection",
 		"data-key-hash",
 		"is-selected",
+		"aria-pressed",
+		"markKeyDetailUnavailable",
+		"fmtKeyTrendTotal",
+		"issueSourceStatusLabel",
+		"focusKeyRow",
 	} {
 		requireContains(t, app, want, "app.js")
 	}
@@ -106,6 +111,10 @@ func TestKeyDetailStaticContracts(t *testing.T) {
 		"action.copy_full_hash",
 		"action.close_key_detail",
 		"key_detail.selected",
+		"key_detail.issue_source_status.not_applicable",
+		"key_detail.issue_source_status.unavailable",
+		"key_detail.issue_source_status.complete",
+		"key_detail.stale_title",
 		"key_detail.unknown_key",
 		"key_detail.open_aria",
 		"key_detail.empty_title",
