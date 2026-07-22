@@ -589,7 +589,7 @@ pricing:
 
 Anthropic cache creation token 优先按 `cache_creation_per_1m` 计费；未配置时回退为普通输入价格。缓存读取 token 按 `cached_input_per_1m` 计费。
 
-`long_context` 是通用可选结构，按**单次请求的 input token** 判断档位；两个各自低于阈值的请求不会因为聚合后越过阈值而被错算成长上下文。只有阈值已经确认的模型才应配置该结构；默认文件中的 Grok 4.5 固定使用项目所有者给定的 flat 价 `input 2.00 / cached 0.30 / output 6.00`（每 1M token），不配置 long-context 阈值。Gemini 3.1 Pro Preview（200k）仅作为 **generic long-context 定价/档位测试样例** 出现在 `pricing.yaml` 中，不是本版本的构建模型或推荐施工模型。
+`long_context` 是通用可选结构，按**单次请求的 input token** 判断档位；两个各自低于阈值的请求不会因为聚合后越过阈值而被错算成长上下文。只有阈值已经确认的模型才应配置该结构；默认文件中的 Grok 4.5 固定使用项目所有者给定的 flat 价 `input 2.00 / cached 0.30 / output 6.00`（每 1M token），不配置 long-context 阈值。Gemini 3.1 Pro Preview（200k）仅作为 **generic long-context 定价/档位测试样例** 出现在 `pricing.yaml` 中；这条价格配置不会选择 MeteringProxy 的运行模型或开发施工模型。
 
 图片模型可同时按 token、输入图片张数和按 1K/2K 尺寸的输出张数计价。缺失 size 时使用 `default` 价格并标记 `image_size_defaulted`；缺失输出张数时不猜测，标记 `image_count_missing`。图片 request 命中 multimodal pricing 后不会再把同一份文本 summary 重复计费。
 
@@ -798,6 +798,7 @@ testdata/                                测试 fixture 与 golden 文件
 scripts/backup.sh                        SQLite 备份脚本
 systemd/ai-gateway-metering-proxy.service systemd 单元示例
 docs/v0.5.0-release-notes.md             发布说明（annotated tag 消息来源）
+docs/v0.5.0-release-validation.md        本地 RC、性能、隐私、WebUI 与 Docker 验证证据
 ```
 
 </details>
@@ -840,7 +841,7 @@ docker build -t ai-gateway-metering-proxy .
 
 `db.Open()` 在启动时执行增量迁移——创建缺失的表和索引、为旧版数据库添加缺失列、回填 Unix 时间戳、规范化负数字节数为零，通过 `PRAGMA user_version` 跟踪版本。历史记录仍可查询，但旧版解析器缺陷导致的未采集数据无法恢复。
 
-v0.5.0 相对 `v0.4.2` 的 schema 变化是 additive 的：首次打开旧库时会创建 `request_usage(api_key_hash, created_at_unix)` 组合索引以服务精确 Key 查询。迁移不删列、不改类型、不重写历史 usage；成本仍只在读侧按**当前进程加载的 pricing** 重估，不会把价格冻结进行。旧二进制可以忽略新索引并继续打开数据库。完整的迁移体系设计（含三层递进迁移、盐值管理、破坏性变更处理）见 [数据迁移体系设计案](docs/data-migration-design.md)。
+v0.5.0 相对 `v0.4.2` 的 schema 变化是 additive 的：首次打开旧库时会创建 `request_usage(api_key_hash, created_at_unix)` 组合索引以服务精确 Key 查询。迁移不删列、不改类型、不重写历史 usage；成本仍只在读侧按**当前进程加载的 pricing** 重估，不会把价格冻结写入历史请求。旧二进制可以忽略新索引并继续打开数据库。完整的迁移体系设计（含三层递进迁移、盐值管理、破坏性变更处理）见 [数据迁移体系设计案](docs/data-migration-design.md)。
 
 ## 已知局限
 
@@ -849,7 +850,7 @@ v0.5.0 相对 `v0.4.2` 的 schema 变化是 additive 的：首次打开旧库时
 - SSE 行长超过内部解析缓冲区时，按原样转发但跳过解析。
 - 客户端若协商压缩 SSE，代理保持头透明并标记 `capture_reason=compressed_stream_not_metered`，不解析 usage。
 - 报表成本始终是当前启动价对历史已观测 usage 的重估，不是不可变账单。
-- 在文档化的百万行 fixture 上，精确 Key 的 30d 明细报告可到约 66 ms 以内；**全局 Keys 列表 30d 仍约 14.09 s**，属于有意记录的剩余瓶颈，不是可接受的交互延迟目标。详见 [Key 查询性能](docs/v0.5.0-key-query-performance.md)。
+- 在文档化的百万行 fixture 上，两次完整实测中精确 Key 的 30d 明细报告最慢约 70 ms；**全局 Keys 列表 30d 约 14.1–14.5 s**，属于有意记录的剩余瓶颈，不是可接受的交互延迟目标。详见 [Key 查询性能](docs/v0.5.0-key-query-performance.md)。
 - SQLite 适用于单节点计量；本项目并非分布式分析存储。
 - WebUI 为只读，仍须由外层 Caddy Basic Auth 或等价访问控制保护。
 
