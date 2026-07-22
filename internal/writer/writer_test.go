@@ -199,3 +199,19 @@ func TestBatchWriter_RetryOnDBError(t *testing.T) {
 		t.Errorf("total events after retry = %d, want 1", totalEvents)
 	}
 }
+
+func TestBatchWriter_Running(t *testing.T) {
+	sink := &mockSink{}
+	bw := New(sink, 10, 1, 50*time.Millisecond)
+	if bw.Running() {
+		t.Fatal("Running before Start")
+	}
+	bw.Start()
+	if !bw.Running() {
+		t.Fatal("Running after Start")
+	}
+	bw.Stop()
+	if bw.Running() {
+		t.Fatal("Running after Stop")
+	}
+}

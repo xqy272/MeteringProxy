@@ -1,7 +1,9 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"strings"
@@ -150,6 +152,21 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
+	// Runtime serve path keeps historical Unmarshal behavior for compatibility.
+	return parseConfig(data, false)
+}
+
+// LoadStrict loads config with strict YAML decoding: unknown fields and multiple
+// documents are rejected. Used by the validate preflight command only.
+func LoadStrict(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	return parseConfig(data, true)
+}
+
+func parseConfig(data []byte, strict bool) (*Config, error) {
 	cfg := &Config{
 		Listen:                  "127.0.0.1:8320",
 		Upstream:                "http://127.0.0.1:8317",
@@ -225,7 +242,22 @@ func Load(path string) (*Config, error) {
 			},
 		},
 	}
-	if err := yaml.Unmarshal(data, cfg); err != nil {
+	if strict {
+		dec := yaml.NewDecoder(bytes.NewReader(data))
+		dec.KnownFields(true)
+		if err := dec.Decode(cfg); err != nil {
+			if err != io.EOF {
+				return nil, fmt.Errorf("parse config: %w", err)
+			}
+		}
+		var extra yaml.Node
+		if err := dec.Decode(&extra); err != io.EOF {
+			if err == nil {
+				return nil, fmt.Errorf("parse config: multiple YAML documents are not allowed")
+			}
+			return nil, fmt.Errorf("parse config: %w", err)
+		}
+	} else if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	cfg.Upstream = strings.TrimRight(strings.TrimSpace(cfg.Upstream), "/")

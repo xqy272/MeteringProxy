@@ -19,4 +19,10 @@ COPY --from=build /out/ai-gateway-metering-proxy /usr/local/bin/ai-gateway-meter
 
 USER appuser
 EXPOSE 8320
+
+# Lightweight process liveness check using busybox wget already present in Alpine.
+# Prefer /healthz so orchestrators do not thrash restarts on external dependency flaps.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
+  CMD wget -q -O /dev/null http://127.0.0.1:8320/healthz || exit 1
+
 ENTRYPOINT ["ai-gateway-metering-proxy"]

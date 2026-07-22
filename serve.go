@@ -1,0 +1,397 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+
+	"ai-gateway-metering-proxy/internal/cliproxy"
+	"ai-gateway-metering-proxy/internal/config"
+	"ai-gateway-metering-proxy/internal/credential"
+	"ai-gateway-metering-proxy/internal/db"
+	"ai-gateway-metering-proxy/internal/hash"
+	"ai-gateway-metering-proxy/internal/metrics"
+	"ai-gateway-metering-proxy/internal/pricing"
+	"ai-gateway-metering-proxy/internal/proxy"
+	"ai-gateway-metering-proxy/internal/quota"
+	"ai-gateway-metering-proxy/internal/report"
+	"ai-gateway-metering-proxy/internal/store"
+	"ai-gateway-metering-proxy/internal/usagequeue"
+	"ai-gateway-metering-proxy/internal/webui"
+	"ai-gateway-metering-proxy/internal/writer"
+)
+
+const walSizeThreshold = 128 * 1024 * 1024 // 128 MiB
+
+func runServe(args []string, stdout, stderr io.Writer) error {
+	flags, err := parseServeFlags(args, stderr)
+	if err != nil {
+		return err
+	}
+
+	cfg, err := config.Load(flags.configPath)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	// --seed-demo guard runs before any DB access to prevent touching the wrong database.
+	if flags.seedDemo {
+		if !flags.devStatic {
+			return fmt.Errorf("--seed-demo requires --dev-static (refusing to seed without dev mode)")
+		}
+		dbPath := cfg.Database
+		if filepath.IsAbs(dbPath) || strings.HasPrefix(dbPath, "/") || strings.HasPrefix(dbPath, `\`) ||
+			!strings.HasSuffix(filepath.Base(dbPath), ".dev.sqlite") {
+			return fmt.Errorf("--seed-demo refused: database %q is not a relative *.dev.sqlite path", dbPath)
+		}
+	}
+
+	// Startup self-checks (fail-fast).
+
+	if _, err := os.Stat(cfg.SaltFile); os.IsNotExist(err) {
+		return fmt.Errorf("salt file not found at %s. Generate one:\n  python3 -c \"import secrets; print(secrets.token_hex(32))\" > %s", cfg.SaltFile, cfg.SaltFile)
+	}
+
+	hasher, err := hash.New(cfg.SaltFile)
+	if err != nil {
+		return fmt.Errorf("failed to load salt: %w", err)
+	}
+
+	// Check SQLite path is writable.
+	database, err := db.Open(cfg.Database)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer database.Close()
+
+	// Salt consistency guard (invariant #7): refuse to start if the salt file
+	// has changed but the DB already has historical data, because that would
+	// silently break all api_key_hash and client_ip_hash groupings.
+	if err := database.VerifySaltFingerprint(hasher.SaltFingerprint(), cfg.Database, cfg.SaltFile); err != nil {
+		return fmt.Errorf("salt consistency check failed: %w", err)
+	}
+
+	// Check pricing file is parseable.
+	pricingData, err := pricing.Load(cfg.PricingFile)
+	if err != nil {
+		return fmt.Errorf("failed to load pricing file: %w", err)
+	}
+
+	if flags.seedDemo {
+		if err := db.SeedDemo(database); err != nil {
+			return fmt.Errorf("failed to seed demo data: %w", err)
+		}
+		log.Printf("Demo data seeded successfully")
+	}
+
+	log.Printf("Startup self-check passed: salt=%s db=%s pricing=%s metering_enabled=%v",
+		cfg.SaltFile, cfg.Database, cfg.PricingFile, cfg.MeteringEnabled)
+
+	// Start batch writer.
+	batchWriter := writer.New(store.NewEventSink(database), cfg.QueueCapacity, cfg.BatchSize, cfg.FlushInterval)
+	batchWriter.Start()
+	defer batchWriter.Stop()
+
+	ready := &readiness{
+		configOK:  true,
+		saltOK:    true,
+		pricingOK: true,
+		db:        database,
+		writer:    batchWriter,
+	}
+
+	// Wire store interface boundaries.
+	var healthWriter store.HealthWriter = database
+
+	// Health metrics reporter (every 60s) with WAL checkpoint scheduling.
+	stopHealth := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		lastCheckpoint := time.Now()
+		for {
+			select {
+			case <-ticker.C:
+				qd, dropped, parseErrors, dbErrors := batchWriter.Snapshot()
+				sseSkips := metrics.SSELineSkips()
+				if err := healthWriter.InsertHealthMetric(time.Now().UTC().Format(time.RFC3339), int(qd), dropped, parseErrors, dbErrors, sseSkips); err != nil {
+					log.Printf("health metric insert error: %v", err)
+				}
+
+				// Hourly PASSIVE WAL checkpoint.
+				if time.Since(lastCheckpoint) >= time.Hour {
+					result, err := database.CheckpointWAL("PASSIVE")
+					if err != nil {
+						log.Printf("wal checkpoint error: %v", err)
+					} else {
+						log.Printf("wal checkpoint: busy=%d log=%d checkpointed=%d",
+							result.Busy, result.LogFrames, result.Checkpointed)
+					}
+					lastCheckpoint = time.Now()
+
+					// If WAL file exceeds threshold, attempt TRUNCATE.
+					walPath := database.Path() + "-wal"
+					if info, statErr := os.Stat(walPath); statErr == nil {
+						if info.Size() > walSizeThreshold {
+							truncResult, truncErr := database.CheckpointWAL("TRUNCATE")
+							if truncErr != nil {
+								log.Printf("wal truncate checkpoint error: %v", truncErr)
+							} else if truncResult.Busy == 0 {
+								log.Printf("wal truncate checkpoint: busy=%d log=%d checkpointed=%d",
+									truncResult.Busy, truncResult.LogFrames, truncResult.Checkpointed)
+							}
+						}
+					}
+				}
+			case <-stopHealth:
+				return
+			}
+		}
+	}()
+	defer close(stopHealth)
+
+	// Create proxy handler.
+	proxyHandler := proxy.New(cfg.Upstream, hasher, batchWriter, cfg.MaxNonstreamSampleBytes, cfg.RequestMetadata, cfg.ProxyTransport)
+	proxyHandler.SetCorrelation(cfg.Observability.Correlation.Mode, cfg.Observability.Correlation.Header)
+	proxyHandler.SetMeteringEnabled(cfg.MeteringEnabled)
+
+	// Opt-in connection warmup. Default is off to avoid probing CPA on start.
+	if cfg.ProxyTransport.WarmupOnStart {
+		go func() {
+			warmupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := proxyHandler.WarmupConnection(warmupCtx); err != nil {
+				log.Printf("transport warmup failed (non-fatal): %v", err)
+			}
+		}()
+	}
+
+	// CLIProxyAPI management client and pollers.
+	var credPoller *credential.Poller
+	var quotaPoller *quota.Poller
+	var usageQueuePoller *usagequeue.Poller
+	if cfg.CLIProxyManagement.Enabled {
+		managementKey, err := cliproxy.ReadKeyFile(cfg.CLIProxyManagement.KeyFile)
+		if err != nil {
+			return fmt.Errorf("failed to read CLIProxyAPI management key: %w", err)
+		}
+
+		if cfg.CLIProxyManagement.UsageQueue.Enabled {
+			allowRequestMerge := cfg.Observability.Correlation.RequirePropagationVerified &&
+				cfg.Observability.Correlation.SideChannelMerge == "request_id" &&
+				cfg.CLIProxyManagement.UsageQueue.MergeMode == "request_id"
+			usageClient, err := cliproxy.NewClient(cliproxy.CLIProxyConfig{
+				Enabled:   cfg.CLIProxyManagement.Enabled,
+				BaseURL:   cfg.CLIProxyManagement.BaseURL,
+				Key:       managementKey,
+				Timeout:   cfg.CLIProxyManagement.UsageQueue.Timeout,
+				Component: "usage_queue",
+			})
+			if err != nil {
+				return fmt.Errorf("failed to create CLIProxyAPI usage queue client: %w", err)
+			}
+			usageQueuePoller = usagequeue.NewHybridPoller(cfg.CLIProxyManagement.UsageQueue.RESPAddr, managementKey,
+				usageClient, cfg.CLIProxyManagement.UsageQueue, database, hasher, allowRequestMerge)
+			usageQueuePoller.Start()
+			defer usageQueuePoller.Stop()
+		}
+
+		if cfg.CLIProxyManagement.CredentialHealth.Enabled {
+			credClient, err := cliproxy.NewClient(cliproxy.CLIProxyConfig{
+				Enabled:   cfg.CLIProxyManagement.Enabled,
+				BaseURL:   cfg.CLIProxyManagement.BaseURL,
+				Key:       managementKey,
+				Timeout:   cfg.CLIProxyManagement.CredentialHealth.Timeout,
+				Component: "credential_health",
+			})
+			if err != nil {
+				return fmt.Errorf("failed to create CLIProxyAPI credential client: %w", err)
+			}
+			credPoller = credential.NewPoller(credClient, database, hasher, cfg.CLIProxyManagement.CredentialHealth)
+			credPoller.Start()
+			defer credPoller.Stop()
+		}
+
+		if cfg.CLIProxyManagement.Quota.Enabled {
+			quotaClient, err := cliproxy.NewClient(cliproxy.CLIProxyConfig{
+				Enabled:   cfg.CLIProxyManagement.Enabled,
+				BaseURL:   cfg.CLIProxyManagement.BaseURL,
+				Key:       managementKey,
+				Timeout:   cfg.CLIProxyManagement.Quota.Timeout,
+				Component: "quota_refresh",
+			})
+			if err != nil {
+				return fmt.Errorf("failed to create CLIProxyAPI quota client: %w", err)
+			}
+			quotaPoller = quota.NewPoller(quotaClient, database, hasher, cfg.CLIProxyManagement.Quota)
+			quotaPoller.Start()
+			defer quotaPoller.Stop()
+		}
+	}
+
+	// Set up mux.
+	mux := http.NewServeMux()
+
+	// Process liveness and readiness. Registered before catch-all proxy routes.
+	mux.Handle("/healthz", healthzHandler())
+	mux.Handle("/readyz", readyzHandler(ready))
+
+	// /metrics endpoint for Prometheus.
+	mux.Handle("/metrics", metrics.Handler())
+
+	if cfg.WebUI.Enabled {
+		var sideChannel report.SideChannelStatusReader
+		if usageQueuePoller != nil {
+			sideChannel = usageQueuePoller
+		}
+		modelsReporter := report.NewService(report.Dependencies{
+			Models: database, Summary: database, Timeseries: database, Images: database,
+			Overview: database, Capture: batchWriter, ModelAssets: database,
+			Keys: database, KeyLabels: cfg.KeyLabels,
+			Activity: database, Requests: database, Issues: database,
+			Multimodal: database, ImageRequests: database, Errors: database, Gateway: database,
+			Profiles:    proxyHandler.Registry(),
+			SideChannel: sideChannel,
+		}, pricingData)
+		diag := webui.DiagnosticsReaders{Quota: database, Obs: database}
+		var webuiServer *webui.Server
+		if flags.devStatic {
+			webuiServer = webui.NewWithStaticFS(modelsReporter, batchWriter, cfg.WebUI.BasePath, os.DirFS("internal/webui/static"), diag)
+		} else {
+			webuiServer = webui.New(modelsReporter, batchWriter, cfg.WebUI.BasePath, diag)
+		}
+		webuiServer.SetMeteringEnabledFunc(func() bool { return cfg.MeteringEnabled })
+		webuiServer.SetCorrelationMode(cfg.Observability.Correlation.SideChannelMerge)
+		if credPoller != nil {
+			webuiServer.SetCredPoller(credPoller)
+		}
+		if quotaPoller != nil {
+			webuiServer.SetQuotaPoller(quotaPoller)
+		}
+		if flags.seedDemo {
+			if credPoller == nil {
+				webuiServer.SetCredPoller(demoCredentialPoller{database: database})
+			}
+			if quotaPoller == nil {
+				webuiServer.SetQuotaPoller(demoQuotaPoller{database: database})
+			}
+		}
+		if usageQueuePoller != nil {
+			webuiServer.SetUsageQueuePoller(usageQueuePoller)
+		}
+		mux.Handle(cfg.WebUI.BasePath, webuiServer)
+		mux.Handle(cfg.WebUI.BasePath+"/", webuiServer)
+	}
+
+	// All other traffic goes to the proxy.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		proxyHandler.ServeHTTP(w, r)
+	})
+
+	srv := &http.Server{
+		Addr:         cfg.Listen,
+		Handler:      mux,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 0,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	// Graceful shutdown.
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		log.Println("Shutting down...")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("Graceful shutdown timed out: %v", err)
+			_ = srv.Close()
+		}
+	}()
+
+	fmt.Fprintf(stdout, "Metering Proxy listening on %s\n", cfg.Listen)
+	fmt.Fprintf(stdout, "Upstream: %s\n", cfg.Upstream)
+	fmt.Fprintf(stdout, "Database: %s\n", cfg.Database)
+	fmt.Fprintf(stdout, "WebUI: %s\n", cfg.WebUI.BasePath)
+	fmt.Fprintf(stdout, "Metering: %v\n", cfg.MeteringEnabled)
+
+	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+		return fmt.Errorf("server error: %w", err)
+	}
+	log.Println("Server stopped")
+	return nil
+}
+
+type demoCredentialPoller struct {
+	database *db.DB
+}
+
+func (p demoCredentialPoller) Snapshot() ([]db.CredentialHealthRow, time.Time) {
+	rows, err := p.database.AllCredentialHealth()
+	if err != nil {
+		log.Printf("demo credential snapshot error: %v", err)
+		return nil, time.Time{}
+	}
+	return rows, latestCredentialCheck(rows)
+}
+
+func (p demoCredentialPoller) Refresh() {}
+
+func (p demoCredentialPoller) ResetCooldown() error {
+	return fmt.Errorf("reset cooldown not available in demo mode")
+}
+
+type demoQuotaPoller struct {
+	database *db.DB
+}
+
+func (p demoQuotaPoller) Snapshot() ([]db.QuotaCurrentRow, time.Time, bool) {
+	rows, err := p.database.AllQuotaCurrent()
+	if err != nil {
+		log.Printf("demo quota snapshot error: %v", err)
+		return nil, time.Time{}, false
+	}
+	return rows, latestQuotaCheck(rows), len(rows) > 0
+}
+
+func (p demoQuotaPoller) APICallAvailable() bool {
+	rows, err := p.database.AllQuotaCurrent()
+	return err == nil && len(rows) > 0
+}
+
+func (p demoQuotaPoller) Refresh() {}
+
+func latestCredentialCheck(rows []db.CredentialHealthRow) time.Time {
+	var latestUnix int64
+	for _, row := range rows {
+		if row.CheckedAtUnix > latestUnix {
+			latestUnix = row.CheckedAtUnix
+		}
+	}
+	if latestUnix <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(latestUnix, 0).UTC()
+}
+
+func latestQuotaCheck(rows []db.QuotaCurrentRow) time.Time {
+	var latestUnix int64
+	for _, row := range rows {
+		if row.CheckedAtUnix > latestUnix {
+			latestUnix = row.CheckedAtUnix
+		}
+	}
+	if latestUnix <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(latestUnix, 0).UTC()
+}

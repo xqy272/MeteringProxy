@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"strings"
 )
 
 // algorithm is a code-level lock on the hashing scheme. It is NOT embedded in
@@ -52,6 +53,28 @@ func New(saltFile string) (*Hasher, error) {
 
 func NewWithSalt(salt string) *Hasher {
 	return &Hasher{salt: salt}
+}
+
+// ValidateSaltFile verifies the salt file can be loaded for production use
+// without creating or regenerating it. Empty salt contents are rejected.
+// The salt bytes themselves are never returned or included in error text.
+// Runtime New remains intentionally permissive for compatibility.
+func ValidateSaltFile(path string) error {
+	_, err := LoadValidated(path)
+	return err
+}
+
+// LoadValidated loads a salt file with the same path/permission rules as New,
+// but rejects empty salt contents. Salt bytes are never logged.
+func LoadValidated(path string) (*Hasher, error) {
+	hasher, err := New(path)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(hasher.salt) == "" {
+		return nil, fmt.Errorf("salt file is empty")
+	}
+	return hasher, nil
 }
 
 func (h *Hasher) Hash(value string) string {

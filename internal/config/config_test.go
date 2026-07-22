@@ -540,3 +540,58 @@ key_labels:
 		t.Fatalf("error = %v, want redacted stable key_labels path", err)
 	}
 }
+
+func TestLoadKeepsUnknownFieldCompatibility(t *testing.T) {
+	path := writeConfig(t, `
+upstream: "http://127.0.0.1:8317"
+legacy_unknown_field: true
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load should remain compatible with unknown fields: %v", err)
+	}
+	if cfg.Upstream != "http://127.0.0.1:8317" {
+		t.Fatalf("Upstream = %q", cfg.Upstream)
+	}
+}
+
+func TestLoadStrictRejectsUnknownField(t *testing.T) {
+	path := writeConfig(t, `
+upstream: "http://127.0.0.1:8317"
+legacy_unknown_field: true
+`)
+	if _, err := LoadStrict(path); err == nil {
+		t.Fatal("expected unknown field error")
+	}
+}
+
+func TestLoadStrictRejectsMultipleDocuments(t *testing.T) {
+	path := writeConfig(t, `
+upstream: "http://127.0.0.1:8317"
+---
+listen: "127.0.0.1:9"
+`)
+	_, err := LoadStrict(path)
+	if err == nil {
+		t.Fatal("expected multiple document error")
+	}
+	if !strings.Contains(err.Error(), "multiple YAML documents") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLoadAllowsMultipleDocumentsHistorical(t *testing.T) {
+	// Historical Unmarshal only decodes the first document; keep that behavior.
+	path := writeConfig(t, `
+upstream: "http://127.0.0.1:8317"
+---
+listen: "127.0.0.1:9"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load multi-doc compatibility: %v", err)
+	}
+	if cfg.Upstream != "http://127.0.0.1:8317" {
+		t.Fatalf("Upstream = %q", cfg.Upstream)
+	}
+}

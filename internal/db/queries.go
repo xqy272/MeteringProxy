@@ -218,3 +218,19 @@ func (db *DB) VerifySaltFingerprint(fingerprint, dbPath, saltPath string) error 
 	}
 	return nil
 }
+
+// Ready probes SQLite read and write handles with the provided context/deadline.
+// It performs no schema migration, no network I/O, and no external service checks.
+func (db *DB) Ready(ctx context.Context) error {
+	if db == nil {
+		return fmt.Errorf("database is nil")
+	}
+	var n int
+	if err := db.read.QueryRowContext(ctx, "SELECT 1").Scan(&n); err != nil {
+		return fmt.Errorf("read handle: %w", err)
+	}
+	if err := db.sql.QueryRowContext(ctx, "SELECT 1").Scan(&n); err != nil {
+		return fmt.Errorf("write handle: %w", err)
+	}
+	return nil
+}

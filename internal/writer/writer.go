@@ -29,6 +29,7 @@ type BatchWriter struct {
 	dbWriteErrors int64
 	droppedEvents int64
 	stopped       int64
+	started       int64
 }
 
 func New(database store.EventSink, queueCapacity, batchSize int, flushInterval time.Duration) *BatchWriter {
@@ -42,8 +43,17 @@ func New(database store.EventSink, queueCapacity, batchSize int, flushInterval t
 }
 
 func (bw *BatchWriter) Start() {
+	if !atomic.CompareAndSwapInt64(&bw.started, 0, 1) {
+		return
+	}
 	bw.wg.Add(1)
 	go bw.loop()
+}
+
+// Running reports whether the async writer loop has been started and not stopped.
+// Used by readiness probes; it does not inspect queue depth or DB health.
+func (bw *BatchWriter) Running() bool {
+	return atomic.LoadInt64(&bw.started) != 0 && atomic.LoadInt64(&bw.stopped) == 0
 }
 
 func (bw *BatchWriter) Stop() {

@@ -73,3 +73,39 @@ func TestNewReadsSecureSalt(t *testing.T) {
 		t.Fatal("salt bytes should be used exactly as stored")
 	}
 }
+
+func TestValidateSaltFileRejectsEmpty(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "salt")
+	mode := os.FileMode(0600)
+	if runtime.GOOS == "windows" {
+		mode = 0644
+	}
+	if err := os.WriteFile(path, []byte(""), mode); err != nil {
+		t.Fatalf("write salt: %v", err)
+	}
+	if err := ValidateSaltFile(path); err == nil {
+		t.Fatal("expected empty salt error")
+	} else if !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("error = %v, want empty", err)
+	}
+	if err := os.WriteFile(path, []byte("   \n\t"), mode); err != nil {
+		t.Fatalf("write whitespace salt: %v", err)
+	}
+	if err := ValidateSaltFile(path); err == nil {
+		t.Fatal("expected whitespace-only salt error")
+	}
+}
+
+func TestValidateSaltFileAcceptsExisting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "salt")
+	mode := os.FileMode(0600)
+	if runtime.GOOS == "windows" {
+		mode = 0644
+	}
+	if err := os.WriteFile(path, []byte("test-salt\n"), mode); err != nil {
+		t.Fatalf("write salt: %v", err)
+	}
+	if err := ValidateSaltFile(path); err != nil {
+		t.Fatalf("ValidateSaltFile: %v", err)
+	}
+}
