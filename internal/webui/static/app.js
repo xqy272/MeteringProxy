@@ -45,6 +45,15 @@ let keyDetailAbort = null;
 let keyDetailUsageMode = 'cost';
 let lastKeyTSRows = [];
 let lastKeyTSBucket = '';
+let lastKeyTrendErr = null;
+let lastKeyActivity = null;
+let lastKeyActivityErr = null;
+let lastKeyModelsRows = null;
+let lastKeyModelsErr = null;
+let lastKeyIssuesData = null;
+let lastKeyIssuesErr = null;
+let lastKeyRequestsRows = null;
+let lastKeyRequestsErr = null;
 let keyDetailBound = false;
 let selectedIssueSeverity = '';
 let currentIssueClassFilter = '';
@@ -105,6 +114,14 @@ function t(key, vars) {
   if (!vars) return s;
   return s.replace(/\{([a-zA-Z0-9_]+)\}/g, (_, n) => vars[n] == null ? '' : String(vars[n]));
 }
+// English singular forms use baseKey + '.one' when count === 1; other locales fall back to baseKey.
+function tp(baseKey, count, vars) {
+  const n = Number(count);
+  const oneKey = baseKey + '.one';
+  const fb = I18N.en || {}, dict = I18N[currentLang] || fb;
+  const key = (n === 1 && (dict[oneKey] || fb[oneKey])) ? oneKey : baseKey;
+  return t(key, Object.assign({ count: count }, vars || {}));
+}
 function esc(s) {
   if (s == null) return '';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -115,6 +132,8 @@ function setLang(lang) {
   try { localStorage.setItem(LANG_KEY, lang); } catch (_) {}
   applyI18N(); applyMeta();
   setLastRefresh(lastRefreshAt ? new Date(lastRefreshAt) : null);
+  // Immediate cached Key re-render closes the mixed-language gap before async refresh finishes.
+  rerenderKeysForLocale();
   refresh();
 }
 
@@ -257,6 +276,94 @@ function focusKeyRow(hash) {
     try { row.focus({ preventScroll:true }); } catch(_) { row.focus(); }
   }
 }
+function resetKeyDetailCaches() {
+  lastKeyTSRows = [];
+  lastKeyTSBucket = '';
+  lastKeyTrendErr = null;
+  lastKeyActivity = null;
+  lastKeyActivityErr = null;
+  lastKeyModelsRows = null;
+  lastKeyModelsErr = null;
+  lastKeyIssuesData = null;
+  lastKeyIssuesErr = null;
+  lastKeyRequestsRows = null;
+  lastKeyRequestsErr = null;
+}
+function keyDetailBodyVisible() {
+  const body = $('key-detail-body');
+  return !!(body && !body.hidden && !body.classList.contains('hidden'));
+}
+function keyDetailEmptyVisible() {
+  const empty = $('key-detail-empty');
+  return !!(empty && !empty.hidden && !empty.classList.contains('hidden'));
+}
+function selectedKeyRow() {
+  if (!selectedKeyHash) return null;
+  return (latestKeysRows || []).find(r => String(r.key_hash || '') === selectedKeyHash)
+    || selectedKeySnapshot
+    || { key_hash: selectedKeyHash, label: '' };
+}
+function rerenderKeysForLocale() {
+  renderKeysTable();
+  if (!selectedKeyHash) return;
+  const detail = $('key-detail');
+  if (!detail || detail.hidden || detail.classList.contains('hidden')) return;
+
+  const row = selectedKeyRow();
+  if (keyDetailEmptyVisible()) {
+    const empty = $('key-detail-empty');
+    const unavailable = !!(empty && empty.querySelector('.error-text'));
+    if (unavailable) {
+      renderKeyDetailHeader(row, 'unavailable');
+      setKeyDetailEmptyState('unavailable', t('key_detail.section_unavailable'));
+    } else {
+      renderKeyDetailHeader(row, 'empty');
+      setKeyDetailEmptyState('empty');
+    }
+    return;
+  }
+  if (!keyDetailBodyVisible()) return;
+
+  renderKeyDetailHeader(row);
+  renderKeySummary(row, lastKeyActivity);
+  if (lastKeyActivityErr) setText('kd-latency-detail', t('key_detail.activity_unavailable'));
+
+  if (lastKeyModelsRows != null || lastKeyModelsErr) {
+    renderKeyModels(lastKeyModelsRows, lastKeyModelsErr);
+  } else {
+    const modelsBody = $('kd-models-table');
+    if (modelsBody) modelsBody.innerHTML = emptyRow(6, t('state.loading'));
+    setText('kd-models-summary', t('state.loading'));
+  }
+
+  if (lastKeyIssuesData != null || lastKeyIssuesErr) {
+    renderKeyIssues(lastKeyIssuesData, lastKeyIssuesErr);
+  } else {
+    const issuesList = $('kd-issues-list');
+    if (issuesList) issuesList.innerHTML = `<div class="empty-state">${esc(t('state.loading'))}</div>`;
+    setText('kd-issues-summary', t('state.loading'));
+  }
+
+  if (lastKeyRequestsRows != null || lastKeyRequestsErr) {
+    renderKeyRequests(lastKeyRequestsRows, lastKeyRequestsErr);
+  } else {
+    const reqBody = $('kd-requests-table');
+    if (reqBody) reqBody.innerHTML = emptyRow(8, t('state.loading'));
+    setText('kd-requests-summary', t('state.loading'));
+  }
+
+  if (lastKeyTrendErr) {
+    renderKeyTrend([], lastKeyTSBucket, lastKeyTrendErr);
+  } else if (Array.isArray(lastKeyTSRows) && lastKeyTSRows.length) {
+    renderKeyTrend(lastKeyTSRows, lastKeyTSBucket, null);
+  } else if (Array.isArray(lastKeyTSRows)) {
+    renderKeyTrend(lastKeyTSRows, lastKeyTSBucket, null);
+  } else {
+    const trendEl = $('kd-trend-chart');
+    if (trendEl) trendEl.innerHTML = `<div class="empty-state">${esc(t('state.loading'))}</div>`;
+    setText('kd-trend-summary', t('state.loading'));
+  }
+}
 function setKeyDetailEmptyState(mode, message) {
   const emptyEl=$('key-detail-empty');
   const bodyEl=$('key-detail-body');
@@ -285,8 +392,7 @@ function markKeyDetailUnavailable(message) {
     keyDetailAbort=null;
   }
   keyDetailGeneration += 1;
-  lastKeyTSRows=[];
-  lastKeyTSBucket='';
+  resetKeyDetailCaches();
   showKeyDetailShell();
   renderKeyDetailHeader(selectedKeySnapshot || { key_hash:selectedKeyHash, label:'' }, 'unavailable');
   setKeyDetailEmptyState('unavailable', message);
@@ -1014,8 +1120,7 @@ function clearKeySelection() {
   const prevHash = selectedKeyHash;
   selectedKeyHash = null;
   selectedKeySnapshot = null;
-  lastKeyTSRows = [];
-  lastKeyTSBucket = '';
+  resetKeyDetailCaches();
   if(keyDetailAbort){
     try { keyDetailAbort.abort(); } catch (_) {}
     keyDetailAbort = null;
@@ -1035,6 +1140,8 @@ function selectKey(keyHash) {
     return;
   }
   selectedKeyHash = hash;
+  // Drop previous key's section payloads so locale re-render cannot show cross-key rows.
+  resetKeyDetailCaches();
   const found=(latestKeysRows||[]).find(r=>String(r.key_hash||'')===hash);
   if(found) selectedKeySnapshot = found;
   renderKeysTable();
@@ -1076,7 +1183,7 @@ function renderKeysTable() {
   const tbody=$('keys-table');
   if(!tbody) return;
   const rows=Array.isArray(latestKeysRows)?latestKeysRows:[];
-  setText('keys-summary', t('summary.keys',{count:rows.length})+(selectedKeyHash?` \u00b7 ${t('key_detail.selected')}`:''));
+  setText('keys-summary', tp('summary.keys', rows.length, {count:fmtFull(rows.length)})+(selectedKeyHash?` \u00b7 ${t('key_detail.selected')}`:''));
   if(!rows.length){
     tbody.innerHTML=emptyRow(7,t('state.no_key_data'),t('state.key_hint'));
     return;
@@ -1212,7 +1319,7 @@ function renderKeySummary(row, activity) {
   setText('kd-latency', `${avgLat} / ${avgTtfb}`);
   setText('kd-latency-detail', t('key_detail.latency_detail',{avg_lat:avgLat,avg_ttfb:avgTtfb,p95_lat:p95Lat,p95_ttfb:p95Ttfb}));
   setText('kd-latest', fmtTime(row.latest_seen_at));
-  setText('kd-models-detail', t('key_detail.model_count',{count:fmtFull(row.model_count||0)}));
+  setText('kd-models-detail', tp('key_detail.model_count', row.model_count||0, {count:fmtFull(row.model_count||0)}));
 
   const conf=confidenceCounts(row);
   const confEl=$('kd-confidence');
@@ -1263,7 +1370,7 @@ function renderKeyModels(rows, err) {
     return;
   }
   const unpriced=list.filter(r=>costStateOf(r)!=='complete').length;
-  setText('kd-models-summary', t('summary.models',{count:list.length,unknown:unpriced}));
+  setText('kd-models-summary', tp('summary.models', list.length, {count:fmtFull(list.length),unknown:fmtFull(unpriced)}));
   tbody.innerHTML=list.map(r=>{
     return `<tr>
       <td><div class="model-name" title="${esc(modelName(r.model))}">${esc(modelName(r.model))}</div></td>
@@ -1290,7 +1397,7 @@ function renderKeyIssues(data, err) {
   const sourceLabel=issueSourceStatusLabel(source);
   const sourceNote=sourceLabel?t('key_detail.issue_source',{source:sourceLabel}):'';
   setText('kd-issues-summary', items.length
-    ? t('key_detail.issues_summary',{count:fmtFull(items.length)})+(partial?` \u00b7 ${t('status.partial')}`:'')+(sourceNote?` \u00b7 ${sourceNote}`:'')
+    ? tp('key_detail.issues_summary', items.length, {count:fmtFull(items.length)})+(partial?` \u00b7 ${t('status.partial')}`:'')+(sourceNote?` \u00b7 ${sourceNote}`:'')
     : t('issues.empty'));
   if(!items.length){
     list.innerHTML=`<div class="empty-state"><strong>${esc(t('issues.empty'))}</strong><span>${esc(t('key_detail.issues_empty_detail'))}</span></div>`;
@@ -1322,7 +1429,7 @@ function renderKeyRequests(rows, err) {
     return;
   }
   const list=Array.isArray(rows)?rows:[];
-  setText('kd-requests-summary', t('key_detail.requests_summary',{count:fmtFull(list.length)}));
+  setText('kd-requests-summary', tp('key_detail.requests_summary', list.length, {count:fmtFull(list.length)}));
   if(!list.length){
     tbody.innerHTML=emptyRow(8,t('state.no_matching_requests'),t('key_detail.requests_empty_detail'));
     return;
@@ -1428,8 +1535,8 @@ function renderKeyTrend(rows, bucket, err) {
   </svg>`;
   attachTT(el);
   const partialBuckets = keyDetailUsageMode==='cost' ? list.filter(r=>costStateOf(r)!=='complete').length : 0;
-  setText('kd-trend-summary', t('key_detail.trend_summary',{
-    count:list.length,
+  setText('kd-trend-summary', tp('key_detail.trend_summary', list.length, {
+    count:fmtFull(list.length),
     bucket:bucket||'-',
     value:totalLabel,
     partial:fmtFull(partialBuckets)
@@ -1467,7 +1574,7 @@ async function loadKeyDetail() {
     }, 'empty');
     setKeyDetailEmptyState('empty');
     // still clear stale section bodies
-    lastKeyTSRows=[]; lastKeyTSBucket='';
+    resetKeyDetailCaches();
     return;
   }
 
@@ -1501,22 +1608,61 @@ async function loadKeyDetail() {
   if(gen !== keyDetailGeneration || selectedKeyHash !== hash) return;
 
   const results = Object.fromEntries(settled);
-  const activity = results.activity.ok ? results.activity.value : null;
-  renderKeySummary(row, activity);
-  if(!results.activity.ok && !isAbortError(results.activity.error)){
+  if(results.activity.ok){
+    lastKeyActivity = results.activity.value;
+    lastKeyActivityErr = null;
+  } else if(!isAbortError(results.activity.error)){
+    lastKeyActivity = null;
+    lastKeyActivityErr = results.activity.error;
+  }
+  renderKeySummary(row, lastKeyActivity);
+  if(lastKeyActivityErr){
     setText('kd-latency-detail', t('key_detail.activity_unavailable'));
   }
-  renderKeyModels(results.models.ok ? results.models.value : null, results.models.ok ? null : results.models.error);
+
+  if(results.models.ok){
+    lastKeyModelsRows = Array.isArray(results.models.value) ? results.models.value : [];
+    lastKeyModelsErr = null;
+  } else if(!isAbortError(results.models.error)){
+    lastKeyModelsRows = null;
+    lastKeyModelsErr = results.models.error;
+  }
+  if(lastKeyModelsRows != null || lastKeyModelsErr){
+    renderKeyModels(lastKeyModelsRows, lastKeyModelsErr);
+  }
+
   if(results.timeseries.ok){
     lastKeyTSRows = Array.isArray(results.timeseries.value)?results.timeseries.value:[];
     lastKeyTSBucket = bucket;
+    lastKeyTrendErr = null;
     renderKeyTrend(lastKeyTSRows, lastKeyTSBucket, null);
   } else if(!isAbortError(results.timeseries.error)){
     lastKeyTSRows=[]; lastKeyTSBucket='';
-    renderKeyTrend([], bucket, results.timeseries.error);
+    lastKeyTrendErr = results.timeseries.error;
+    renderKeyTrend([], bucket, lastKeyTrendErr);
   }
-  renderKeyIssues(results.issues.ok ? results.issues.value : null, results.issues.ok ? null : results.issues.error);
-  renderKeyRequests(results.requests.ok ? results.requests.value : null, results.requests.ok ? null : results.requests.error);
+
+  if(results.issues.ok){
+    lastKeyIssuesData = results.issues.value;
+    lastKeyIssuesErr = null;
+  } else if(!isAbortError(results.issues.error)){
+    lastKeyIssuesData = null;
+    lastKeyIssuesErr = results.issues.error;
+  }
+  if(lastKeyIssuesData != null || lastKeyIssuesErr){
+    renderKeyIssues(lastKeyIssuesData, lastKeyIssuesErr);
+  }
+
+  if(results.requests.ok){
+    lastKeyRequestsRows = Array.isArray(results.requests.value) ? results.requests.value : [];
+    lastKeyRequestsErr = null;
+  } else if(!isAbortError(results.requests.error)){
+    lastKeyRequestsRows = null;
+    lastKeyRequestsErr = results.requests.error;
+  }
+  if(lastKeyRequestsRows != null || lastKeyRequestsErr){
+    renderKeyRequests(lastKeyRequestsRows, lastKeyRequestsErr);
+  }
 }
 
 
