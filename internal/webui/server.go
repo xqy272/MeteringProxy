@@ -40,6 +40,11 @@ type DiagnosticsReaders struct {
 	Obs   ObservabilityReader
 }
 
+type apiRoute struct {
+	method  string
+	handler http.HandlerFunc
+}
+
 type Server struct {
 	reports   report.CoreReporter
 	quotaDiag QuotaDiagnosticsReader
@@ -48,6 +53,7 @@ type Server struct {
 	basePath  string
 	apiPrefix string
 	mux       *http.ServeMux
+	apiRoutes map[string]apiRoute
 
 	staticFS        fs.FS
 	meteringEnabled func() bool
@@ -100,6 +106,7 @@ func newServer(reports report.CoreReporter, batchWriter *writer.BatchWriter, bas
 		meteringEnabled: func() bool { return true },
 		mux:             http.NewServeMux(),
 	}
+	s.registerAPIRoutes()
 
 	s.mux.HandleFunc(basePath, s.handleIndex)
 
@@ -158,69 +165,64 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
+func (s *Server) registerAPIRoutes() {
+	s.apiRoutes = map[string]apiRoute{
+		"overview":                   {http.MethodGet, s.handleOverview},
+		"issues":                     {http.MethodGet, s.handleIssues},
+		"summary":                    {http.MethodGet, s.handleSummary},
+		"timeseries":                 {http.MethodGet, s.handleTimeseries},
+		"activity":                   {http.MethodGet, s.handleActivity},
+		"models":                     {http.MethodGet, s.handleModels},
+		"keys":                       {http.MethodGet, s.handleKeys},
+		"requests":                   {http.MethodGet, s.handleRequests},
+		"multimodal/summary":         {http.MethodGet, s.handleMultimodalSummary},
+		"images/summary":             {http.MethodGet, s.handleImageSummary},
+		"images/models":              {http.MethodGet, s.handleImageModels},
+		"images/requests":            {http.MethodGet, s.handleImageRequests},
+		"errors":                     {http.MethodGet, s.handleErrors},
+		"health":                     {http.MethodGet, s.handleHealth},
+		"metadata":                   {http.MethodGet, s.handleMetadata},
+		"quota/diagnostics":          {http.MethodGet, s.handleQuotaDiagnostics},
+		"quota":                      {http.MethodGet, s.handleQuota},
+		"quota/refresh":              {http.MethodPost, s.handleQuotaRefresh},
+		"observability":              {http.MethodGet, s.handleObservability},
+		"gateway/capabilities":       {http.MethodGet, s.handleGatewayCapabilities},
+		"model-assets":               {http.MethodGet, s.handleModelAssets},
+		"pricing/stub":               {http.MethodGet, s.handlePricingStub},
+		"cpa/auth":                   {http.MethodGet, s.handleCPAAuth},
+		"cpa/auth/refresh":           {http.MethodPost, s.handleCPAAuthRefresh},
+		"cpa/cooldown/reset":         {http.MethodPost, s.handleCPACooldownReset},
+		"provider-quota":             {http.MethodGet, s.handleProviderQuota},
+		"provider-quota/refresh":     {http.MethodPost, s.handleProviderQuotaRefresh},
+		"provider-quota/diagnostics": {http.MethodGet, s.handleProviderQuotaDiagnostics},
+	}
+}
+
 func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 	setNoStore(w)
-	path := r.URL.Path
-	switch {
-	case strings.HasSuffix(path, "/api/overview"):
-		s.handleOverview(w, r)
-	case strings.HasSuffix(path, "/api/issues"):
-		s.handleIssues(w, r)
-	case strings.HasSuffix(path, "/api/summary"):
-		s.handleSummary(w, r)
-	case strings.HasSuffix(path, "/api/timeseries"):
-		s.handleTimeseries(w, r)
-	case strings.HasSuffix(path, "/api/activity"):
-		s.handleActivity(w, r)
-	case strings.HasSuffix(path, "/api/models"):
-		s.handleModels(w, r)
-	case strings.HasSuffix(path, "/api/keys"):
-		s.handleKeys(w, r)
-	case strings.HasSuffix(path, "/api/requests"):
-		s.handleRequests(w, r)
-	case strings.HasSuffix(path, "/api/multimodal/summary"):
-		s.handleMultimodalSummary(w, r)
-	case strings.HasSuffix(path, "/api/images/summary"):
-		s.handleImageSummary(w, r)
-	case strings.HasSuffix(path, "/api/images/models"):
-		s.handleImageModels(w, r)
-	case strings.HasSuffix(path, "/api/images/requests"):
-		s.handleImageRequests(w, r)
-	case strings.HasSuffix(path, "/api/errors"):
-		s.handleErrors(w, r)
-	case strings.HasSuffix(path, "/api/health"):
-		s.handleHealth(w, r)
-	case strings.HasSuffix(path, "/api/metadata"):
-		s.handleMetadata(w, r)
-	case strings.HasSuffix(path, "/api/quota/diagnostics"):
-		s.handleQuotaDiagnostics(w, r)
-	case strings.HasSuffix(path, "/api/quota"):
-		s.handleQuota(w, r)
-	case strings.HasSuffix(path, "/api/quota/refresh"):
-		s.handleQuotaRefresh(w, r)
-	case strings.HasSuffix(path, "/api/observability"):
-		s.handleObservability(w, r)
-	case strings.HasSuffix(path, "/api/gateway/capabilities"):
-		s.handleGatewayCapabilities(w, r)
-	case strings.HasSuffix(path, "/api/model-assets"):
-		s.handleModelAssets(w, r)
-	case strings.HasSuffix(path, "/api/pricing/stub"):
-		s.handlePricingStub(w, r)
-	case strings.HasSuffix(path, "/api/cpa/auth"):
-		s.handleCPAAuth(w, r)
-	case strings.HasSuffix(path, "/api/cpa/auth/refresh"):
-		s.handleCPAAuthRefresh(w, r)
-	case strings.HasSuffix(path, "/api/cpa/cooldown/reset"):
-		s.handleCPACooldownReset(w, r)
-	case strings.HasSuffix(path, "/api/provider-quota"):
-		s.handleProviderQuota(w, r)
-	case strings.HasSuffix(path, "/api/provider-quota/refresh"):
-		s.handleProviderQuotaRefresh(w, r)
-	case strings.HasSuffix(path, "/api/provider-quota/diagnostics"):
-		s.handleProviderQuotaDiagnostics(w, r)
-	default:
-		http.NotFound(w, r)
+	rel, ok := s.apiRelativePath(r.URL.Path)
+	if !ok {
+		writeAPIError(w, http.StatusNotFound, "not_found", "resource not found")
+		return
 	}
+	route, ok := s.apiRoutes[rel]
+	if !ok {
+		writeAPIError(w, http.StatusNotFound, "not_found", "resource not found")
+		return
+	}
+	if r.Method != route.method {
+		w.Header().Set("Allow", route.method)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		return
+	}
+	route.handler(w, r)
+}
+
+func (s *Server) apiRelativePath(path string) (string, bool) {
+	if !strings.HasPrefix(path, s.apiPrefix) {
+		return "", false
+	}
+	return path[len(s.apiPrefix):], true
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -238,33 +240,108 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(injected))
 }
 
-func parseRange(r *http.Request) (time.Time, string) {
-	q := r.URL.Query()
-	rangeStr := q.Get("range")
+func parseRange(r *http.Request) (time.Time, string, error) {
+	rangeStr := r.URL.Query().Get("range")
+	if rangeStr == "" {
+		return time.Now().Add(-24 * time.Hour), "24h", nil
+	}
 	switch rangeStr {
+	case "24h":
+		return time.Now().Add(-24 * time.Hour), rangeStr, nil
 	case "7d":
-		return time.Now().Add(-7 * 24 * time.Hour), rangeStr
+		return time.Now().Add(-7 * 24 * time.Hour), rangeStr, nil
 	case "30d":
-		return time.Now().Add(-30 * 24 * time.Hour), rangeStr
+		return time.Now().Add(-30 * 24 * time.Hour), rangeStr, nil
 	case "today":
 		now := time.Now()
-		return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()), rangeStr
+		return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()), rangeStr, nil
 	default:
-		return time.Now().Add(-24 * time.Hour), "24h"
+		return time.Time{}, "", errInvalidRange
 	}
 }
 
 func parseKeyHashFilter(r *http.Request) (string, error) {
 	value := r.URL.Query().Get("key_hash")
 	if err := report.ValidateKeyHashFilter(value); err != nil {
-		return "", err
+		return "", errInvalidKeyHash
 	}
 	return value, nil
 }
 
+func parseBucketMinutes(r *http.Request) (int, error) {
+	bucketStr := r.URL.Query().Get("bucket")
+	if bucketStr == "" {
+		return 60, nil
+	}
+	switch bucketStr {
+	case "1h":
+		return 60, nil
+	case "1d":
+		return 1440, nil
+	default:
+		return 0, errInvalidFilter
+	}
+}
+
+// parseLimit accepts only an explicit base-10 integer in [1, max]. Absent keeps defaultLimit.
+func parseLimit(r *http.Request, defaultLimit, max int) (int, error) {
+	raw := r.URL.Query().Get("limit")
+	if raw == "" {
+		return defaultLimit, nil
+	}
+	n, err := strconv.ParseInt(raw, 10, 0)
+	if err != nil {
+		return 0, errInvalidFilter
+	}
+	if n <= 0 || int(n) > max {
+		return 0, errInvalidFilter
+	}
+	return int(n), nil
+}
+
+func parseStatusFilter(r *http.Request) (statusMin, statusMax int, err error) {
+	status := r.URL.Query().Get("status")
+	if status == "" {
+		return 0, 0, nil
+	}
+	switch status {
+	case "success":
+		return 200, 300, nil
+	case "4xx":
+		return 400, 500, nil
+	case "5xx":
+		return 500, 0, nil
+	default:
+		return 0, 0, errInvalidFilter
+	}
+}
+
+func parseNonzero(r *http.Request) (bool, error) {
+	raw := r.URL.Query().Get("nonzero")
+	if raw == "" {
+		return false, nil
+	}
+	switch raw {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, errInvalidFilter
+	}
+}
+
+var (
+	errInvalidRange   = errors.New("invalid_range")
+	errInvalidKeyHash = errors.New("invalid_key_hash")
+	errInvalidFilter  = errors.New("invalid_filter")
+)
+
 func writeJSON(w http.ResponseWriter, data any) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(data)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		log.Printf("writeJSON encode/write failed: %v", err)
+	}
 }
 
 type apiErrorBody struct {
@@ -289,6 +366,18 @@ func writeReportQueryFailed(w http.ResponseWriter, reportName string, err error)
 	writeAPIError(w, http.StatusInternalServerError, "report_query_failed", "failed to load "+reportName+" report")
 }
 
+func writeInvalidRange(w http.ResponseWriter) {
+	writeAPIError(w, http.StatusBadRequest, "invalid_range", "range must be one of 24h, today, 7d, 30d")
+}
+
+func writeInvalidKeyHash(w http.ResponseWriter) {
+	writeAPIError(w, http.StatusBadRequest, "invalid_key_hash", "key_hash must be a 64-character lowercase hex value")
+}
+
+func writeInvalidFilter(w http.ResponseWriter) {
+	writeAPIError(w, http.StatusBadRequest, "invalid_filter", "invalid query filter")
+}
+
 func formatRFC3339OrEmpty(t time.Time) string {
 	if t.IsZero() {
 		return ""
@@ -303,33 +392,38 @@ func setNoStore(w http.ResponseWriter) {
 }
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
-	since, _ := parseRange(r)
+	since, _, err := parseRange(r)
+	if err != nil {
+		writeInvalidRange(w)
+		return
+	}
 	result, err := s.reports.Summary(r.Context(), report.SummaryFilter{Since: since})
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		writeReportQueryFailed(w, "summary", err)
 		return
 	}
 	writeJSON(w, result)
 }
 
 func (s *Server) handleTimeseries(w http.ResponseWriter, r *http.Request) {
-	since, _ := parseRange(r)
-	keyHash, err := parseKeyHashFilter(r)
+	since, _, err := parseRange(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeInvalidRange(w)
 		return
 	}
-	bucketStr := r.URL.Query().Get("bucket")
-	bucketMin := 60
-	switch bucketStr {
-	case "1h":
-		bucketMin = 60
-	case "1d":
-		bucketMin = 1440
+	keyHash, err := parseKeyHashFilter(r)
+	if err != nil {
+		writeInvalidKeyHash(w)
+		return
+	}
+	bucketMin, err := parseBucketMinutes(r)
+	if err != nil {
+		writeInvalidFilter(w)
+		return
 	}
 	rows, err := s.reports.Timeseries(r.Context(), report.TimeseriesFilter{Since: since, BucketMin: bucketMin, KeyHash: keyHash})
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		writeReportQueryFailed(w, "timeseries", err)
 		return
 	}
 	if rows == nil {
@@ -339,30 +433,38 @@ func (s *Server) handleTimeseries(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
-	since, _ := parseRange(r)
+	since, _, err := parseRange(r)
+	if err != nil {
+		writeInvalidRange(w)
+		return
+	}
 	keyHash, err := parseKeyHashFilter(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeInvalidKeyHash(w)
 		return
 	}
 	row, err := s.reports.Activity(r.Context(), report.ActivityFilter{Since: since, KeyHash: keyHash})
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		writeReportQueryFailed(w, "activity", err)
 		return
 	}
 	writeJSON(w, row)
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
-	since, _ := parseRange(r)
+	since, _, err := parseRange(r)
+	if err != nil {
+		writeInvalidRange(w)
+		return
+	}
 	keyHash, err := parseKeyHashFilter(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeInvalidKeyHash(w)
 		return
 	}
 	models, err := s.reports.Models(r.Context(), report.ModelsFilter{Since: since, KeyHash: keyHash})
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		writeReportQueryFailed(w, "models", err)
 		return
 	}
 	if models == nil {
@@ -372,10 +474,14 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
-	since, _ := parseRange(r)
+	since, _, err := parseRange(r)
+	if err != nil {
+		writeInvalidRange(w)
+		return
+	}
 	rows, err := s.reports.Keys(r.Context(), report.KeysFilter{Since: since})
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		writeReportQueryFailed(w, "keys", err)
 		return
 	}
 	if rows == nil {
@@ -385,38 +491,36 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	if limit <= 0 || limit > 500 {
-		limit = 100
+	since, _, err := parseRange(r)
+	if err != nil {
+		writeInvalidRange(w)
+		return
 	}
-	var statusMin, statusMax int
-	switch r.URL.Query().Get("status") {
-	case "success":
-		statusMin = 200
-		statusMax = 300
-	case "4xx":
-		statusMin = 400
-		statusMax = 500
-	case "5xx":
-		statusMin = 500
-	default:
+	keyHash, err := parseKeyHashFilter(r)
+	if err != nil {
+		writeInvalidKeyHash(w)
+		return
+	}
+	limit, err := parseLimit(r, 100, 500)
+	if err != nil {
+		writeInvalidFilter(w)
+		return
+	}
+	statusMin, statusMax, err := parseStatusFilter(r)
+	if err != nil {
+		writeInvalidFilter(w)
+		return
 	}
 	model := r.URL.Query().Get("model")
 	endpoint := r.URL.Query().Get("endpoint")
 	errorClass := r.URL.Query().Get("error_class")
-	since, _ := parseRange(r)
-	keyHash, err := parseKeyHashFilter(r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
 	rows, err := s.reports.Requests(r.Context(), report.RequestFilter{
 		Since: since, KeyHash: keyHash, Limit: limit,
 		StatusMin: statusMin, StatusMax: statusMax,
 		Model: model, Endpoint: endpoint, ErrorClass: errorClass,
 	})
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		writeReportQueryFailed(w, "requests", err)
 		return
 	}
 	if rows == nil {
@@ -426,7 +530,11 @@ func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMultimodalSummary(w http.ResponseWriter, r *http.Request) {
-	since, _ := parseRange(r)
+	since, _, err := parseRange(r)
+	if err != nil {
+		writeInvalidRange(w)
+		return
+	}
 	rows, err := s.reports.MultimodalSummary(r.Context(), report.MultimodalFilter{Since: since})
 	if err != nil {
 		writeReportQueryFailed(w, "multimodal summary", err)
@@ -439,20 +547,28 @@ func (s *Server) handleMultimodalSummary(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleImageSummary(w http.ResponseWriter, r *http.Request) {
-	since, _ := parseRange(r)
+	since, _, err := parseRange(r)
+	if err != nil {
+		writeInvalidRange(w)
+		return
+	}
 	result, err := s.reports.ImageSummary(r.Context(), report.ImagesFilter{Since: since})
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		writeReportQueryFailed(w, "image summary", err)
 		return
 	}
 	writeJSON(w, result)
 }
 
 func (s *Server) handleImageModels(w http.ResponseWriter, r *http.Request) {
-	since, _ := parseRange(r)
+	since, _, err := parseRange(r)
+	if err != nil {
+		writeInvalidRange(w)
+		return
+	}
 	rows, err := s.reports.ImageModels(r.Context(), report.ImagesFilter{Since: since})
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		writeReportQueryFailed(w, "image models", err)
 		return
 	}
 	if rows == nil {
@@ -462,11 +578,16 @@ func (s *Server) handleImageModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleImageRequests(w http.ResponseWriter, r *http.Request) {
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	if limit <= 0 || limit > 500 {
-		limit = 100
+	since, _, err := parseRange(r)
+	if err != nil {
+		writeInvalidRange(w)
+		return
 	}
-	since, _ := parseRange(r)
+	limit, err := parseLimit(r, 100, 500)
+	if err != nil {
+		writeInvalidFilter(w)
+		return
+	}
 	rows, err := s.reports.ImageRequests(r.Context(), report.ImageRequestsFilter{Since: since, Limit: limit})
 	if err != nil {
 		writeReportQueryFailed(w, "image requests", err)
@@ -479,8 +600,16 @@ func (s *Server) handleImageRequests(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleErrors(w http.ResponseWriter, r *http.Request) {
-	since, _ := parseRange(r)
-	nonzero := r.URL.Query().Get("nonzero") == "true"
+	since, _, err := parseRange(r)
+	if err != nil {
+		writeInvalidRange(w)
+		return
+	}
+	nonzero, err := parseNonzero(r)
+	if err != nil {
+		writeInvalidFilter(w)
+		return
+	}
 	result, err := s.reports.Errors(r.Context(), report.ErrorsFilter{Since: since, Nonzero: nonzero})
 	if err != nil {
 		writeReportQueryFailed(w, "errors", err)
@@ -709,10 +838,6 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleQuotaRefresh(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	queued := false
 	if s.quotaPoller != nil {
 		s.quotaPoller.Refresh()
@@ -729,9 +854,10 @@ func (s *Server) handleQuotaRefresh(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleQuotaDiagnostics(w http.ResponseWriter, r *http.Request) {
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	if limit <= 0 || limit > 100 {
-		limit = 50
+	limit, err := parseLimit(r, 50, 100)
+	if err != nil {
+		writeInvalidFilter(w)
+		return
 	}
 	credRows := []db.CredentialHealthRow{}
 	credTime := time.Time{}

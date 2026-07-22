@@ -1037,6 +1037,20 @@ func TestAPINotFound(t *testing.T) {
 	if rec.Code != 404 {
 		t.Errorf("GET /metering/api/not-found: status %d, want 404", rec.Code)
 	}
+	if !strings.Contains(rec.Header().Get("Content-Type"), "application/json") {
+		t.Errorf("not-found Content-Type=%q", rec.Header().Get("Content-Type"))
+	}
+	var payload struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, rec.Body.String())
+	}
+	if payload.Error.Code != "not_found" {
+		t.Fatalf("code=%q body=%s", payload.Error.Code, rec.Body.String())
+	}
 }
 
 func TestGatewayCapabilities(t *testing.T) {

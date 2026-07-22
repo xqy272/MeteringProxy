@@ -12,25 +12,34 @@ import (
 )
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
-	since, rangeKey := parseRange(r)
+	since, rangeKey, err := parseRange(r)
+	if err != nil {
+		writeInvalidRange(w)
+		return
+	}
 	result, err := s.reports.Overview(r.Context(), report.OverviewFilter{Since: since, Range: rangeKey})
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		writeReportQueryFailed(w, "overview", err)
 		return
 	}
 	writeJSON(w, result)
 }
 
 func (s *Server) handleIssues(w http.ResponseWriter, r *http.Request) {
-	since, rangeKey := parseRange(r)
-	keyHash, err := parseKeyHashFilter(r)
+	since, rangeKey, err := parseRange(r)
 	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, "invalid_key_hash", "key_hash must be a 64-character lowercase hex value")
+		writeInvalidRange(w)
 		return
 	}
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	if limit <= 0 || limit > 100 {
-		limit = 20
+	keyHash, err := parseKeyHashFilter(r)
+	if err != nil {
+		writeInvalidKeyHash(w)
+		return
+	}
+	limit, err := parseLimit(r, 20, 100)
+	if err != nil {
+		writeInvalidFilter(w)
+		return
 	}
 
 	result, err := s.reports.Issues(r.Context(), report.IssueFilter{
@@ -49,7 +58,11 @@ func (s *Server) handleIssues(w http.ResponseWriter, r *http.Request) {
 // passthrough, and missing-usage distinctions. Unknown passthrough is a
 // normal capability and is never rendered as an error.
 func (s *Server) handleGatewayCapabilities(w http.ResponseWriter, r *http.Request) {
-	since, rangeKey := parseRange(r)
+	since, rangeKey, err := parseRange(r)
+	if err != nil {
+		writeInvalidRange(w)
+		return
+	}
 	result, err := s.reports.GatewayCapabilities(r.Context(), report.GatewayFilter{Since: since, Range: rangeKey})
 	if err != nil {
 		writeReportQueryFailed(w, "gateway capabilities", err)
@@ -80,10 +93,6 @@ func (s *Server) handleCPAAuth(w http.ResponseWriter, r *http.Request) {
 // handleCPAAuthRefresh triggers an explicit auth-files fetch. The refresh is
 // debounced by the credential poller's MinRefreshInterval and singleflight.
 func (s *Server) handleCPAAuthRefresh(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	queued := false
 	if s.credPoller != nil {
 		s.credPoller.Refresh()
@@ -100,10 +109,6 @@ func (s *Server) handleCPAAuthRefresh(w http.ResponseWriter, r *http.Request) {
 // NOT a provider quota recovery and does not change the provider quota
 // snapshot state.
 func (s *Server) handleCPACooldownReset(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	if s.credPoller == nil {
 		writeJSON(w, map[string]any{
 			"status": "error",
@@ -166,10 +171,6 @@ func (s *Server) handleProviderQuota(w http.ResponseWriter, r *http.Request) {
 // CPA /api-call. The refresh is debounced by MinRefreshInterval and
 // singleflight. It returns immediately; the refresh runs asynchronously.
 func (s *Server) handleProviderQuotaRefresh(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	queued := false
 	if s.quotaPoller != nil {
 		s.quotaPoller.Refresh()
@@ -184,9 +185,10 @@ func (s *Server) handleProviderQuotaRefresh(w http.ResponseWriter, r *http.Reque
 // handleProviderQuotaDiagnostics returns recent quota refresh events for
 // diagnosing failures, rate limits, and unsupported providers.
 func (s *Server) handleProviderQuotaDiagnostics(w http.ResponseWriter, r *http.Request) {
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	if limit <= 0 || limit > 100 {
-		limit = 50
+	limit, err := parseLimit(r, 50, 100)
+	if err != nil {
+		writeInvalidFilter(w)
+		return
 	}
 	events, eventsStatus, eventsPartial, err := s.recentQuotaDiagnostics(r.Context(), limit)
 	if err != nil {
@@ -206,10 +208,14 @@ func (s *Server) handleProviderQuotaDiagnostics(w http.ResponseWriter, r *http.R
 // pricing configuration. It helps discover used-but-unpriced models and
 // request-only models that should not be read as complete cost (4.5 节).
 func (s *Server) handleModelAssets(w http.ResponseWriter, r *http.Request) {
-	since, rangeKey := parseRange(r)
+	since, rangeKey, err := parseRange(r)
+	if err != nil {
+		writeInvalidRange(w)
+		return
+	}
 	result, err := s.reports.ModelAssets(r.Context(), report.ModelAssetsFilter{Since: since, Range: rangeKey})
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		writeReportQueryFailed(w, "model assets", err)
 		return
 	}
 	writeJSON(w, result)
@@ -219,10 +225,14 @@ func (s *Server) handleModelAssets(w http.ResponseWriter, r *http.Request) {
 // models that have been used in the time range but are not yet configured in
 // pricing.yaml. It does not guess prices; the operator fills in real values.
 func (s *Server) handlePricingStub(w http.ResponseWriter, r *http.Request) {
-	since, rangeKey := parseRange(r)
+	since, rangeKey, err := parseRange(r)
+	if err != nil {
+		writeInvalidRange(w)
+		return
+	}
 	assets, err := s.reports.ModelAssets(r.Context(), report.ModelAssetsFilter{Since: since, Range: rangeKey})
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		writeReportQueryFailed(w, "pricing stub", err)
 		return
 	}
 
