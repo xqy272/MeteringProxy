@@ -771,6 +771,7 @@ func createIndexes(sqlDB *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_request_usage_created_at_unix ON request_usage(created_at_unix)`,
 		`CREATE INDEX IF NOT EXISTS idx_request_usage_model ON request_usage(model_returned)`,
 		`CREATE INDEX IF NOT EXISTS idx_request_usage_key ON request_usage(api_key_hash)`,
+		`CREATE INDEX IF NOT EXISTS idx_request_usage_key_created_at_unix ON request_usage(api_key_hash, created_at_unix)`,
 		`CREATE INDEX IF NOT EXISTS idx_request_usage_status ON request_usage(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_request_usage_endpoint_profile ON request_usage(endpoint_profile)`,
 		`CREATE INDEX IF NOT EXISTS idx_request_usage_capture_outcome ON request_usage(capture_outcome)`,
