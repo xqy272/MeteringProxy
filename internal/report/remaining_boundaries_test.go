@@ -167,3 +167,25 @@ func TestGatewayCapabilitiesMergesUnknownAndSortsExtras(t *testing.T) {
 		t.Fatalf("extras order = %v", extras)
 	}
 }
+
+func TestGatewayCapabilitiesKeepsUnknownWithoutProfileSource(t *testing.T) {
+	reader := &stubModelsReader{gatewayRows: []db.GatewayCapabilityRow{{
+		EndpointProfile:  "unknown",
+		RequestCount:     3,
+		PassthroughCount: 3,
+	}}}
+	deps := testDependencies(reader)
+	deps.Profiles = nil
+	svc := NewService(deps, &stubCostEngine{})
+
+	out, err := svc.GatewayCapabilities(context.Background(), GatewayFilter{Range: "24h", Since: time.Now()})
+	if err != nil {
+		t.Fatalf("GatewayCapabilities: %v", err)
+	}
+	if len(out.Profiles) != 1 || out.Profiles[0].Name != "unknown" || out.Profiles[0].RequestCount != 3 {
+		t.Fatalf("profiles = %+v, want DB-only unknown", out.Profiles)
+	}
+	if out.Summary.TotalRequests != 3 || out.Summary.PassthroughReqs != 3 {
+		t.Fatalf("summary = %+v", out.Summary)
+	}
+}

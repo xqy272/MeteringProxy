@@ -83,6 +83,8 @@ func TestKeyDetailStaticContracts(t *testing.T) {
 		"fmtKeyTrendTotal",
 		"issueSourceStatusLabel",
 		"focusKeyRow",
+		"availability==='empty'",
+		"availability==='unavailable'",
 	} {
 		requireContains(t, app, want, "app.js")
 	}

@@ -288,7 +288,7 @@ function markKeyDetailUnavailable(message) {
   lastKeyTSRows=[];
   lastKeyTSBucket='';
   showKeyDetailShell();
-  renderKeyDetailHeader(selectedKeySnapshot || { key_hash:selectedKeyHash, label:'' });
+  renderKeyDetailHeader(selectedKeySnapshot || { key_hash:selectedKeyHash, label:'' }, 'unavailable');
   setKeyDetailEmptyState('unavailable', message);
 }
 function fmtKeyTrendTotal(list, meta, total) {
@@ -1148,13 +1148,19 @@ async function copySelectedKeyHash() {
   }
 }
 
-function renderKeyDetailHeader(row) {
+function renderKeyDetailHeader(row, availability='current') {
   const hash=String((row && row.key_hash) || selectedKeyHash || '');
   const label=keyLabelText(row || {key_hash:hash, label:''});
   setText('key-detail-label', label);
   const badge=$('key-detail-cost-badge');
   if(badge){
-    if(row){
+    if(availability==='empty'){
+      badge.className = 'badge neutral';
+      badge.textContent = t('key_detail.no_range_data');
+    } else if(availability==='unavailable'){
+      badge.className = 'badge err';
+      badge.textContent = t('cost.state.unavailable');
+    } else if(row){
       badge.className = 'badge ' + (costStateOf(row)==='complete'?'ok':(costStateOf(row)==='partial'?'warn':'err'));
       badge.textContent = t('cost.state.'+costStateOf(row));
     } else {
@@ -1455,7 +1461,10 @@ async function loadKeyDetail() {
   const bodyEl=$('key-detail-body');
 
   if(!row){
-    renderKeyDetailHeader(selectedKeySnapshot || {key_hash:hash,label:''});
+    renderKeyDetailHeader({
+      key_hash:hash,
+      label:selectedKeySnapshot && selectedKeySnapshot.label ? selectedKeySnapshot.label : ''
+    }, 'empty');
     setKeyDetailEmptyState('empty');
     // still clear stale section bodies
     lastKeyTSRows=[]; lastKeyTSBucket='';

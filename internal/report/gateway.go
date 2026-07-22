@@ -30,12 +30,14 @@ func (s *Service) GatewayCapabilities(ctx context.Context, filter GatewayFilter)
 	}
 
 	seen := make(map[string]bool)
+	unknownFolded := false
 	if s.profiles != nil {
 		for _, p := range s.profiles.GatewayProfiles() {
 			seen[p.Name] = true
 			row := byProfile[p.Name]
 			// unknown_passthrough also absorbs empty endpoint_profile traffic ("unknown").
 			if p.Name == "unknown_passthrough" {
+				unknownFolded = true
 				if extra, ok := byProfile["unknown"]; ok {
 					row.RequestCount += extra.RequestCount
 					row.StreamCount += extra.StreamCount
@@ -62,7 +64,7 @@ func (s *Service) GatewayCapabilities(ctx context.Context, filter GatewayFilter)
 
 	extraNames := make([]string, 0)
 	for name := range byProfile {
-		if seen[name] || name == "unknown" {
+		if seen[name] || name == "unknown" && unknownFolded {
 			continue
 		}
 		extraNames = append(extraNames, name)
