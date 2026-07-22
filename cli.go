@@ -106,14 +106,20 @@ func runHashKey(args []string, stdin io.Reader, stdout, stderr io.Writer) error 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if rejectedKey != "" {
+	keyFlagPresent := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "key" {
+			keyFlagPresent = true
+		}
+	})
+	if keyFlagPresent {
 		return fmt.Errorf("hash-key: --key is not supported; provide the plaintext key on stdin")
 	}
 	if fs.NArg() > 0 {
 		return fmt.Errorf("hash-key: unexpected arguments; provide the plaintext key on stdin only")
 	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, err := config.LoadStrict(*configPath)
 	if err != nil {
 		return fmt.Errorf("hash-key: config: %w", err)
 	}
@@ -154,31 +160,16 @@ func readSinglePlaintextLine(r io.Reader) (string, error) {
 		return "", fmt.Errorf("hash-key: empty key")
 	}
 
-	// Reject unexpected additional plaintext lines. Trailing EOF is fine.
+	// Reject any bytes after the first newline, including blank lines. Accepting
+	// them would make the documented one-line stdin contract ambiguous.
 	rest, readErr := io.ReadAll(br)
 	if readErr != nil {
 		return "", fmt.Errorf("hash-key: failed to read key from stdin")
 	}
-	if hasAdditionalPlaintextLine(rest) {
+	if len(rest) != 0 {
 		return "", fmt.Errorf("hash-key: unexpected additional input")
 	}
 	return line, nil
-}
-
-func hasAdditionalPlaintextLine(rest []byte) bool {
-	if len(rest) == 0 {
-		return false
-	}
-	// Normalize newlines and reject any remaining non-empty line.
-	text := string(rest)
-	text = strings.ReplaceAll(text, "\r\n", "\n")
-	text = strings.ReplaceAll(text, "\r", "\n")
-	for _, part := range strings.Split(text, "\n") {
-		if part != "" {
-			return true
-		}
-	}
-	return false
 }
 
 // serveFlags holds the legacy/serve process flags.

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"time"
 )
@@ -45,11 +46,22 @@ type readyzResponse struct {
 	Components map[string]string `json:"components"`
 }
 
+type healthErrorDetail struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type healthErrorResponse struct {
+	Error healthErrorDetail `json:"error"`
+}
+
 func healthzHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			writeStableJSON(w, http.StatusMethodNotAllowed, healthErrorResponse{
+				Error: healthErrorDetail{Code: "method_not_allowed", Message: "method not allowed"},
+			})
 			return
 		}
 		writeStableJSON(w, http.StatusOK, healthzResponse{Status: "ok"})
@@ -60,7 +72,9 @@ func readyzHandler(state *readiness) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			writeStableJSON(w, http.StatusMethodNotAllowed, healthErrorResponse{
+				Error: healthErrorDetail{Code: "method_not_allowed", Message: "method not allowed"},
+			})
 			return
 		}
 		if state == nil {
@@ -135,5 +149,7 @@ func writeStableJSON(w http.ResponseWriter, status int, payload any) {
 	w.WriteHeader(status)
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(true)
-	_ = enc.Encode(payload)
+	if err := enc.Encode(payload); err != nil {
+		log.Printf("health response encode error: %v", err)
+	}
 }

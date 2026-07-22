@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -77,6 +79,13 @@ func TestHealthzGETJSONAndMethod(t *testing.T) {
 	}
 	if rr.Header().Get("Allow") != http.MethodGet {
 		t.Fatalf("Allow = %q", rr.Header().Get("Allow"))
+	}
+	var methodErr healthErrorResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &methodErr); err != nil {
+		t.Fatalf("method error JSON: %v body=%s", err, rr.Body.String())
+	}
+	if methodErr.Error.Code != "method_not_allowed" || methodErr.Error.Message != "method not allowed" {
+		t.Fatalf("method error = %+v", methodErr.Error)
 	}
 }
 
@@ -179,6 +188,13 @@ func TestReadyzMethodAllowAndCanceledContext(t *testing.T) {
 	if rr.Code != http.StatusMethodNotAllowed || rr.Header().Get("Allow") != http.MethodGet {
 		t.Fatalf("method handling failed: code=%d allow=%q", rr.Code, rr.Header().Get("Allow"))
 	}
+	var methodErr healthErrorResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &methodErr); err != nil {
+		t.Fatalf("readyz method error JSON: %v body=%s", err, rr.Body.String())
+	}
+	if methodErr.Error.Code != "method_not_allowed" {
+		t.Fatalf("readyz method error = %+v", methodErr.Error)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req = httptest.NewRequestWithContext(ctx, http.MethodGet, "/readyz", nil)
@@ -200,6 +216,40 @@ func TestReadyzMethodAllowAndCanceledContext(t *testing.T) {
 		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
 	}
 	close(block)
+}
+
+type failingHealthResponseWriter struct {
+	header http.Header
+	status int
+}
+
+func (w *failingHealthResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *failingHealthResponseWriter) WriteHeader(status int) {
+	w.status = status
+}
+
+func (w *failingHealthResponseWriter) Write([]byte) (int, error) {
+	return 0, errors.New("synthetic write failure")
+}
+
+func TestWriteStableJSONLogsEncodeFailure(t *testing.T) {
+	previous := log.Writer()
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previous) })
+
+	w := &failingHealthResponseWriter{header: make(http.Header)}
+	writeStableJSON(w, http.StatusOK, healthzResponse{Status: "ok"})
+
+	if w.status != http.StatusOK {
+		t.Fatalf("status = %d", w.status)
+	}
+	if !strings.Contains(logs.String(), "health response encode error") {
+		t.Fatalf("encode failure was not logged: %q", logs.String())
+	}
 }
 
 func TestReadyzDoesNotRequireExternalClients(t *testing.T) {

@@ -234,6 +234,9 @@ func TestRunHashKeyRejectsEmptyMultilineAndKeyFlag(t *testing.T) {
 	if err := run([]string{"hash-key", "--config", configPath}, strings.NewReader("line1\nline2\n"), &stdout, &stderr); err == nil {
 		t.Fatal("expected multiline rejection")
 	}
+	if err := run([]string{"hash-key", "--config", configPath}, strings.NewReader("line1\n\n"), &stdout, &stderr); err == nil {
+		t.Fatal("expected trailing blank-line rejection")
+	}
 	err := run([]string{"hash-key", "--config", configPath, "--key", "sk-secret"}, strings.NewReader("sk-secret\n"), &stdout, &stderr)
 	if err == nil {
 		t.Fatal("expected --key rejection")
@@ -241,12 +244,44 @@ func TestRunHashKeyRejectsEmptyMultilineAndKeyFlag(t *testing.T) {
 	if strings.Contains(err.Error(), "sk-secret") {
 		t.Fatalf("error leaked plaintext key: %v", err)
 	}
+	err = run([]string{"hash-key", "--config", configPath, "--key="}, strings.NewReader("sk-secret\n"), &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected empty --key= rejection")
+	}
 	err = run([]string{"hash-key", "--config", configPath, "sk-positional"}, strings.NewReader("sk-positional\n"), &stdout, &stderr)
 	if err == nil {
 		t.Fatal("expected positional rejection")
 	}
 	if strings.Contains(err.Error(), "sk-positional") {
 		t.Fatalf("error leaked positional key: %v", err)
+	}
+}
+
+func TestProductionCommandsUseStrictConfig(t *testing.T) {
+	dir := t.TempDir()
+	configPath, _, _, _ := writeCLIConfig(t, dir, "not_a_real_field: true\n")
+	var stdout, stderr bytes.Buffer
+
+	if err := run([]string{"hash-key", "--config", configPath}, strings.NewReader("sk-test\n"), &stdout, &stderr); err == nil {
+		t.Fatal("hash-key accepted an unknown config field")
+	}
+	if err := run([]string{"serve", "--config", configPath}, strings.NewReader(""), &stdout, &stderr); err == nil {
+		t.Fatal("serve accepted an unknown config field")
+	}
+}
+
+func TestMergeKeyLabelsPreservesExplicitConfiguration(t *testing.T) {
+	configured := map[string]string{"a": "operator-label"}
+	defaults := map[string]string{"a": "demo-label", "b": "demo-only"}
+	merged := mergeKeyLabels(configured, defaults)
+
+	if merged["a"] != "operator-label" || merged["b"] != "demo-only" {
+		t.Fatalf("merged labels = %#v", merged)
+	}
+	merged["a"] = "changed"
+	delete(merged, "b")
+	if configured["a"] != "operator-label" || defaults["a"] != "demo-label" || defaults["b"] != "demo-only" {
+		t.Fatal("mergeKeyLabels mutated an input map")
 	}
 }
 
@@ -276,6 +311,16 @@ func TestRunValidateEmptySalt(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "salt") {
 		t.Fatalf("error = %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	err = run([]string{"serve", "--config", configPath}, strings.NewReader(""), &stdout, &stderr)
+	if err == nil {
+		t.Fatal("serve accepted an empty salt")
+	}
+	if strings.Contains(err.Error(), "test-salt-bytes") {
+		t.Fatalf("serve leaked salt bytes: %v", err)
 	}
 }
 

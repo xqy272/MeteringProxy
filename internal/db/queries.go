@@ -219,18 +219,45 @@ func (db *DB) VerifySaltFingerprint(fingerprint, dbPath, saltPath string) error 
 	return nil
 }
 
-// Ready probes SQLite read and write handles with the provided context/deadline.
-// It performs no schema migration, no network I/O, and no external service checks.
+// Ready probes the actual SQLite database through both handles and verifies
+// that each retains its intended read/write role. Open already proves that the
+// database is writable by completing migrations and a create/drop self-check;
+// this recurring probe deliberately avoids taking a write lock or adding WAL
+// churn. It performs no schema migration, network I/O, or external checks.
 func (db *DB) Ready(ctx context.Context) error {
 	if db == nil {
 		return fmt.Errorf("database is nil")
 	}
-	var n int
-	if err := db.read.QueryRowContext(ctx, "SELECT 1").Scan(&n); err != nil {
+	if err := readySQLiteHandle(ctx, db.read, true); err != nil {
 		return fmt.Errorf("read handle: %w", err)
 	}
-	if err := db.sql.QueryRowContext(ctx, "SELECT 1").Scan(&n); err != nil {
+	if err := readySQLiteHandle(ctx, db.sql, false); err != nil {
 		return fmt.Errorf("write handle: %w", err)
+	}
+	return nil
+}
+
+func readySQLiteHandle(ctx context.Context, handle *sql.DB, wantQueryOnly bool) error {
+	if handle == nil {
+		return fmt.Errorf("handle is nil")
+	}
+	if err := handle.PingContext(ctx); err != nil {
+		return err
+	}
+
+	// schema_version forces the connection to access the configured main DB;
+	// SELECT 1 alone could succeed without touching it.
+	var schemaVersion int64
+	if err := handle.QueryRowContext(ctx, "PRAGMA main.schema_version").Scan(&schemaVersion); err != nil {
+		return fmt.Errorf("schema probe: %w", err)
+	}
+
+	var queryOnly int
+	if err := handle.QueryRowContext(ctx, "PRAGMA query_only").Scan(&queryOnly); err != nil {
+		return fmt.Errorf("role probe: %w", err)
+	}
+	if gotQueryOnly := queryOnly != 0; gotQueryOnly != wantQueryOnly {
+		return fmt.Errorf("unexpected query_only=%t", gotQueryOnly)
 	}
 	return nil
 }

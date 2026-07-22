@@ -37,7 +37,7 @@ func runServe(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	cfg, err := config.Load(flags.configPath)
+	cfg, err := config.LoadStrict(flags.configPath)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
@@ -60,7 +60,7 @@ func runServe(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("salt file not found at %s. Generate one:\n  python3 -c \"import secrets; print(secrets.token_hex(32))\" > %s", cfg.SaltFile, cfg.SaltFile)
 	}
 
-	hasher, err := hash.New(cfg.SaltFile)
+	hasher, err := hash.LoadValidated(cfg.SaltFile)
 	if err != nil {
 		return fmt.Errorf("failed to load salt: %w", err)
 	}
@@ -89,6 +89,7 @@ func runServe(args []string, stdout, stderr io.Writer) error {
 		if err := db.SeedDemo(database); err != nil {
 			return fmt.Errorf("failed to seed demo data: %w", err)
 		}
+		cfg.KeyLabels = mergeKeyLabels(cfg.KeyLabels, db.DemoKeyLabels())
 		log.Printf("Demo data seeded successfully")
 	}
 
@@ -329,6 +330,20 @@ func runServe(args []string, stdout, stderr io.Writer) error {
 	}
 	log.Println("Server stopped")
 	return nil
+}
+
+// mergeKeyLabels adds development-only defaults without overriding labels the
+// operator explicitly configured. It always returns a fresh map so callers do
+// not mutate either input.
+func mergeKeyLabels(configured, defaults map[string]string) map[string]string {
+	merged := make(map[string]string, len(configured)+len(defaults))
+	for keyHash, label := range defaults {
+		merged[keyHash] = label
+	}
+	for keyHash, label := range configured {
+		merged[keyHash] = label
+	}
+	return merged
 }
 
 type demoCredentialPoller struct {

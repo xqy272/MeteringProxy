@@ -22,7 +22,8 @@ EXPOSE 8320
 
 # Lightweight process liveness check using busybox wget already present in Alpine.
 # Prefer /healthz so orchestrators do not thrash restarts on external dependency flaps.
+ENV METERING_PROXY_HEALTH_URL=http://127.0.0.1:8320/healthz
 HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
-  CMD wget -q -O /dev/null http://127.0.0.1:8320/healthz || exit 1
+  CMD wget -q -O /dev/null "$METERING_PROXY_HEALTH_URL" || exit 1
 
 ENTRYPOINT ["ai-gateway-metering-proxy"]

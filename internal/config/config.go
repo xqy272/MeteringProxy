@@ -152,12 +152,13 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
-	// Runtime serve path keeps historical Unmarshal behavior for compatibility.
+	// Keep the pre-v0.5 permissive decoder available for compatibility-focused
+	// callers. Production CLI entrypoints use LoadStrict.
 	return parseConfig(data, false)
 }
 
 // LoadStrict loads config with strict YAML decoding: unknown fields and multiple
-// documents are rejected. Used by the validate preflight command only.
+// documents are rejected. All production CLI entrypoints use this loader.
 func LoadStrict(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
