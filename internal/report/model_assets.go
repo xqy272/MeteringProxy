@@ -1,6 +1,7 @@
 package report
 
 import (
+	"ai-gateway-metering-proxy/internal/metrics"
 	"context"
 	"fmt"
 	"sort"
@@ -8,60 +9,62 @@ import (
 )
 
 func (s *Service) ModelAssets(ctx context.Context, filter ModelAssetsFilter) (ModelAssetsReport, error) {
-	if s == nil {
-		return ModelAssetsReport{}, fmt.Errorf("report service is not configured")
-	}
-	snapshot, err := s.modelAssets.ModelAssetsReportSnapshot(ctx, filter.Since)
-	if err != nil {
-		return ModelAssetsReport{}, err
-	}
-	costs := evaluateCostBuckets(s.cost, snapshot.TextCostBuckets, snapshot.ImageCostBuckets, costGroupByModel)
-	out := ModelAssetsReport{Range: filter.Range, Items: make([]ModelAssetItem, 0, len(snapshot.Rows))}
-	for _, row := range snapshot.Rows {
-		result := completeZeroCost()
-		if value, ok := costs[CostGroup{Model: row.Model}]; ok {
-			result = value
+	return observeReport(metrics.ReportModelAssets, func() (ModelAssetsReport, error) {
+		if s == nil {
+			return ModelAssetsReport{}, fmt.Errorf("report service is not configured")
 		}
-		configured := s.cost.HasTextPricing(row.Model) || s.cost.HasMultimodal(row.Model)
-		pricingSource := "unpriced"
-		if configured {
-			pricingSource = "exact"
+		snapshot, err := s.modelAssets.ModelAssetsReportSnapshot(ctx, filter.Since)
+		if err != nil {
+			return ModelAssetsReport{}, err
 		}
-		sources := splitSortedCSV(row.ModelSources)
-		if len(sources) == 0 {
-			sources = []string{"requested"}
+		costs := evaluateCostBuckets(s.cost, snapshot.TextCostBuckets, snapshot.ImageCostBuckets, costGroupByModel)
+		out := ModelAssetsReport{Range: filter.Range, Items: make([]ModelAssetItem, 0, len(snapshot.Rows))}
+		for _, row := range snapshot.Rows {
+			result := completeZeroCost()
+			if value, ok := costs[CostGroup{Model: row.Model}]; ok {
+				result = value
+			}
+			configured := s.cost.HasTextPricing(row.Model) || s.cost.HasMultimodal(row.Model)
+			pricingSource := "unpriced"
+			if configured {
+				pricingSource = "exact"
+			}
+			sources := splitSortedCSV(row.ModelSources)
+			if len(sources) == 0 {
+				sources = []string{"requested"}
+			}
+			if configured {
+				sources = append(sources, "pricing")
+			}
+			item := ModelAssetItem{
+				Model: row.Model, Sources: sources,
+				EndpointProfiles: splitSortedCSV(row.EndpointProfiles),
+				CaptureMode:      modelAssetCaptureMode(result.UsageConfidenceCounts),
+				Confidence:       modelAssetConfidence(result.UsageConfidenceCounts),
+				RequestCount:     row.RequestCount, FailedCount: row.FailedCount,
+				InputTokens: row.InputTokens, OutputTokens: row.OutputTokens,
+				ReasoningTokens: row.ReasoningTokens, CachedTokens: row.CachedTokens,
+				CacheCreationTokens: row.CacheCreationTokens, TotalTokens: row.TotalTokens,
+				EstimatedCost: result.Amount, CostKnown: result.CostKnown, CostState: result.State,
+				UnpricedModels: result.UnpricedModels, PartialReasons: nonNilPartialReasons(result.PartialReasons),
+				UsageConfidenceCounts: result.UsageConfidenceCounts,
+				PricingSource:         pricingSource, LatestSeenAt: row.LatestSeenAt,
+			}
+			out.Items = append(out.Items, item)
+			out.Summary.ModelsTotal++
+			out.Summary.UsedModels++
+			if !configured {
+				out.Summary.UnpricedUsedModels++
+			}
+			if result.UsageConfidenceCounts.RequestOnly > 0 {
+				out.Summary.RequestOnlyModels++
+			}
+			if result.State != CostStateComplete || !configured {
+				out.Summary.CostPartial = true
+			}
 		}
-		if configured {
-			sources = append(sources, "pricing")
-		}
-		item := ModelAssetItem{
-			Model: row.Model, Sources: sources,
-			EndpointProfiles: splitSortedCSV(row.EndpointProfiles),
-			CaptureMode:      modelAssetCaptureMode(result.UsageConfidenceCounts),
-			Confidence:       modelAssetConfidence(result.UsageConfidenceCounts),
-			RequestCount:     row.RequestCount, FailedCount: row.FailedCount,
-			InputTokens: row.InputTokens, OutputTokens: row.OutputTokens,
-			ReasoningTokens: row.ReasoningTokens, CachedTokens: row.CachedTokens,
-			CacheCreationTokens: row.CacheCreationTokens, TotalTokens: row.TotalTokens,
-			EstimatedCost: result.Amount, CostKnown: result.CostKnown, CostState: result.State,
-			UnpricedModels: result.UnpricedModels, PartialReasons: nonNilPartialReasons(result.PartialReasons),
-			UsageConfidenceCounts: result.UsageConfidenceCounts,
-			PricingSource:         pricingSource, LatestSeenAt: row.LatestSeenAt,
-		}
-		out.Items = append(out.Items, item)
-		out.Summary.ModelsTotal++
-		out.Summary.UsedModels++
-		if !configured {
-			out.Summary.UnpricedUsedModels++
-		}
-		if result.UsageConfidenceCounts.RequestOnly > 0 {
-			out.Summary.RequestOnlyModels++
-		}
-		if result.State != CostStateComplete || !configured {
-			out.Summary.CostPartial = true
-		}
-	}
-	return out, nil
+		return out, nil
+	})
 }
 
 func splitSortedCSV(value string) []string {

@@ -1,6 +1,7 @@
 package report
 
 import (
+	"ai-gateway-metering-proxy/internal/metrics"
 	"context"
 	"fmt"
 
@@ -8,18 +9,20 @@ import (
 )
 
 func (s *Service) MultimodalSummary(ctx context.Context, filter MultimodalFilter) ([]MultimodalSummaryReport, error) {
-	if s == nil {
-		return nil, fmt.Errorf("report service is not configured")
-	}
-	rows, err := s.multimodal.MultimodalSummaryReport(ctx, filter.Since)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]MultimodalSummaryReport, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, multimodalSummaryFromRow(row))
-	}
-	return out, nil
+	return observeReport(metrics.ReportMultimodalSummary, func() ([]MultimodalSummaryReport, error) {
+		if s == nil {
+			return nil, fmt.Errorf("report service is not configured")
+		}
+		rows, err := s.multimodal.MultimodalSummaryReport(ctx, filter.Since)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]MultimodalSummaryReport, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, multimodalSummaryFromRow(row))
+		}
+		return out, nil
+	})
 }
 
 func multimodalSummaryFromRow(row db.MultimodalSummaryRow) MultimodalSummaryReport {

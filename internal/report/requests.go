@@ -1,6 +1,7 @@
 package report
 
 import (
+	"ai-gateway-metering-proxy/internal/metrics"
 	"context"
 	"fmt"
 
@@ -8,22 +9,24 @@ import (
 )
 
 func (s *Service) Requests(ctx context.Context, filter RequestFilter) ([]RequestReport, error) {
-	if s == nil {
-		return nil, fmt.Errorf("report service is not configured")
-	}
-	rows, err := s.requests.RequestsReport(ctx, db.RequestFilter{
-		Scope: db.ReportScope{Since: filter.Since, KeyHash: filter.KeyHash},
-		Limit: filter.Limit, StatusMin: filter.StatusMin, StatusMax: filter.StatusMax,
-		Model: filter.Model, Endpoint: filter.Endpoint, ErrorClass: filter.ErrorClass,
+	return observeReport(metrics.ReportRequests, func() ([]RequestReport, error) {
+		if s == nil {
+			return nil, fmt.Errorf("report service is not configured")
+		}
+		rows, err := s.requests.RequestsReport(ctx, db.RequestFilter{
+			Scope: db.ReportScope{Since: filter.Since, KeyHash: filter.KeyHash},
+			Limit: filter.Limit, StatusMin: filter.StatusMin, StatusMax: filter.StatusMax,
+			Model: filter.Model, Endpoint: filter.Endpoint, ErrorClass: filter.ErrorClass,
+		})
+		if err != nil {
+			return nil, err
+		}
+		out := make([]RequestReport, len(rows))
+		for i, row := range rows {
+			out[i] = requestReportFromRow(row)
+		}
+		return out, nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]RequestReport, len(rows))
-	for i, row := range rows {
-		out[i] = requestReportFromRow(row)
-	}
-	return out, nil
 }
 
 func requestReportFromRow(row db.RequestRow) RequestReport {

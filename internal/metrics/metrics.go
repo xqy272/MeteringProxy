@@ -10,23 +10,23 @@ import (
 // Counters shared across the process. The writer and proxy update these
 // via the exported Set* functions so that /metrics reflects live state.
 var (
-	sseLineSkips      int64
-	queueDepth        int64
-	droppedEvents     int64
-	parseErrors       int64
-	dbWriteErrors     int64
-	latencySum        int64
-	latencyCount      int64
-	ttfbSum           int64
-	ttfbCount         int64
-	meteringEnabled   int64
-	transportConns    int64
-	transportDialErr  int64
-	transportDNSErr   int64
-	transportClosed   int64
-	compressedStreams int64
-	downstreamWriteErr int64
-	streamFlushes     int64
+	sseLineSkips        int64
+	queueDepth          int64
+	droppedEvents       int64
+	parseErrors         int64
+	dbWriteErrors       int64
+	latencySum          int64
+	latencyCount        int64
+	ttfbSum             int64
+	ttfbCount           int64
+	meteringEnabled     int64
+	transportConns      int64
+	transportDialErr    int64
+	transportDNSErr     int64
+	transportClosed     int64
+	compressedStreams   int64
+	downstreamWriteErr  int64
+	streamFlushes       int64
 	requestSampleBytes  int64
 	responseSampleBytes int64
 )
@@ -53,15 +53,122 @@ func ObserveRequest(latencyMs, ttfbMs int64) {
 
 // Transport counters are updated only when a connection is created or fails
 // to dial — never on the per-request hot path — so they use lock-free atomics.
-func AddTransportConns(n int64)   { atomic.AddInt64(&transportConns, n) }
-func AddTransportDialErrs(n int64) { atomic.AddInt64(&transportDialErr, n) }
-func AddTransportDNSErrs(n int64)  { atomic.AddInt64(&transportDNSErr, n) }
-func AddTransportClosed(n int64)   { atomic.AddInt64(&transportClosed, n) }
-func AddCompressedStream(n int64)  { atomic.AddInt64(&compressedStreams, n) }
-func AddDownstreamWriteErr(n int64) { atomic.AddInt64(&downstreamWriteErr, n) }
-func AddStreamFlushes(n int64)     { atomic.AddInt64(&streamFlushes, n) }
-func AddRequestSampleBytes(n int64) { atomic.AddInt64(&requestSampleBytes, n) }
+func AddTransportConns(n int64)      { atomic.AddInt64(&transportConns, n) }
+func AddTransportDialErrs(n int64)   { atomic.AddInt64(&transportDialErr, n) }
+func AddTransportDNSErrs(n int64)    { atomic.AddInt64(&transportDNSErr, n) }
+func AddTransportClosed(n int64)     { atomic.AddInt64(&transportClosed, n) }
+func AddCompressedStream(n int64)    { atomic.AddInt64(&compressedStreams, n) }
+func AddDownstreamWriteErr(n int64)  { atomic.AddInt64(&downstreamWriteErr, n) }
+func AddStreamFlushes(n int64)       { atomic.AddInt64(&streamFlushes, n) }
+func AddRequestSampleBytes(n int64)  { atomic.AddInt64(&requestSampleBytes, n) }
 func AddResponseSampleBytes(n int64) { atomic.AddInt64(&responseSampleBytes, n) }
+
+// ReportName is a code-fixed low-cardinality report operation label.
+// Only these values may appear on report query metrics. Dynamic values such as
+// key_hash, model, endpoint, request_id, label, or raw paths are rejected.
+type ReportName string
+
+const (
+	ReportOverview            ReportName = "overview"
+	ReportSummary             ReportName = "summary"
+	ReportModels              ReportName = "models"
+	ReportTimeseries          ReportName = "timeseries"
+	ReportKeys                ReportName = "keys"
+	ReportActivity            ReportName = "activity"
+	ReportRequests            ReportName = "requests"
+	ReportIssues              ReportName = "issues"
+	ReportImagesSummary       ReportName = "image_summary"
+	ReportImageModels         ReportName = "image_models"
+	ReportImageRequests       ReportName = "image_requests"
+	ReportModelAssets         ReportName = "model_assets"
+	ReportMultimodalSummary   ReportName = "multimodal_summary"
+	ReportErrors              ReportName = "errors"
+	ReportHealth              ReportName = "health"
+	ReportMetadata            ReportName = "metadata"
+	ReportGatewayCapabilities ReportName = "gateway_capabilities"
+)
+
+// reportNames is the finite production enum emitted by /metrics.
+var reportNames = []ReportName{
+	ReportOverview,
+	ReportSummary,
+	ReportModels,
+	ReportTimeseries,
+	ReportKeys,
+	ReportActivity,
+	ReportRequests,
+	ReportIssues,
+	ReportImagesSummary,
+	ReportImageModels,
+	ReportImageRequests,
+	ReportModelAssets,
+	ReportMultimodalSummary,
+	ReportErrors,
+	ReportHealth,
+	ReportMetadata,
+	ReportGatewayCapabilities,
+}
+
+type reportQueryStats struct {
+	queries       int64
+	errors        int64
+	durationSumMS int64
+	durationCount int64
+}
+
+// Fixed slots only — never keyed by user-controlled strings.
+var reportQueryMetrics = map[ReportName]*reportQueryStats{}
+
+func init() {
+	for _, name := range reportNames {
+		reportQueryMetrics[name] = &reportQueryStats{}
+	}
+}
+
+// ReportNames returns the fixed report label enum in exposition order.
+func ReportNames() []ReportName {
+	out := make([]ReportName, len(reportNames))
+	copy(out, reportNames)
+	return out
+}
+
+// IsKnownReport reports whether name is in the fixed production enum.
+func IsKnownReport(name ReportName) bool {
+	_, ok := reportQueryMetrics[name]
+	return ok
+}
+
+// ObserveReportQuery records exactly one report service attempt.
+// durationMS contributes to sum/count; errors increment only when err != nil.
+// Unknown report names are ignored so high-cardinality values cannot create series.
+func ObserveReportQuery(name ReportName, durationMS int64, err error) {
+	stats := reportQueryMetrics[name]
+	if stats == nil {
+		return
+	}
+	if durationMS < 0 {
+		durationMS = 0
+	}
+	atomic.AddInt64(&stats.queries, 1)
+	atomic.AddInt64(&stats.durationSumMS, durationMS)
+	atomic.AddInt64(&stats.durationCount, 1)
+	if err != nil {
+		atomic.AddInt64(&stats.errors, 1)
+	}
+}
+
+// SnapshotReportQuery is a test helper for fixed-label counters.
+func SnapshotReportQuery(name ReportName) (queries, errors, durationSumMS, durationCount int64, ok bool) {
+	stats := reportQueryMetrics[name]
+	if stats == nil {
+		return 0, 0, 0, 0, false
+	}
+	return atomic.LoadInt64(&stats.queries),
+		atomic.LoadInt64(&stats.errors),
+		atomic.LoadInt64(&stats.durationSumMS),
+		atomic.LoadInt64(&stats.durationCount),
+		true
+}
 
 // Handler returns an HTTP handler that serves Prometheus text metrics.
 func Handler() http.Handler {
@@ -167,4 +274,22 @@ func writePrometheus(w io.Writer) {
 	fmt.Fprintf(w, "# HELP metering_proxy_response_sample_bytes_total Total response body bytes sampled for metering\n")
 	fmt.Fprintf(w, "# TYPE metering_proxy_response_sample_bytes_total counter\n")
 	fmt.Fprintf(w, "metering_proxy_response_sample_bytes_total %d\n", psb)
+
+	fmt.Fprintf(w, "# HELP metering_proxy_report_queries_total Total report service calls by fixed report name\n")
+	fmt.Fprintf(w, "# TYPE metering_proxy_report_queries_total counter\n")
+	fmt.Fprintf(w, "# HELP metering_proxy_report_query_errors_total Total failed report service calls by fixed report name\n")
+	fmt.Fprintf(w, "# TYPE metering_proxy_report_query_errors_total counter\n")
+	fmt.Fprintf(w, "# HELP metering_proxy_report_query_duration_ms Report service call duration in milliseconds by fixed report name\n")
+	fmt.Fprintf(w, "# TYPE metering_proxy_report_query_duration_ms summary\n")
+	for _, name := range reportNames {
+		stats := reportQueryMetrics[name]
+		q := atomic.LoadInt64(&stats.queries)
+		e := atomic.LoadInt64(&stats.errors)
+		sum := atomic.LoadInt64(&stats.durationSumMS)
+		cnt := atomic.LoadInt64(&stats.durationCount)
+		fmt.Fprintf(w, "metering_proxy_report_queries_total{report=\"%s\"} %d\n", name, q)
+		fmt.Fprintf(w, "metering_proxy_report_query_errors_total{report=\"%s\"} %d\n", name, e)
+		fmt.Fprintf(w, "metering_proxy_report_query_duration_ms_sum{report=\"%s\"} %d\n", name, sum)
+		fmt.Fprintf(w, "metering_proxy_report_query_duration_ms_count{report=\"%s\"} %d\n", name, cnt)
+	}
 }

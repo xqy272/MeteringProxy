@@ -1,6 +1,7 @@
 package report
 
 import (
+	"ai-gateway-metering-proxy/internal/metrics"
 	"context"
 	"errors"
 	"fmt"
@@ -12,81 +13,103 @@ import (
 )
 
 func (s *Service) Issues(ctx context.Context, filter IssueFilter) (IssuesReport, error) {
-	if s == nil {
-		return IssuesReport{}, fmt.Errorf("report service is not configured")
-	}
-	limit := filter.Limit
-	if limit <= 0 || limit > 100 {
-		limit = 20
-	}
-	includeGlobal := filter.KeyHash == ""
-
-	data, err := s.issues.IssuesReport(ctx, db.IssueFilter{
-		Scope:         db.ReportScope{Since: filter.Since, KeyHash: filter.KeyHash},
-		Limit:         limit,
-		IncludeGlobal: includeGlobal,
-	})
-	if err != nil {
-		return IssuesReport{}, err
-	}
-	sources := IssuesSourceStatuses{
-		RequestUsage:     IssueSourceComplete,
-		SideChannel:      IssueSourceNotApplicable,
-		CredentialHealth: IssueSourceNotApplicable,
-		Quota:            IssueSourceNotApplicable,
-		System:           IssueSourceNotApplicable,
-	}
-	items := issueReportsFromRows(data.RequestUsage)
-	partial := false
-
-	if includeGlobal {
-		if err := data.SideChannelErr; err != nil {
-			if isContextError(err) {
-				return IssuesReport{}, err
-			}
-			log.Printf("issues report: side_channel source unavailable: %v", err)
-			sources.SideChannel = IssueSourceUnavailable
-			partial = true
-		} else {
-			sources.SideChannel = IssueSourceComplete
-			items = append(items, issueReportsFromRows(data.SideChannel)...)
+	return observeReport(metrics.ReportIssues, func() (IssuesReport, error) {
+		if s == nil {
+			return IssuesReport{}, fmt.Errorf("report service is not configured")
 		}
-
-		if err := data.CredentialErr; err != nil {
-			if isContextError(err) {
-				return IssuesReport{}, err
-			}
-			log.Printf("issues report: credential_health source unavailable: %v", err)
-			sources.CredentialHealth = IssueSourceUnavailable
-			partial = true
-		} else {
-			sources.CredentialHealth = IssueSourceComplete
-			items = append(items, issueReportsFromRows(data.Credential)...)
+		limit := filter.Limit
+		if limit <= 0 || limit > 100 {
+			limit = 20
 		}
+		includeGlobal := filter.KeyHash == ""
 
-		if err := data.QuotaErr; err != nil {
-			if isContextError(err) {
-				return IssuesReport{}, err
-			}
-			// Quota current and/or refresh failed: never mark complete.
-			// Successful subset rows (if any) remain visible under partial.
-			log.Printf("issues report: quota source unavailable: %v", err)
-			sources.Quota = IssueSourceUnavailable
-			partial = true
-			items = append(items, issueReportsFromRows(data.Quota)...)
-		} else {
-			sources.Quota = IssueSourceComplete
-			items = append(items, issueReportsFromRows(data.Quota)...)
-		}
-
-		system, systemStatus, systemPartial, err := s.buildSystemIssues(ctx, filter.Since)
+		data, err := s.issues.IssuesReport(ctx, db.IssueFilter{
+			Scope:         db.ReportScope{Since: filter.Since, KeyHash: filter.KeyHash},
+			Limit:         limit,
+			IncludeGlobal: includeGlobal,
+		})
 		if err != nil {
 			return IssuesReport{}, err
 		}
-		sources.System = systemStatus
-		if systemPartial {
-			partial = true
+		sources := IssuesSourceStatuses{
+			RequestUsage:     IssueSourceComplete,
+			SideChannel:      IssueSourceNotApplicable,
+			CredentialHealth: IssueSourceNotApplicable,
+			Quota:            IssueSourceNotApplicable,
+			System:           IssueSourceNotApplicable,
 		}
+		items := issueReportsFromRows(data.RequestUsage)
+		partial := false
+
+		if includeGlobal {
+			if err := data.SideChannelErr; err != nil {
+				if isContextError(err) {
+					return IssuesReport{}, err
+				}
+				log.Printf("issues report: side_channel source unavailable: %v", err)
+				sources.SideChannel = IssueSourceUnavailable
+				partial = true
+			} else {
+				sources.SideChannel = IssueSourceComplete
+				items = append(items, issueReportsFromRows(data.SideChannel)...)
+			}
+
+			if err := data.CredentialErr; err != nil {
+				if isContextError(err) {
+					return IssuesReport{}, err
+				}
+				log.Printf("issues report: credential_health source unavailable: %v", err)
+				sources.CredentialHealth = IssueSourceUnavailable
+				partial = true
+			} else {
+				sources.CredentialHealth = IssueSourceComplete
+				items = append(items, issueReportsFromRows(data.Credential)...)
+			}
+
+			if err := data.QuotaErr; err != nil {
+				if isContextError(err) {
+					return IssuesReport{}, err
+				}
+				// Quota current and/or refresh failed: never mark complete.
+				// Successful subset rows (if any) remain visible under partial.
+				log.Printf("issues report: quota source unavailable: %v", err)
+				sources.Quota = IssueSourceUnavailable
+				partial = true
+				items = append(items, issueReportsFromRows(data.Quota)...)
+			} else {
+				sources.Quota = IssueSourceComplete
+				items = append(items, issueReportsFromRows(data.Quota)...)
+			}
+
+			system, systemStatus, systemPartial, err := s.buildSystemIssues(ctx, filter.Since)
+			if err != nil {
+				return IssuesReport{}, err
+			}
+			sources.System = systemStatus
+			if systemPartial {
+				partial = true
+			}
+			sortIssueReports(items)
+			if len(items) > limit {
+				items = items[:limit]
+			}
+			if items == nil {
+				items = []IssueReport{}
+			}
+			if system.Items == nil {
+				system.Items = []IssueSystemItem{}
+			}
+			return IssuesReport{
+				Range:   filter.Range,
+				Total:   len(items),
+				Items:   items,
+				System:  system,
+				Partial: partial,
+				Sources: sources,
+			}, nil
+		}
+
+		// Key-scoped: request_usage only; no global/system sources.
 		sortIssueReports(items)
 		if len(items) > limit {
 			items = items[:limit]
@@ -94,34 +117,14 @@ func (s *Service) Issues(ctx context.Context, filter IssueFilter) (IssuesReport,
 		if items == nil {
 			items = []IssueReport{}
 		}
-		if system.Items == nil {
-			system.Items = []IssueSystemItem{}
-		}
 		return IssuesReport{
 			Range:   filter.Range,
 			Total:   len(items),
 			Items:   items,
-			System:  system,
-			Partial: partial,
+			System:  IssuesSystem{Items: []IssueSystemItem{}},
 			Sources: sources,
 		}, nil
-	}
-
-	// Key-scoped: request_usage only; no global/system sources.
-	sortIssueReports(items)
-	if len(items) > limit {
-		items = items[:limit]
-	}
-	if items == nil {
-		items = []IssueReport{}
-	}
-	return IssuesReport{
-		Range:   filter.Range,
-		Total:   len(items),
-		Items:   items,
-		System:  IssuesSystem{Items: []IssueSystemItem{}},
-		Sources: sources,
-	}, nil
+	})
 }
 
 func (s *Service) buildSystemIssues(ctx context.Context, since time.Time) (IssuesSystem, string, bool, error) {
