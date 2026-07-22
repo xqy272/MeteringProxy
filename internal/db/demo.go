@@ -10,10 +10,30 @@ import (
 // import cycle (event/mapping.go imports db).
 const (
 	demoCaptureUsageMetered = "usage_metered"
+	demoCaptureRequestOnly  = "request_only"
 	demoOutcomeCaptured     = "captured"
 	demoOutcomeFailed       = "failed"
 	demoMeteringLLMTokens   = "llm_tokens"
+	demoMeteringImageTokens = "image_tokens"
+	demoMeteringRequestOnly = "request_only"
+
+	demoKeyHashFriendA   = "1111111111111111111111111111111111111111111111111111111111111111"
+	demoKeyHashFriendB   = "2222222222222222222222222222222222222222222222222222222222222222"
+	demoKeyHashUnlabeled = "3333333333333333333333333333333333333333333333333333333333333333"
+	demoKeyHashPartial   = "4444444444444444444444444444444444444444444444444444444444444444"
+	demoIPHashA          = "5555555555555555555555555555555555555555555555555555555555555555"
+	demoIPHashB          = "6666666666666666666666666666666666666666666666666666666666666666"
 )
+
+// DemoKeyLabels returns the synthetic labels used by --seed-demo. The caller
+// may merge these into the in-memory config only for that explicitly guarded
+// development mode; labels are never persisted to SQLite.
+func DemoKeyLabels() map[string]string {
+	return map[string]string{
+		demoKeyHashFriendA: "friend-a",
+		demoKeyHashFriendB: "agent-lab",
+	}
+}
 
 func SeedDemo(database *DB) error {
 	if err := clearDemoData(database); err != nil {
@@ -26,8 +46,8 @@ func SeedDemo(database *DB) error {
 	// Models that match pricing.yaml so cost coverage is meaningful.
 	models := []string{"gpt-5.4", "gpt-5.4-mini", "claude-sonnet-4-6", "claude-haiku-4-5", "deepseek-v4-pro", "deepseek-v4-flash"}
 	endpoints := []string{"/v1/chat/completions", "/v1/responses"}
-	keyHashes := []string{"key_hash_alpha", "key_hash_beta", "key_hash_gamma"}
-	ipHashes := []string{"ip_hash_01", "ip_hash_02"}
+	keyHashes := []string{demoKeyHashFriendA, demoKeyHashFriendB, demoKeyHashUnlabeled}
+	ipHashes := []string{demoIPHashA, demoIPHashB}
 
 	rng := rand.New(rand.NewSource(now.UnixNano()))
 	prefix := fmt.Sprintf("seed_%x_", now.UnixMilli())
@@ -74,7 +94,7 @@ func SeedDemo(database *DB) error {
 
 		errMsg := ""
 		captureOutcome := demoOutcomeCaptured
-		var errClass, errType, errCode, errMessage string
+		var errClass, errType, errCode string
 		if status >= 400 {
 			errClasses := []string{"quota_exhausted", "rate_limited", "auth_failed", "upstream_5xx", "invalid_request", "context_length", "proxy_upstream_error"}
 			errClass = errClasses[rng.Intn(len(errClasses))]
@@ -82,32 +102,25 @@ func SeedDemo(database *DB) error {
 			case "quota_exhausted":
 				errType = "insufficient_quota"
 				errCode = "insufficient_quota"
-				errMessage = "You exceeded your current quota, please check your plan and billing details."
 			case "rate_limited":
 				errType = "rate_limit_error"
 				errCode = "rate_limit_exceeded"
-				errMessage = "Rate limit reached for requests to this model."
 			case "auth_failed":
 				errType = "invalid_request_error"
 				errCode = "invalid_api_key"
-				errMessage = "Incorrect API key provided."
 			case "upstream_5xx":
 				errType = "server_error"
 				errCode = "internal_error"
-				errMessage = "The server had an error processing your request."
 			case "invalid_request":
 				errType = "invalid_request_error"
 				errCode = "invalid_request"
-				errMessage = "Invalid request parameters."
 			case "context_length":
 				errType = "invalid_request_error"
 				errCode = "context_length_exceeded"
-				errMessage = "This model's maximum context length is 128000 tokens."
 			case "proxy_upstream_error":
 				errClass = "proxy_connection_refused"
 				errType = "proxy_transport"
 				errCode = "connection_refused"
-				errMessage = "dial tcp: connection refused"
 			}
 			errMsg = errClass
 			captureOutcome = demoOutcomeFailed
@@ -153,14 +166,142 @@ func SeedDemo(database *DB) error {
 			ErrorClass:      errClass,
 			ErrorType:       errType,
 			ErrorCode:       errCode,
-			ErrorMessage:    errMessage,
 		})
 	}
 
+	records = append(records, demoCoverageRecords(now, prefix)...)
 	if err := database.InsertBatch(records); err != nil {
 		return err
 	}
 	return seedCredentialQuotaDemo(database, now)
+}
+
+func demoCoverageRecords(now time.Time, prefix string) []UsageRecord {
+	at := func(delta time.Duration) string {
+		return now.Add(delta).Format(time.RFC3339)
+	}
+	base := func(suffix, createdAt, keyHash, endpoint, profile, model string) UsageRecord {
+		return UsageRecord{
+			CreatedAt:           createdAt,
+			RequestID:           prefix + suffix,
+			Endpoint:            endpoint,
+			Method:              "POST",
+			Status:              200,
+			LatencyMs:           720,
+			TTFBMs:              180,
+			ClientIPHash:        demoIPHashA,
+			APIKeyHash:          keyHash,
+			ModelRequested:      model,
+			ModelReturned:       model,
+			EndpointProfile:     profile,
+			CaptureMode:         demoCaptureUsageMetered,
+			CaptureOutcome:      demoOutcomeCaptured,
+			MeteringKind:        demoMeteringLLMTokens,
+			ModelReturnedSource: "response_body",
+			UsageSource:         "http_response",
+		}
+	}
+
+	longContext := base(
+		"long_context",
+		at(-5*time.Minute),
+		demoKeyHashFriendA,
+		"/v1beta/models/gemini-3.1-pro-preview:generateContent",
+		"gemini_generate_content",
+		"gemini-3.1-pro-preview",
+	)
+	longContext.InputTokens = 200000
+	longContext.CachedTokens = 50000
+	longContext.OutputTokens = 5000
+	longContext.TotalTokens = 205000
+
+	image1K := base(
+		"image_1k",
+		at(-4*time.Minute),
+		demoKeyHashFriendB,
+		"/v1/images/generations",
+		"openai_images_generations",
+		"grok-imagine-image-quality",
+	)
+	image1K.MeteringKind = demoMeteringImageTokens
+	image1K.ImageUsage = &ImageUsageRecord{
+		Operation:       "generation",
+		Provider:        "xai",
+		Size:            "1024x1024",
+		ImageCount:      2,
+		InputImageCount: 1,
+	}
+
+	image2K := base(
+		"image_2k",
+		at(-3*time.Minute),
+		demoKeyHashUnlabeled,
+		"/v1/images/edits",
+		"openai_images_edits",
+		"grok-imagine-image-quality",
+	)
+	image2K.MeteringKind = demoMeteringImageTokens
+	image2K.ImageUsage = &ImageUsageRecord{
+		Operation:       "edit",
+		Provider:        "xai",
+		Size:            "2048x2048",
+		ImageCount:      1,
+		InputImageCount: 2,
+		HasMask:         true,
+	}
+
+	unknownKey := base(
+		"unknown_key",
+		at(-2*time.Minute),
+		"",
+		"/v1/responses",
+		"responses",
+		"gpt-5.4-mini",
+	)
+	unknownKey.InputTokens = 1200
+	unknownKey.OutputTokens = 300
+	unknownKey.TotalTokens = 1500
+
+	partialUnpriced := base(
+		"partial_unpriced",
+		at(-time.Minute),
+		demoKeyHashPartial,
+		"/v1/chat/completions",
+		"chat_completions",
+		"unpriced-model-v1",
+	)
+	partialUnpriced.Status = 429
+	partialUnpriced.InputTokens = 900
+	partialUnpriced.OutputTokens = 100
+	partialUnpriced.TotalTokens = 1000
+	partialUnpriced.Error = "rate_limited"
+	partialUnpriced.ErrorClass = "rate_limited"
+	partialUnpriced.ErrorType = "rate_limit_error"
+	partialUnpriced.ErrorCode = "rate_limit_exceeded"
+
+	partialRequestOnly := base(
+		"partial_request_only",
+		at(-30*time.Second),
+		demoKeyHashPartial,
+		"/v1/audio/speech",
+		"openai_audio",
+		"voice-demo",
+	)
+	partialRequestOnly.CaptureMode = demoCaptureRequestOnly
+	partialRequestOnly.MeteringKind = demoMeteringRequestOnly
+	partialRequestOnly.CaptureReason = "request_only_profile"
+	partialRequestOnly.ModelReturned = ""
+	partialRequestOnly.ModelReturnedSource = ""
+	partialRequestOnly.UsageSource = ""
+
+	return []UsageRecord{
+		longContext,
+		image1K,
+		image2K,
+		unknownKey,
+		partialUnpriced,
+		partialRequestOnly,
+	}
 }
 
 func clearDemoData(database *DB) error {

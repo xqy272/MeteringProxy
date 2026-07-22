@@ -705,6 +705,87 @@ func TestSeedDemoIncludesCredentialAndQuotaRows(t *testing.T) {
 	if !classes["credential_disabled"] || !classes["quota_low"] || !classes["quota_exhausted"] || !classes["quota_unsupported"] || !classes["quota_refresh_failed"] {
 		t.Fatalf("demo issues = %+v, want credential/quota health examples", issues)
 	}
+
+	labels := DemoKeyLabels()
+	if labels[demoKeyHashFriendA] == "" || labels[demoKeyHashFriendB] == "" || len(labels) != 2 {
+		t.Fatalf("demo labels = %+v, want exactly two labeled keys", labels)
+	}
+
+	keyRows, err := d.read.Query("SELECT DISTINCT COALESCE(api_key_hash, '') FROM request_usage WHERE request_id LIKE 'seed_%'")
+	if err != nil {
+		t.Fatalf("query demo keys: %v", err)
+	}
+	defer keyRows.Close()
+	seenKeys := map[string]bool{}
+	for keyRows.Next() {
+		var key string
+		if err := keyRows.Scan(&key); err != nil {
+			t.Fatalf("scan demo key: %v", err)
+		}
+		seenKeys[key] = true
+		if key != "" && (len(key) != 64 || strings.Trim(key, "0123456789abcdef") != "") {
+			t.Fatalf("demo key hash %q is not complete lowercase hex", key)
+		}
+	}
+	if err := keyRows.Err(); err != nil {
+		t.Fatalf("demo key rows: %v", err)
+	}
+	for _, key := range []string{"", demoKeyHashFriendA, demoKeyHashFriendB, demoKeyHashUnlabeled, demoKeyHashPartial} {
+		if !seenKeys[key] {
+			t.Fatalf("missing demo key %q in %+v", key, seenKeys)
+		}
+	}
+
+	var longContextCount int
+	if err := d.read.QueryRow(
+		"SELECT COUNT(*) FROM request_usage WHERE request_id LIKE 'seed_%' AND COALESCE(model_returned, model_requested) = 'gemini-3.1-pro-preview' AND input_tokens >= 200000",
+	).Scan(&longContextCount); err != nil {
+		t.Fatalf("query long-context demo: %v", err)
+	}
+	if longContextCount < 1 {
+		t.Fatal("demo data is missing the 200k long-context pricing case")
+	}
+
+	var image1KCount, image2KCount int
+	if err := d.read.QueryRow(
+		"SELECT COALESCE(SUM(CASE WHEN size = '1024x1024' AND image_count > 0 AND input_image_count > 0 THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN size = '2048x2048' AND image_count > 0 AND input_image_count > 0 THEN 1 ELSE 0 END), 0) FROM image_usage WHERE request_id LIKE 'seed_%'",
+	).Scan(&image1KCount, &image2KCount); err != nil {
+		t.Fatalf("query image demo: %v", err)
+	}
+	if image1KCount < 1 || image2KCount < 1 {
+		t.Fatalf("demo image cases: 1K=%d 2K=%d", image1KCount, image2KCount)
+	}
+
+	var leakedProviderMessages int
+	if err := d.read.QueryRow(
+		"SELECT COUNT(*) FROM request_usage WHERE request_id LIKE 'seed_%' AND NULLIF(TRIM(error_message), '') IS NOT NULL",
+	).Scan(&leakedProviderMessages); err != nil {
+		t.Fatalf("query demo error messages: %v", err)
+	}
+	if leakedProviderMessages != 0 {
+		t.Fatalf("demo persisted %d provider-style raw error messages", leakedProviderMessages)
+	}
+
+	scopedIssues, err := d.IssuesReport(context.Background(), IssueFilter{
+		Scope: ReportScope{Since: time.Now().UTC().Add(-time.Hour), KeyHash: demoKeyHashPartial},
+		Limit: 20,
+	})
+	if err != nil {
+		t.Fatalf("partial-key IssuesReport: %v", err)
+	}
+	if len(scopedIssues.RequestUsage) == 0 || scopedIssues.RequestUsage[0].APIKeyHash != demoKeyHashPartial {
+		t.Fatalf("partial-key issues = %+v", scopedIssues.RequestUsage)
+	}
+	scopedRequests, err := d.RequestsReport(context.Background(), RequestFilter{
+		Scope: ReportScope{Since: time.Now().UTC().Add(-time.Hour), KeyHash: demoKeyHashPartial},
+		Limit: 20,
+	})
+	if err != nil {
+		t.Fatalf("partial-key RequestsReport: %v", err)
+	}
+	if len(scopedRequests) < 2 {
+		t.Fatalf("partial-key requests = %d, want drill-down fixtures", len(scopedRequests))
+	}
 }
 
 func TestSinceFilteringUsesTimestampEpoch(t *testing.T) {
