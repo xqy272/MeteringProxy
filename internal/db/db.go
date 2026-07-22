@@ -161,16 +161,6 @@ type TimeseriesRow struct {
 	AvgTTFBMs           int64  `json:"avg_ttfb_ms"`
 }
 
-type ModelTimeseriesRow struct {
-	Timestamp           string `json:"timestamp"`
-	Model               string `json:"model"`
-	InputTokens         int64  `json:"input_tokens"`
-	OutputTokens        int64  `json:"output_tokens"`
-	ReasoningTokens     int64  `json:"reasoning_tokens"`
-	CachedTokens        int64  `json:"cached_tokens"`
-	CacheCreationTokens int64  `json:"cache_creation_tokens"`
-}
-
 type ActivityRow struct {
 	SampleSize          int64   `json:"sample_size"`
 	SuccessCount        int64   `json:"success_count"`
@@ -1273,34 +1263,6 @@ func unixFromTimestamp(ts string) (int64, error) {
 	return t.Unix(), nil
 }
 
-func (db *DB) Summary(since time.Time) (*SummaryRow, error) {
-	row := &SummaryRow{}
-	err := db.read.QueryRow(`
-		SELECT
-			COUNT(*),
-			COUNT(CASE WHEN status >= 400 THEN 1 END),
-			COALESCE(SUM(input_tokens), 0),
-			COALESCE(SUM(output_tokens), 0),
-			COALESCE(SUM(reasoning_tokens), 0),
-			COALESCE(SUM(cached_tokens), 0),
-			COALESCE(SUM(total_tokens), 0)
-		FROM request_usage WHERE created_at_unix >= ?
-	`, since.Unix()).Scan(
-		&row.TotalRequests, &row.FailedRequests,
-		&row.TotalInputTokens, &row.TotalOutputTokens, &row.TotalReasoningTokens,
-		&row.TotalCachedTokens, &row.TotalTokens,
-	)
-	return row, err
-}
-
-func (db *DB) Models(since time.Time) ([]ModelRow, error) {
-	return db.ModelsContext(context.Background(), since)
-}
-
-func (db *DB) ModelsContext(ctx context.Context, since time.Time) ([]ModelRow, error) {
-	return queryModelAggregates(ctx, db.read, ReportScope{Since: since})
-}
-
 // ModelsReportSnapshot loads model aggregates and both source breakdowns inside
 // one read-only transaction so all three set-based queries share a consistent
 // SQLite snapshot. Rows are closed sequentially to avoid deadlocking the single
@@ -1446,151 +1408,6 @@ func queryUsageSourceCounts(ctx context.Context, q modelQueryContext, scope Repo
 		bucket[src] = cnt
 	}
 	return out, rows.Err()
-}
-
-func (db *DB) ModelSourceCounts(since time.Time, model string) (modelReturnedSourceCounts map[string]int64, usageSourceCounts map[string]int64, err error) {
-	return db.ModelSourceCountsContext(context.Background(), since, model)
-}
-
-func (db *DB) ModelSourceCountsContext(ctx context.Context, since time.Time, model string) (modelReturnedSourceCounts map[string]int64, usageSourceCounts map[string]int64, err error) {
-	modelReturnedSourceCounts = make(map[string]int64)
-	usageSourceCounts = make(map[string]int64)
-	modelRows, err := db.read.QueryContext(ctx, `
-		SELECT
-			`+modelReturnedSourceCompatExpr+`,
-			COUNT(*)
-		FROM request_usage
-		WHERE created_at_unix >= ? AND `+effectiveModelExpr+` = ?
-		GROUP BY 1
-	`, since.Unix(), model)
-	if err != nil {
-		return nil, nil, err
-	}
-	for modelRows.Next() {
-		var src string
-		var cnt int64
-		if err := modelRows.Scan(&src, &cnt); err != nil {
-			modelRows.Close()
-			return nil, nil, err
-		}
-		modelReturnedSourceCounts[src] = cnt
-	}
-	if err := modelRows.Err(); err != nil {
-		modelRows.Close()
-		return nil, nil, err
-	}
-	if err := modelRows.Close(); err != nil {
-		return nil, nil, err
-	}
-
-	usageRows, err := db.read.QueryContext(ctx, `
-		SELECT
-			`+usageSourceCompatExpr+`,
-			COUNT(*)
-		FROM request_usage
-		WHERE created_at_unix >= ? AND `+effectiveModelExpr+` = ?
-		GROUP BY 1
-	`, since.Unix(), model)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer usageRows.Close()
-	for usageRows.Next() {
-		var src string
-		var cnt int64
-		if err := usageRows.Scan(&src, &cnt); err != nil {
-			return nil, nil, err
-		}
-		usageSourceCounts[src] = cnt
-	}
-	return modelReturnedSourceCounts, usageSourceCounts, usageRows.Err()
-}
-
-func (db *DB) Timeseries(since time.Time, bucketMin int) ([]TimeseriesRow, error) {
-	if bucketMin <= 0 {
-		bucketMin = 10
-	}
-	bucketSec := int64(bucketMin) * 60
-	bucketExpr := fmt.Sprintf(
-		`strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', (created_at_unix / %d) * %d, 'unixepoch')`,
-		bucketSec, bucketSec,
-	)
-
-	rows, err := db.read.Query(`
-		SELECT
-			`+bucketExpr+`,
-			COUNT(*),
-			COUNT(CASE WHEN status >= 400 THEN 1 END),
-			COALESCE(SUM(input_tokens), 0),
-			COALESCE(SUM(output_tokens), 0),
-			COALESCE(SUM(reasoning_tokens), 0),
-			COALESCE(SUM(cached_tokens), 0),
-			COALESCE(SUM(cache_creation_tokens), 0),
-			COALESCE(SUM(total_tokens), 0),
-			COALESCE(CAST(ROUND(AVG(CASE WHEN latency_ms > 0 THEN latency_ms END)) AS INTEGER), 0),
-			COALESCE(CAST(ROUND(AVG(CASE WHEN ttfb_ms > 0 THEN ttfb_ms END)) AS INTEGER), 0)
-		FROM request_usage WHERE created_at_unix >= ?
-		GROUP BY 1 ORDER BY 1 ASC
-	`, since.Unix())
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var result []TimeseriesRow
-	for rows.Next() {
-		var r TimeseriesRow
-		if err := rows.Scan(
-			&r.Timestamp, &r.Count, &r.FailedCount,
-			&r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens, &r.CacheCreationTokens, &r.TotalTokens,
-			&r.AvgLatencyMs, &r.AvgTTFBMs,
-		); err != nil {
-			return nil, err
-		}
-		result = append(result, r)
-	}
-	return result, rows.Err()
-}
-
-func (db *DB) ModelTimeseries(since time.Time, bucketMin int) ([]ModelTimeseriesRow, error) {
-	if bucketMin <= 0 {
-		bucketMin = 10
-	}
-	bucketSec := int64(bucketMin) * 60
-	bucketExpr := fmt.Sprintf(
-		`strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', (created_at_unix / %d) * %d, 'unixepoch')`,
-		bucketSec, bucketSec,
-	)
-
-	rows, err := db.read.Query(`
-		SELECT
-			`+bucketExpr+`,
-			`+effectiveModelExpr+`,
-			COALESCE(SUM(input_tokens), 0),
-			COALESCE(SUM(output_tokens), 0),
-			COALESCE(SUM(reasoning_tokens), 0),
-			COALESCE(SUM(cached_tokens), 0),
-			COALESCE(SUM(cache_creation_tokens), 0)
-		FROM request_usage WHERE created_at_unix >= ?
-		GROUP BY 1, 2 ORDER BY 1 ASC, COUNT(*) DESC
-	`, since.Unix())
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var result []ModelTimeseriesRow
-	for rows.Next() {
-		var r ModelTimeseriesRow
-		if err := rows.Scan(
-			&r.Timestamp, &r.Model,
-			&r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens, &r.CacheCreationTokens,
-		); err != nil {
-			return nil, err
-		}
-		result = append(result, r)
-	}
-	return result, rows.Err()
 }
 
 func positiveDelta(current, previous int64) int64 {

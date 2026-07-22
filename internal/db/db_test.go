@@ -67,6 +67,34 @@ func issuesCombined(t *testing.T, d *DB, since time.Time, limit int) []IssueRow 
 	return rows
 }
 
+func summaryForTest(d *DB, since time.Time) (*SummaryRow, error) {
+	snapshot, err := d.SummaryReportSnapshot(context.Background(), since)
+	if err != nil {
+		return nil, err
+	}
+	return &snapshot.Summary, nil
+}
+
+func modelsForTest(d *DB, since time.Time) ([]ModelRow, error) {
+	return modelsForTestContext(context.Background(), d, since)
+}
+
+func modelsForTestContext(ctx context.Context, d *DB, since time.Time) ([]ModelRow, error) {
+	snapshot, err := d.ModelsReportSnapshot(ctx, ReportScope{Since: since})
+	if err != nil {
+		return nil, err
+	}
+	return snapshot.Models, nil
+}
+
+func timeseriesForTest(d *DB, since time.Time, bucketMin int) ([]TimeseriesRow, error) {
+	snapshot, err := d.TimeseriesReportSnapshot(context.Background(), ReportScope{Since: since}, bucketMin)
+	if err != nil {
+		return nil, err
+	}
+	return snapshot.Rows, nil
+}
+
 func TestOpenAndMigrate(t *testing.T) {
 	d := newTestDB(t)
 	if d.read == nil {
@@ -268,7 +296,7 @@ func TestSummary(t *testing.T) {
 	insertRecord(t, d, ts(-30*time.Minute), "/v1/chat/completions", 500, "gpt-4o", 10, 20, 30)
 
 	since := time.Now().Add(-24 * time.Hour)
-	row, err := d.Summary(since)
+	row, err := summaryForTest(d, since)
 	if err != nil {
 		t.Fatalf("Summary: %v", err)
 	}
@@ -289,7 +317,7 @@ func TestModels(t *testing.T) {
 	insertRecord(t, d, ts(-1*time.Hour), "/v1/chat/completions", 200, "gpt-4o", 50, 60, 110)
 	insertRecord(t, d, ts(-30*time.Minute), "/v1/chat/completions", 200, "deepseek-chat", 30, 40, 70)
 
-	rows, err := d.Models(time.Now().Add(-24 * time.Hour))
+	rows, err := modelsForTest(d, time.Now().Add(-24*time.Hour))
 	if err != nil {
 		t.Fatalf("Models: %v", err)
 	}
@@ -325,7 +353,7 @@ func TestTokenAggregatesIncludeCacheCreation(t *testing.T) {
 		t.Fatalf("InsertBatch: %v", err)
 	}
 
-	models, err := d.Models(now.Add(-time.Hour))
+	models, err := modelsForTest(d, now.Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("Models: %v", err)
 	}
@@ -333,12 +361,12 @@ func TestTokenAggregatesIncludeCacheCreation(t *testing.T) {
 		t.Fatalf("models = %+v, want cache_creation_tokens=5", models)
 	}
 
-	buckets, err := d.ModelTimeseries(now.Add(-time.Hour), 60)
+	buckets, err := timeseriesForTest(d, now.Add(-time.Hour), 60)
 	if err != nil {
-		t.Fatalf("ModelTimeseries: %v", err)
+		t.Fatalf("TimeseriesReportSnapshot: %v", err)
 	}
 	if len(buckets) != 1 || buckets[0].CacheCreationTokens != 5 {
-		t.Fatalf("model timeseries = %+v, want cache_creation_tokens=5", buckets)
+		t.Fatalf("timeseries = %+v, want cache_creation_tokens=5", buckets)
 	}
 }
 
@@ -394,7 +422,7 @@ func TestModelsAndKeysTreatEmptyAsUnknown(t *testing.T) {
 	d := newTestDB(t)
 	insertRecord(t, d, ts(-1*time.Minute), "/v1/chat/completions", 200, "", 1, 2, 3)
 
-	models, err := d.Models(time.Now().Add(-24 * time.Hour))
+	models, err := modelsForTest(d, time.Now().Add(-24*time.Hour))
 	if err != nil {
 		t.Fatalf("Models: %v", err)
 	}
@@ -819,7 +847,7 @@ func TestSinceFilteringUsesTimestampEpoch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse since: %v", err)
 	}
-	summary, err := d.Summary(since)
+	summary, err := summaryForTest(d, since)
 	if err != nil {
 		t.Fatalf("Summary: %v", err)
 	}
@@ -951,7 +979,7 @@ func TestTimeseries(t *testing.T) {
 	insertRecord(t, d, now.Add(8*time.Minute).Format(time.RFC3339), "/v1/chat/completions", 200, "gpt-4o", 5, 10, 15)
 	insertRecord(t, d, now.Add(15*time.Minute).Format(time.RFC3339), "/v1/chat/completions", 200, "gpt-4o", 2, 3, 5)
 
-	rows, err := d.Timeseries(now.Add(-1*time.Hour), 10)
+	rows, err := timeseriesForTest(d, now.Add(-1*time.Hour), 10)
 	if err != nil {
 		t.Fatalf("Timeseries: %v", err)
 	}
@@ -1456,22 +1484,14 @@ func TestModelsReportSnapshotEmpty(t *testing.T) {
 	}
 }
 
-func TestModelsContextCanceled(t *testing.T) {
+func TestModelsReportSnapshotCanceled(t *testing.T) {
 	d := newTestDB(t)
 	insertRecord(t, d, ts(-time.Minute), "/v1/chat/completions", 200, "gpt-4o", 1, 2, 3)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := d.ModelsContext(ctx, time.Now().Add(-time.Hour))
-	if err == nil {
-		t.Fatal("expected canceled error from ModelsContext")
-	}
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("ModelsContext err = %v, want context.Canceled", err)
-	}
-
-	_, err = d.ModelsReportSnapshot(ctx, ReportScope{Since: time.Now().Add(-time.Hour)})
+	_, err := d.ModelsReportSnapshot(ctx, ReportScope{Since: time.Now().Add(-time.Hour)})
 	if err == nil {
 		t.Fatal("expected canceled error from ModelsReportSnapshot")
 	}
@@ -1501,13 +1521,13 @@ func TestModelsReportSnapshotReleasesReadConnection(t *testing.T) {
 		}
 	}
 
-	// Connection must remain usable for non-snapshot reads.
-	rows, err := d.ModelsContext(context.Background(), since)
+	// Connection must remain usable for a subsequent independent snapshot.
+	rows, err := modelsForTestContext(context.Background(), d, since)
 	if err != nil {
-		t.Fatalf("ModelsContext after snapshots: %v", err)
+		t.Fatalf("ModelsReportSnapshot after snapshots: %v", err)
 	}
 	if len(rows) != 1 {
-		t.Fatalf("ModelsContext rows = %+v", rows)
+		t.Fatalf("ModelsReportSnapshot rows = %+v", rows)
 	}
 }
 
