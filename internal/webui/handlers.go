@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -110,17 +111,12 @@ func (s *Server) handleCPAAuthRefresh(w http.ResponseWriter, r *http.Request) {
 // snapshot state.
 func (s *Server) handleCPACooldownReset(w http.ResponseWriter, r *http.Request) {
 	if s.credPoller == nil {
-		writeJSON(w, map[string]any{
-			"status": "error",
-			"error":  "credential health module not enabled",
-		})
+		writeAPIError(w, http.StatusServiceUnavailable, "operation_unavailable", "credential health module is not enabled")
 		return
 	}
 	if err := s.credPoller.ResetCooldown(); err != nil {
-		writeJSON(w, map[string]any{
-			"status": "error",
-			"error":  err.Error(),
-		})
+		log.Printf("CPA cooldown reset failed: %v", err)
+		writeAPIError(w, http.StatusBadGateway, "operation_failed", "failed to reset CPA cooldown")
 		return
 	}
 	writeJSON(w, map[string]any{
@@ -263,11 +259,17 @@ func (s *Server) handlePricingStub(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
 	w.Header().Set("X-Unpriced-Model-Count", strconv.Itoa(unpricedCount))
 	if unpricedCount == 0 {
-		w.Write([]byte("# All used models in this range already have pricing configured.\n"))
+		if _, err := w.Write([]byte("# All used models in this range already have pricing configured.\n")); err != nil {
+			log.Printf("pricing stub write failed: %v", err)
+		}
 		return
 	}
 	enc := yaml.NewEncoder(w)
 	enc.SetIndent(2)
-	enc.Encode(stub)
-	enc.Close()
+	if err := enc.Encode(stub); err != nil {
+		log.Printf("pricing stub encode failed: %v", err)
+	}
+	if err := enc.Close(); err != nil {
+		log.Printf("pricing stub close failed: %v", err)
+	}
 }

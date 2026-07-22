@@ -107,6 +107,7 @@ type stubModelsReporter struct {
 	imageRequestsErr  error
 	errorsOut         report.ErrorsReport
 	errorsErr         error
+	errorsCalls       int
 	healthOut         report.HealthDashboardReport
 	healthErr         error
 	metadataOut       report.MetadataReport
@@ -199,6 +200,7 @@ func (s *stubModelsReporter) ImageRequests(ctx context.Context, filter report.Im
 	return s.imageRequestsOut, nil
 }
 func (s *stubModelsReporter) Errors(ctx context.Context, filter report.ErrorsFilter) (report.ErrorsReport, error) {
+	s.errorsCalls++
 	if s.errorsErr != nil {
 		return report.ErrorsReport{}, s.errorsErr
 	}

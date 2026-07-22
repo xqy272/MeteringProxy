@@ -115,7 +115,7 @@ func newServer(reports report.CoreReporter, batchWriter *writer.BatchWriter, bas
 	subtreePattern := basePath + "/"
 	s.mux.HandleFunc(subtreePattern, func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
-		if strings.HasPrefix(path, apiPrefix) {
+		if path == strings.TrimSuffix(apiPrefix, "/") || strings.HasPrefix(path, apiPrefix) {
 			s.routeAPI(w, r)
 			return
 		}
@@ -219,6 +219,9 @@ func (s *Server) routeAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiRelativePath(path string) (string, bool) {
+	if path == strings.TrimSuffix(s.apiPrefix, "/") {
+		return "", true
+	}
 	if !strings.HasPrefix(path, s.apiPrefix) {
 		return "", false
 	}
@@ -241,8 +244,11 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func parseRange(r *http.Request) (time.Time, string, error) {
-	rangeStr := r.URL.Query().Get("range")
-	if rangeStr == "" {
+	rangeStr, present, valid := singleQueryValue(r, "range")
+	if !valid {
+		return time.Time{}, "", errInvalidRange
+	}
+	if !present {
 		return time.Now().Add(-24 * time.Hour), "24h", nil
 	}
 	switch rangeStr {
@@ -261,7 +267,13 @@ func parseRange(r *http.Request) (time.Time, string, error) {
 }
 
 func parseKeyHashFilter(r *http.Request) (string, error) {
-	value := r.URL.Query().Get("key_hash")
+	value, present, valid := singleQueryValue(r, "key_hash")
+	if !valid {
+		return "", errInvalidKeyHash
+	}
+	if !present {
+		return "", nil
+	}
 	if err := report.ValidateKeyHashFilter(value); err != nil {
 		return "", errInvalidKeyHash
 	}
@@ -269,8 +281,11 @@ func parseKeyHashFilter(r *http.Request) (string, error) {
 }
 
 func parseBucketMinutes(r *http.Request) (int, error) {
-	bucketStr := r.URL.Query().Get("bucket")
-	if bucketStr == "" {
+	bucketStr, present, valid := singleQueryValue(r, "bucket")
+	if !valid {
+		return 0, errInvalidFilter
+	}
+	if !present {
 		return 60, nil
 	}
 	switch bucketStr {
@@ -285,23 +300,29 @@ func parseBucketMinutes(r *http.Request) (int, error) {
 
 // parseLimit accepts only an explicit base-10 integer in [1, max]. Absent keeps defaultLimit.
 func parseLimit(r *http.Request, defaultLimit, max int) (int, error) {
-	raw := r.URL.Query().Get("limit")
-	if raw == "" {
+	raw, present, valid := singleQueryValue(r, "limit")
+	if !valid {
+		return 0, errInvalidFilter
+	}
+	if !present {
 		return defaultLimit, nil
 	}
 	n, err := strconv.ParseInt(raw, 10, 0)
 	if err != nil {
 		return 0, errInvalidFilter
 	}
-	if n <= 0 || int(n) > max {
+	if n <= 0 || n > int64(max) {
 		return 0, errInvalidFilter
 	}
 	return int(n), nil
 }
 
 func parseStatusFilter(r *http.Request) (statusMin, statusMax int, err error) {
-	status := r.URL.Query().Get("status")
-	if status == "" {
+	status, present, valid := singleQueryValue(r, "status")
+	if !valid {
+		return 0, 0, errInvalidFilter
+	}
+	if !present {
 		return 0, 0, nil
 	}
 	switch status {
@@ -317,8 +338,11 @@ func parseStatusFilter(r *http.Request) (statusMin, statusMax int, err error) {
 }
 
 func parseNonzero(r *http.Request) (bool, error) {
-	raw := r.URL.Query().Get("nonzero")
-	if raw == "" {
+	raw, present, valid := singleQueryValue(r, "nonzero")
+	if !valid {
+		return false, errInvalidFilter
+	}
+	if !present {
 		return false, nil
 	}
 	switch raw {
@@ -329,6 +353,20 @@ func parseNonzero(r *http.Request) (bool, error) {
 	default:
 		return false, errInvalidFilter
 	}
+}
+
+// singleQueryValue distinguishes an absent optional parameter from an
+// explicitly empty or duplicated value. Strict filters reject ambiguous input
+// instead of silently treating it as the compatibility default.
+func singleQueryValue(r *http.Request, key string) (value string, present, valid bool) {
+	values, present := r.URL.Query()[key]
+	if !present {
+		return "", false, true
+	}
+	if len(values) != 1 || values[0] == "" {
+		return "", true, false
+	}
+	return values[0], true, true
 }
 
 var (
@@ -371,7 +409,7 @@ func writeInvalidRange(w http.ResponseWriter) {
 }
 
 func writeInvalidKeyHash(w http.ResponseWriter) {
-	writeAPIError(w, http.StatusBadRequest, "invalid_key_hash", "key_hash must be a 64-character lowercase hex value")
+	writeAPIError(w, http.StatusBadRequest, "invalid_key_hash", "key_hash must be a 64-character lowercase hex value or unknown")
 }
 
 func writeInvalidFilter(w http.ResponseWriter) {

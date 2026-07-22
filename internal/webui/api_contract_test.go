@@ -55,19 +55,10 @@ func TestAPIExactRoutingNearMisses(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		rec := httptest.NewRecorder()
 		s.ServeHTTP(rec, req)
-		if path == "/metering/api" {
-			// Outside apiPrefix (/metering/api/); treated as static/index path, not API JSON.
-			if rec.Code == http.StatusOK && strings.Contains(rec.Header().Get("Content-Type"), "text/html") {
+		if !strings.HasPrefix(path, "/metering/api/") {
+			if path != "/metering/api" {
 				continue
 			}
-			// File server may 404; either way it must not return API models JSON array success contract.
-			if rec.Code == 200 && strings.HasPrefix(strings.TrimSpace(rec.Body.String()), "[") {
-				t.Fatalf("%s returned array-like body unexpectedly: %s", path, rec.Body.String())
-			}
-			continue
-		}
-		if !strings.HasPrefix(path, "/metering/api/") {
-			continue
 		}
 		if rec.Code != http.StatusNotFound {
 			t.Fatalf("%s status=%d body=%s", path, rec.Code, rec.Body.String())
@@ -148,6 +139,55 @@ func TestAPIRouteMethodsAllowAndNoSideEffects(t *testing.T) {
 	}
 	if cred.refreshN != 1 {
 		t.Fatalf("successful refresh calls=%d", cred.refreshN)
+	}
+}
+
+func TestAPIRouteMethodContractIsExhaustive(t *testing.T) {
+	s, _ := newTestServer(t, "/metering")
+	expected := map[string]string{
+		"overview": http.MethodGet, "issues": http.MethodGet,
+		"summary": http.MethodGet, "timeseries": http.MethodGet,
+		"activity": http.MethodGet, "models": http.MethodGet,
+		"keys": http.MethodGet, "requests": http.MethodGet,
+		"multimodal/summary": http.MethodGet,
+		"images/summary":     http.MethodGet, "images/models": http.MethodGet,
+		"images/requests": http.MethodGet, "errors": http.MethodGet,
+		"health": http.MethodGet, "metadata": http.MethodGet,
+		"quota/diagnostics": http.MethodGet, "quota": http.MethodGet,
+		"quota/refresh": http.MethodPost, "observability": http.MethodGet,
+		"gateway/capabilities": http.MethodGet, "model-assets": http.MethodGet,
+		"pricing/stub": http.MethodGet, "cpa/auth": http.MethodGet,
+		"cpa/auth/refresh": http.MethodPost, "cpa/cooldown/reset": http.MethodPost,
+		"provider-quota": http.MethodGet, "provider-quota/refresh": http.MethodPost,
+		"provider-quota/diagnostics": http.MethodGet,
+	}
+	if len(s.apiRoutes) != len(expected) {
+		t.Fatalf("registered routes=%d, documented routes=%d", len(s.apiRoutes), len(expected))
+	}
+	for path, method := range expected {
+		route, ok := s.apiRoutes[path]
+		if !ok {
+			t.Fatalf("route %q is not registered", path)
+		}
+		if route.method != method {
+			t.Fatalf("route %q method=%s, want %s", path, route.method, method)
+		}
+		wrongMethod := http.MethodPost
+		if method == http.MethodPost {
+			wrongMethod = http.MethodGet
+		}
+		req := httptest.NewRequest(wrongMethod, "/metering/api/"+path, nil)
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, req)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s %s status=%d, want 405; body=%s", wrongMethod, path, rec.Code, rec.Body.String())
+		}
+		if allow := rec.Header().Get("Allow"); allow != method {
+			t.Fatalf("%s Allow=%q, want %q", path, allow, method)
+		}
+		if code, _ := decodeAPIError(t, rec); code != "method_not_allowed" {
+			t.Fatalf("%s returned code %q", path, code)
+		}
 	}
 }
 
@@ -362,6 +402,48 @@ func TestAPIStrictQueryValidation(t *testing.T) {
 	}
 }
 
+func TestAPIStrictFiltersRejectExplicitEmptyAndDuplicateValues(t *testing.T) {
+	database, err := openTempDB(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bw := newTestWriter(t, database)
+	stub := &stubModelsReporter{}
+	s := New(stub, bw, "/metering", DiagnosticsReaders{Quota: database, Obs: database})
+
+	cases := []struct {
+		path string
+		code string
+	}{
+		{"/metering/api/models?range=", "invalid_range"},
+		{"/metering/api/models?range=24h&range=7d", "invalid_range"},
+		{"/metering/api/models?key_hash=", "invalid_key_hash"},
+		{"/metering/api/models?key_hash=unknown&key_hash=unknown", "invalid_key_hash"},
+		{"/metering/api/timeseries?bucket=", "invalid_filter"},
+		{"/metering/api/timeseries?bucket=1h&bucket=1d", "invalid_filter"},
+		{"/metering/api/requests?limit=", "invalid_filter"},
+		{"/metering/api/requests?limit=1&limit=2", "invalid_filter"},
+		{"/metering/api/requests?status=", "invalid_filter"},
+		{"/metering/api/errors?nonzero=", "invalid_filter"},
+	}
+	for _, tc := range cases {
+		before := stub.calls + stub.timeseriesCalls + stub.requestsCalls + stub.errorsCalls
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s status=%d, want 400; body=%s", tc.path, rec.Code, rec.Body.String())
+		}
+		if code, _ := decodeAPIError(t, rec); code != tc.code {
+			t.Fatalf("%s code=%q, want %q", tc.path, code, tc.code)
+		}
+		after := stub.calls + stub.timeseriesCalls + stub.requestsCalls + stub.errorsCalls
+		if after != before {
+			t.Fatalf("%s invoked a report: before=%d after=%d", tc.path, before, after)
+		}
+	}
+}
+
 func TestAPISanitizedReportErrors(t *testing.T) {
 	database, err := openTempDB(t)
 	if err != nil {
@@ -406,6 +488,40 @@ func TestWriteJSONLogsEncodeFailure(t *testing.T) {
 	}
 }
 
+func TestCPACooldownResetErrorsAreStableAndSanitized(t *testing.T) {
+	database, err := openTempDB(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bw := newTestWriter(t, database)
+	s := New(&stubModelsReporter{}, bw, "/metering", DiagnosticsReaders{Quota: database, Obs: database})
+
+	req := httptest.NewRequest(http.MethodPost, "/metering/api/cpa/cooldown/reset", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("disabled reset status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if code, _ := decodeAPIError(t, rec); code != "operation_unavailable" {
+		t.Fatalf("disabled reset code=%q", code)
+	}
+
+	secret := `CPA reset failed at C:\secret\management-key.txt: bearer-secret`
+	s.SetCredPoller(&countingCredPoller{resetErr: errors.New(secret)})
+	req = httptest.NewRequest(http.MethodPost, "/metering/api/cpa/cooldown/reset", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("failed reset status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if code, _ := decodeAPIError(t, rec); code != "operation_failed" {
+		t.Fatalf("failed reset code=%q", code)
+	}
+	if strings.Contains(rec.Body.String(), "bearer-secret") || strings.Contains(rec.Body.String(), "management-key") || strings.Contains(rec.Body.String(), "C:\\secret") {
+		t.Fatalf("failed reset leaked internal error: %s", rec.Body.String())
+	}
+}
+
 type failJSON struct{}
 
 func (failJSON) MarshalJSON() ([]byte, error) {
@@ -415,6 +531,7 @@ func (failJSON) MarshalJSON() ([]byte, error) {
 type countingCredPoller struct {
 	refreshN int
 	resetN   int
+	resetErr error
 }
 
 func (p *countingCredPoller) Snapshot() ([]db.CredentialHealthRow, time.Time) {
@@ -423,7 +540,7 @@ func (p *countingCredPoller) Snapshot() ([]db.CredentialHealthRow, time.Time) {
 func (p *countingCredPoller) Refresh() { p.refreshN++ }
 func (p *countingCredPoller) ResetCooldown() error {
 	p.resetN++
-	return nil
+	return p.resetErr
 }
 
 type countingQuotaPoller struct {
