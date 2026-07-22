@@ -35,7 +35,10 @@ func BenchmarkMillionRowKeyReports(b *testing.B) {
 	}
 	setupElapsed := time.Since(setupStart)
 
-	var gotRows, gotKeys, gotModels int64
+	key := fmt.Sprintf("%064d", 0)
+	var gotRows, gotKeys, gotModels, gotKeyModels, gotKeyImages int64
+	var minModelsPerKey, maxModelsPerKey, imageKeys, minImagesPerKey, maxImagesPerKey int64
+	var minCreatedAtUnix, maxCreatedAtUnix int64
 	if err := d.sql.QueryRow(`SELECT COUNT(*) FROM request_usage`).Scan(&gotRows); err != nil {
 		b.Fatalf("count rows: %v", err)
 	}
@@ -45,6 +48,41 @@ func BenchmarkMillionRowKeyReports(b *testing.B) {
 	if err := d.sql.QueryRow(`SELECT COUNT(DISTINCT model_returned) FROM request_usage`).Scan(&gotModels); err != nil {
 		b.Fatalf("count models: %v", err)
 	}
+	if err := d.sql.QueryRow(`SELECT COUNT(DISTINCT model_returned) FROM request_usage WHERE api_key_hash = ?`, key).Scan(&gotKeyModels); err != nil {
+		b.Fatalf("count models for benchmark key: %v", err)
+	}
+	if err := d.sql.QueryRow(`
+		SELECT MIN(model_count), MAX(model_count)
+		FROM (
+			SELECT api_key_hash, COUNT(DISTINCT model_returned) AS model_count
+			FROM request_usage
+			GROUP BY api_key_hash
+		)
+	`).Scan(&minModelsPerKey, &maxModelsPerKey); err != nil {
+		b.Fatalf("count models per key: %v", err)
+	}
+	if err := d.sql.QueryRow(`
+		SELECT COUNT(*)
+		FROM image_usage iu
+		JOIN request_usage ru ON ru.id = iu.request_usage_id
+		WHERE ru.api_key_hash = ?
+	`, key).Scan(&gotKeyImages); err != nil {
+		b.Fatalf("count images for benchmark key: %v", err)
+	}
+	if err := d.sql.QueryRow(`
+		SELECT COUNT(*), MIN(image_count), MAX(image_count)
+		FROM (
+			SELECT ru.api_key_hash, COUNT(*) AS image_count
+			FROM image_usage iu
+			JOIN request_usage ru ON ru.id = iu.request_usage_id
+			GROUP BY ru.api_key_hash
+		)
+	`).Scan(&imageKeys, &minImagesPerKey, &maxImagesPerKey); err != nil {
+		b.Fatalf("count images per key: %v", err)
+	}
+	if err := d.sql.QueryRow(`SELECT MIN(created_at_unix), MAX(created_at_unix) FROM request_usage`).Scan(&minCreatedAtUnix, &maxCreatedAtUnix); err != nil {
+		b.Fatalf("fixture time span: %v", err)
+	}
 	if gotRows != rowCount {
 		b.Fatalf("fixture rows = %d, want %d", gotRows, rowCount)
 	}
@@ -53,6 +91,23 @@ func BenchmarkMillionRowKeyReports(b *testing.B) {
 	}
 	if gotModels != modelCount {
 		b.Fatalf("fixture models = %d, want %d", gotModels, modelCount)
+	}
+	if gotKeyModels != modelCount {
+		b.Fatalf("benchmark key models = %d, want %d", gotKeyModels, modelCount)
+	}
+	if minModelsPerKey != modelCount || maxModelsPerKey != modelCount {
+		b.Fatalf("models per key range = %d..%d, want %d", minModelsPerKey, maxModelsPerKey, modelCount)
+	}
+	if gotKeyImages == 0 {
+		b.Fatal("benchmark key has no image_usage rows")
+	}
+	if imageKeys != keyCount || minImagesPerKey != 5 || maxImagesPerKey != 5 {
+		b.Fatalf("image distribution: keys=%d images_per_key=%d..%d, want keys=%d and 5 each",
+			imageKeys, minImagesPerKey, maxImagesPerKey, keyCount)
+	}
+	wantSpanSeconds := int64((30 * 24 * time.Hour) / time.Second)
+	if gotSpan := maxCreatedAtUnix - minCreatedAtUnix; gotSpan < wantSpanSeconds {
+		b.Fatalf("fixture span = %ds, want at least %ds", gotSpan, wantSpanSeconds)
 	}
 
 	if _, err := d.CheckpointWAL("TRUNCATE"); err != nil {
@@ -66,7 +121,6 @@ func BenchmarkMillionRowKeyReports(b *testing.B) {
 		setupElapsed, gotRows, gotKeys, gotModels, info.Size(), path)
 
 	// Stable exact Key used by all Key-scoped sub-benchmarks.
-	key := fmt.Sprintf("%064d", 0)
 	since24h := now.Add(-24 * time.Hour)
 	since7d := now.Add(-7 * 24 * time.Hour)
 	since30d := now.Add(-30 * 24 * time.Hour)
@@ -158,6 +212,12 @@ func BenchmarkMillionRowKeyReports(b *testing.B) {
 }
 
 func seedMillionRowKeyFixture(d *DB, now time.Time, rowCount, keyCount, modelCount int) error {
+	if rowCount != 1_000_000 {
+		return fmt.Errorf("fixture generator requires exactly 1,000,000 rows, got %d", rowCount)
+	}
+	if keyCount <= 0 || modelCount <= 0 {
+		return fmt.Errorf("fixture key/model counts must be positive")
+	}
 	// Fixture-only pragmas: keep production Open path unchanged.
 	if _, err := d.sql.Exec(`PRAGMA synchronous = OFF`); err != nil {
 		return err
@@ -195,7 +255,7 @@ func seedMillionRowKeyFixture(d *DB, now time.Time, rowCount, keyCount, modelCou
 	}
 
 	// Build 1,000,000 rows via two 1000-way recursive dimensions (no Go row loop).
-	// Time span covers at least 30d so 24h/7d/30d scopes are non-empty.
+	// Distribute the million rows evenly across an inclusive 30-day span.
 	endUnix := now.Unix()
 	spanSec := int64(30 * 24 * 60 * 60)
 	_, err = d.sql.Exec(fmt.Sprintf(`
@@ -219,8 +279,8 @@ func seedMillionRowKeyFixture(d *DB, now time.Time, rowCount, keyCount, modelCou
 			error_class, model_returned_source, usage_source, terminal_event, terminal_reason
 		)
 		SELECT
-			strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', %d - ((y * 1000 + x) %% %d), 'unixepoch'),
-			%d - ((y * 1000 + x) %% %d),
+			strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', %d - (((y * 1000 + x) * %d) / %d), 'unixepoch'),
+			%d - (((y * 1000 + x) * %d) / %d),
 			'bench_' || (y * 1000 + x),
 			CASE (y * 1000 + x) %% 3
 				WHEN 0 THEN '/v1/chat/completions'
@@ -233,8 +293,8 @@ func seedMillionRowKeyFixture(d *DB, now time.Time, rowCount, keyCount, modelCou
 			5 + ((y * 1000 + x) %% 40),
 			(y * 1000 + x) %% 2,
 			printf('%%064d', (y * 1000 + x) %% %d),
-			printf('alias-%%03d', (y * 1000 + x) %% %d),
-			printf('model-%%03d', (y * 1000 + x) %% %d),
+			printf('alias-%%03d', ((y * 1000 + x) / %d) %% %d),
+			printf('model-%%03d', ((y * 1000 + x) / %d) %% %d),
 			100 + ((y * 1000 + x) %% 500),
 			50 + ((y * 1000 + x) %% 200),
 			CASE WHEN (y * 1000 + x) %% 11 = 0 THEN 20 ELSE 0 END,
@@ -269,7 +329,8 @@ func seedMillionRowKeyFixture(d *DB, now time.Time, rowCount, keyCount, modelCou
 			'done',
 			''
 		FROM ones, thousands
-	`, endUnix, spanSec, endUnix, spanSec, keyCount, modelCount, modelCount))
+	`, endUnix, spanSec, rowCount-1, endUnix, spanSec, rowCount-1,
+		keyCount, keyCount, modelCount, keyCount, modelCount))
 	if err != nil {
 		return fmt.Errorf("bulk insert request_usage: %w", err)
 	}
@@ -290,8 +351,7 @@ func seedMillionRowKeyFixture(d *DB, now time.Time, rowCount, keyCount, modelCou
 			0, 1, 0, 1, 0,
 			'http_response', 'captured', '', '{}'
 		FROM request_usage
-		WHERE id %% 2000 = 0
-		LIMIT 500
+		WHERE CAST(SUBSTR(request_id, 7) AS INTEGER) %% 2003 = 0
 	`)); err != nil {
 		return fmt.Errorf("seed image_usage: %w", err)
 	}

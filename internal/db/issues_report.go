@@ -179,64 +179,51 @@ func queryRequestUsageIssues(ctx context.Context, db *DB, scope ReportScope, lim
 				OR (capture_outcome = 'skipped' AND capture_reason != '')
 			)
 		),
-		agg AS (
+		ranked AS (
 			SELECT
-				class,
-				status,
-				endpoint,
-				model,
-				api_key_hash,
-				COUNT(*) AS count,
-				MAX(created_at_unix) AS latest_unix,
-				CASE
-					WHEN SUM(returned_present) > 0 THEN 'returned'
-					WHEN SUM(requested_present) > 0 THEN 'requested'
-					ELSE 'unidentified'
-				END AS model_source
+				base.*,
+				COUNT(*) OVER issue_window AS issue_count,
+				MAX(returned_present) OVER issue_window AS any_returned,
+				MAX(requested_present) OVER issue_window AS any_requested,
+				ROW_NUMBER() OVER issue_window AS row_rank
 			FROM base
-			GROUP BY class, status, endpoint, model, api_key_hash
-		),
-		latest AS (
-			SELECT *,
-				ROW_NUMBER() OVER (
-					PARTITION BY class, status, endpoint, model, api_key_hash
-					ORDER BY created_at_unix DESC, id DESC
-				) AS rn
-			FROM base
+			WINDOW issue_window AS (
+				PARTITION BY class, status, endpoint, model, api_key_hash
+				ORDER BY created_at_unix DESC, id DESC
+				ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+			)
 		)
 		SELECT
-			agg.class,
-			agg.count,
-			latest.created_at,
-			agg.status,
-			agg.endpoint,
-			agg.model,
-			agg.model_source,
-			agg.api_key_hash,
-			latest.error_type,
-			latest.error_code,
-			latest.error_message,
-			latest.request_id
-		FROM agg
-		JOIN latest
-			ON latest.rn = 1
-			AND latest.class = agg.class
-			AND latest.status = agg.status
-			AND latest.endpoint = agg.endpoint
-			AND latest.model = agg.model
-			AND latest.api_key_hash = agg.api_key_hash
+			class,
+			issue_count,
+			created_at,
+			status,
+			endpoint,
+			model,
+			CASE
+				WHEN any_returned > 0 THEN 'returned'
+				WHEN any_requested > 0 THEN 'requested'
+				ELSE 'unidentified'
+			END AS model_source,
+			api_key_hash,
+			error_type,
+			error_code,
+			error_message,
+			request_id
+		FROM ranked
+		WHERE row_rank = 1
 		ORDER BY
 			CASE
-				WHEN agg.class IN ('auth_failed', 'quota_exhausted', 'proxy_upstream_error', 'proxy_connection_refused',
+				WHEN class IN ('auth_failed', 'quota_exhausted', 'proxy_upstream_error', 'proxy_connection_refused',
 					'proxy_connection_reset', 'proxy_timeout', 'proxy_dns_error', 'proxy_network_unreachable',
 					'proxy_tls_error', 'proxy_connection_closed', 'db_write_error', 'response_error_event') THEN 0
-				WHEN agg.class IN ('rate_limited', 'upstream_5xx', 'context_length', 'capture_parse_error', 'dropped_event',
+				WHEN class IN ('rate_limited', 'upstream_5xx', 'context_length', 'capture_parse_error', 'dropped_event',
 					'response_completed_without_usage', 'stream_ended_without_completed', 'response_incomplete',
 					'capture_failed', 'parse_error', 'usage_not_present') THEN 1
 				ELSE 2
 			END ASC,
-			agg.latest_unix DESC,
-			agg.count DESC
+			created_at_unix DESC,
+			issue_count DESC
 		LIMIT ?`,
 		args...)
 	if err != nil {

@@ -426,6 +426,49 @@ func TestExactKeyReportsHonorCanceledContextPromptly(t *testing.T) {
 	}
 }
 
+func TestCanceledSQLiteQueryReleasesReadConnection(t *testing.T) {
+	d := newTestDB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		var sum int64
+		err := d.read.QueryRowContext(ctx, `
+			WITH RECURSIVE sequence(x) AS (
+				SELECT 0
+				UNION ALL
+				SELECT x + 1 FROM sequence WHERE x < 1000000000
+			)
+			SELECT SUM(x) FROM sequence
+		`).Scan(&sum)
+		done <- err
+	}()
+
+	// The query is deliberately too large to finish here. Observing it still
+	// running before cancellation distinguishes this from a pre-canceled call.
+	select {
+	case err := <-done:
+		t.Fatalf("long query finished before cancellation: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("long query error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("in-flight SQLite query did not stop after cancellation")
+	}
+
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), time.Second)
+	defer probeCancel()
+	var schemaVersion int64
+	if err := d.read.QueryRowContext(probeCtx, "PRAGMA main.schema_version").Scan(&schemaVersion); err != nil {
+		t.Fatalf("read connection was not released after cancellation: %v", err)
+	}
+}
+
 func TestExactKeyReportReadDoesNotBlockWriterUnderWAL(t *testing.T) {
 	d := newTestDB(t)
 	now := time.Now().UTC().Truncate(time.Second)
