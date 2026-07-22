@@ -118,5 +118,8 @@ jobs:
         with:
           name: ${{ github.ref_name }}
           body_path: ${{ steps.changelog.outputs.path }}
-          files: ai-gateway-metering-proxy
+          files: |
+            ai-gateway-metering-proxy
+            config.yaml
+            pricing.yaml
           fail_on_unmatched_files: true
