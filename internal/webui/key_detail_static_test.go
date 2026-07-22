@@ -100,9 +100,13 @@ func TestKeyDetailStaticContracts(t *testing.T) {
 		t.Fatal("setLang must call rerenderKeysForLocale for immediate Key re-render")
 	}
 	setLangIdx := strings.Index(app, "function setLang(lang)")
-	refreshIdx := strings.Index(app[setLangIdx:], "refresh();")
-	rerenderIdx := strings.Index(app[setLangIdx:], "rerenderKeysForLocale();")
-	if setLangIdx < 0 || refreshIdx < 0 || rerenderIdx < 0 || rerenderIdx > refreshIdx {
+	if setLangIdx < 0 {
+		t.Fatal("setLang function missing")
+	}
+	setLangBody := app[setLangIdx:]
+	refreshIdx := strings.Index(setLangBody, "refresh();")
+	rerenderIdx := strings.Index(setLangBody, "rerenderKeysForLocale();")
+	if refreshIdx < 0 || rerenderIdx < 0 || rerenderIdx > refreshIdx {
 		t.Fatal("setLang must call rerenderKeysForLocale before refresh")
 	}
 
@@ -200,7 +204,6 @@ func TestKeyDetailStaticContracts(t *testing.T) {
 		}
 	}
 }
-
 
 func TestKeyDetailLocaleSwitchImmediateRerender(t *testing.T) {
 	app := readStatic(t, "app.js")
@@ -323,7 +326,6 @@ func TestKeyDetailLocaleSwitchImmediateRerender(t *testing.T) {
 	}
 }
 
-
 func TestKeyDetailCountSummaryPluralization(t *testing.T) {
 	app := readStatic(t, "app.js")
 	i18n := readStatic(t, "i18n.js")
@@ -410,5 +412,18 @@ func TestKeyDetailCountSummaryPluralization(t *testing.T) {
 		if strings.Contains(enBody, bad) {
 			t.Fatalf("en dictionary contains broken singular form %q", bad)
 		}
+	}
+}
+
+func TestKeyDetailCachedRerenderPreservesScopeAndPriceSemantics(t *testing.T) {
+	app := readStatic(t, "app.js")
+
+	// null distinguishes an in-flight/not-yet-loaded trend from a completed
+	// empty result, so a locale switch cannot turn Loading into No data.
+	requireContains(t, app, "let lastKeyTSRows = null;", "trend cache sentinel")
+	requireContains(t, app, "selectedKeySnapshot = row;\n  // The remaining section payloads are scoped to both Key and range.", "range cache reset")
+	requireContains(t, app, "Number(r.unpriced_models||0)>0", "unpriced model summary")
+	if strings.Contains(app, "const unpriced=list.filter(r=>costStateOf(r)!=='complete').length;") {
+		t.Fatal("Key model summary must not count all partial models as unpriced")
 	}
 }

@@ -43,7 +43,8 @@ let selectedKeySnapshot = null;
 let keyDetailGeneration = 0;
 let keyDetailAbort = null;
 let keyDetailUsageMode = 'cost';
-let lastKeyTSRows = [];
+// null means not loaded for the current Key/range; [] means loaded with no rows.
+let lastKeyTSRows = null;
 let lastKeyTSBucket = '';
 let lastKeyTrendErr = null;
 let lastKeyActivity = null;
@@ -277,7 +278,7 @@ function focusKeyRow(hash) {
   }
 }
 function resetKeyDetailCaches() {
-  lastKeyTSRows = [];
+  lastKeyTSRows = null;
   lastKeyTSBucket = '';
   lastKeyTrendErr = null;
   lastKeyActivity = null;
@@ -354,8 +355,6 @@ function rerenderKeysForLocale() {
 
   if (lastKeyTrendErr) {
     renderKeyTrend([], lastKeyTSBucket, lastKeyTrendErr);
-  } else if (Array.isArray(lastKeyTSRows) && lastKeyTSRows.length) {
-    renderKeyTrend(lastKeyTSRows, lastKeyTSBucket, null);
   } else if (Array.isArray(lastKeyTSRows)) {
     renderKeyTrend(lastKeyTSRows, lastKeyTSBucket, null);
   } else {
@@ -1369,7 +1368,9 @@ function renderKeyModels(rows, err) {
     setText('kd-models-summary', t('summary.zero_models'));
     return;
   }
-  const unpriced=list.filter(r=>costStateOf(r)!=='complete').length;
+  // A priced model can still be partial because usage is missing. Only the
+  // report's explicit price-coverage field belongs in the unpriced count.
+  const unpriced=list.filter(r=>Number(r.unpriced_models||0)>0).length;
   setText('kd-models-summary', tp('summary.models', list.length, {count:fmtFull(list.length),unknown:fmtFull(unpriced)}));
   tbody.innerHTML=list.map(r=>{
     return `<tr>
@@ -1579,6 +1580,9 @@ async function loadKeyDetail() {
   }
 
   selectedKeySnapshot = row;
+  // The remaining section payloads are scoped to both Key and range. Do not
+  // let a locale switch during this refresh expose rows from the prior range.
+  resetKeyDetailCaches();
   renderKeyDetailHeader(row);
   setKeyDetailEmptyState('hide');
   if(bodyEl){ bodyEl.classList.remove('hidden'); bodyEl.hidden=false; }
