@@ -107,17 +107,15 @@ jobs:
         with:
           name: ai-gateway-metering-proxy-linux-amd64
 
-      - name: Generate changelog
-        id: changelog
+      - name: Generate release notes
         run: |
-          git tag -l --format='%(contents:body)' ${{ github.ref_name }} > /tmp/changelog.md
-          test -s /tmp/changelog.md || echo "Release ${{ github.ref_name }}" > /tmp/changelog.md
-          echo "path=/tmp/changelog.md" >> "$GITHUB_OUTPUT"
+          git for-each-ref --format='%(contents)' "refs/tags/${GITHUB_REF_NAME}" > release-notes.md
+          test -s release-notes.md || echo "Release ${GITHUB_REF_NAME}" > release-notes.md
 
       - uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.ref_name }}
-          body_path: ${{ steps.changelog.outputs.path }}
+          body_path: release-notes.md
           files: |
             ai-gateway-metering-proxy
             config.yaml
