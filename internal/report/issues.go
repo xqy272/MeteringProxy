@@ -1,7 +1,6 @@
 package report
 
 import (
-	"ai-gateway-metering-proxy/internal/metrics"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +9,7 @@ import (
 	"time"
 
 	"ai-gateway-metering-proxy/internal/db"
+	"ai-gateway-metering-proxy/internal/metrics"
 )
 
 func (s *Service) Issues(ctx context.Context, filter IssueFilter) (IssuesReport, error) {

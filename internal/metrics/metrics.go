@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"sync/atomic"
+	"time"
 )
 
 // Counters shared across the process. The writer and proxy update these
@@ -110,10 +111,10 @@ var reportNames = []ReportName{
 }
 
 type reportQueryStats struct {
-	queries       int64
-	errors        int64
-	durationSumMS int64
-	durationCount int64
+	queries           int64
+	errors            int64
+	durationSumMicros int64
+	durationCount     int64
 }
 
 // Fixed slots only — never keyed by user-controlled strings.
@@ -139,18 +140,18 @@ func IsKnownReport(name ReportName) bool {
 }
 
 // ObserveReportQuery records exactly one report service attempt.
-// durationMS contributes to sum/count; errors increment only when err != nil.
+// duration contributes to sum/count; errors increment only when err != nil.
 // Unknown report names are ignored so high-cardinality values cannot create series.
-func ObserveReportQuery(name ReportName, durationMS int64, err error) {
+func ObserveReportQuery(name ReportName, duration time.Duration, err error) {
 	stats := reportQueryMetrics[name]
 	if stats == nil {
 		return
 	}
-	if durationMS < 0 {
-		durationMS = 0
+	if duration < 0 {
+		duration = 0
 	}
 	atomic.AddInt64(&stats.queries, 1)
-	atomic.AddInt64(&stats.durationSumMS, durationMS)
+	atomic.AddInt64(&stats.durationSumMicros, duration.Microseconds())
 	atomic.AddInt64(&stats.durationCount, 1)
 	if err != nil {
 		atomic.AddInt64(&stats.errors, 1)
@@ -158,14 +159,14 @@ func ObserveReportQuery(name ReportName, durationMS int64, err error) {
 }
 
 // SnapshotReportQuery is a test helper for fixed-label counters.
-func SnapshotReportQuery(name ReportName) (queries, errors, durationSumMS, durationCount int64, ok bool) {
+func SnapshotReportQuery(name ReportName) (queries, errors int64, durationSum time.Duration, durationCount int64, ok bool) {
 	stats := reportQueryMetrics[name]
 	if stats == nil {
 		return 0, 0, 0, 0, false
 	}
 	return atomic.LoadInt64(&stats.queries),
 		atomic.LoadInt64(&stats.errors),
-		atomic.LoadInt64(&stats.durationSumMS),
+		time.Duration(atomic.LoadInt64(&stats.durationSumMicros)) * time.Microsecond,
 		atomic.LoadInt64(&stats.durationCount),
 		true
 }
@@ -285,11 +286,11 @@ func writePrometheus(w io.Writer) {
 		stats := reportQueryMetrics[name]
 		q := atomic.LoadInt64(&stats.queries)
 		e := atomic.LoadInt64(&stats.errors)
-		sum := atomic.LoadInt64(&stats.durationSumMS)
+		sumMicros := atomic.LoadInt64(&stats.durationSumMicros)
 		cnt := atomic.LoadInt64(&stats.durationCount)
 		fmt.Fprintf(w, "metering_proxy_report_queries_total{report=\"%s\"} %d\n", name, q)
 		fmt.Fprintf(w, "metering_proxy_report_query_errors_total{report=\"%s\"} %d\n", name, e)
-		fmt.Fprintf(w, "metering_proxy_report_query_duration_ms_sum{report=\"%s\"} %d\n", name, sum)
+		fmt.Fprintf(w, "metering_proxy_report_query_duration_ms_sum{report=\"%s\"} %g\n", name, float64(sumMicros)/1000)
 		fmt.Fprintf(w, "metering_proxy_report_query_duration_ms_count{report=\"%s\"} %d\n", name, cnt)
 	}
 }

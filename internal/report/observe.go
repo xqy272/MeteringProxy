@@ -11,6 +11,6 @@ import (
 func observeReport[T any](name metrics.ReportName, fn func() (T, error)) (T, error) {
 	start := time.Now()
 	out, err := fn()
-	metrics.ObserveReportQuery(name, time.Since(start).Milliseconds(), err)
+	metrics.ObserveReportQuery(name, time.Since(start), err)
 	return out, err
 }

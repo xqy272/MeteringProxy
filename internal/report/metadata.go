@@ -1,11 +1,11 @@
 package report
 
 import (
-	"ai-gateway-metering-proxy/internal/metrics"
 	"context"
 	"fmt"
 
 	"ai-gateway-metering-proxy/internal/event"
+	"ai-gateway-metering-proxy/internal/metrics"
 )
 
 func (s *Service) Metadata(ctx context.Context, _ MetadataFilter) (MetadataReport, error) {

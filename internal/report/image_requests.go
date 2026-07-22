@@ -1,9 +1,10 @@
 package report
 
 import (
-	"ai-gateway-metering-proxy/internal/metrics"
 	"context"
 	"fmt"
+
+	"ai-gateway-metering-proxy/internal/metrics"
 )
 
 func (s *Service) ImageRequests(ctx context.Context, filter ImageRequestsFilter) ([]RequestReport, error) {

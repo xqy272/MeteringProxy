@@ -1,9 +1,10 @@
 package report
 
 import (
-	"ai-gateway-metering-proxy/internal/metrics"
 	"context"
 	"fmt"
+
+	"ai-gateway-metering-proxy/internal/metrics"
 )
 
 func (s *Service) Keys(ctx context.Context, filter KeysFilter) ([]KeyReport, error) {

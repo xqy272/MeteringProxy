@@ -1,11 +1,11 @@
 package report
 
 import (
-	"ai-gateway-metering-proxy/internal/metrics"
 	"context"
 	"fmt"
 
 	"ai-gateway-metering-proxy/internal/db"
+	"ai-gateway-metering-proxy/internal/metrics"
 )
 
 func (s *Service) Activity(ctx context.Context, filter ActivityFilter) (ActivityReport, error) {

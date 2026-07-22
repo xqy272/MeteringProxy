@@ -1,12 +1,12 @@
 package report
 
 import (
-	"ai-gateway-metering-proxy/internal/metrics"
 	"context"
 	"fmt"
 	"time"
 
 	"ai-gateway-metering-proxy/internal/db"
+	"ai-gateway-metering-proxy/internal/metrics"
 )
 
 // Service orchestrates read-side report assembly for WebUI handlers.

@@ -1,13 +1,13 @@
 package report
 
 import (
-	"ai-gateway-metering-proxy/internal/metrics"
 	"context"
 	"fmt"
 	"log"
 	"sort"
 
 	"ai-gateway-metering-proxy/internal/db"
+	"ai-gateway-metering-proxy/internal/metrics"
 )
 
 func (s *Service) Errors(ctx context.Context, filter ErrorsFilter) (ErrorsReport, error) {

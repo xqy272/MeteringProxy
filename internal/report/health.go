@@ -1,10 +1,11 @@
 package report
 
 import (
-	"ai-gateway-metering-proxy/internal/metrics"
 	"context"
 	"fmt"
 	"log"
+
+	"ai-gateway-metering-proxy/internal/metrics"
 )
 
 func (s *Service) Health(ctx context.Context, filter HealthFilter) (HealthDashboardReport, error) {

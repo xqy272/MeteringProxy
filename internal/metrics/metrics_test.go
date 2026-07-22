@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func resetForTest() {
@@ -33,7 +34,7 @@ func resetForTest() {
 		stats := reportQueryMetrics[name]
 		atomic.StoreInt64(&stats.queries, 0)
 		atomic.StoreInt64(&stats.errors, 0)
-		atomic.StoreInt64(&stats.durationSumMS, 0)
+		atomic.StoreInt64(&stats.durationSumMicros, 0)
 		atomic.StoreInt64(&stats.durationCount, 0)
 	}
 }
@@ -87,16 +88,16 @@ func TestPrometheusMetricsIncludeTransportCounters(t *testing.T) {
 func TestReportQueryMetricsSuccessAndErrorSemantics(t *testing.T) {
 	resetForTest()
 
-	ObserveReportQuery(ReportKeys, 12, nil)
-	ObserveReportQuery(ReportKeys, 8, nil)
-	ObserveReportQuery(ReportKeys, 5, errors.New("db unavailable"))
+	ObserveReportQuery(ReportKeys, 12*time.Millisecond, nil)
+	ObserveReportQuery(ReportKeys, 8*time.Millisecond, nil)
+	ObserveReportQuery(ReportKeys, 5*time.Millisecond, errors.New("db unavailable"))
 
 	queries, errs, sum, count, ok := SnapshotReportQuery(ReportKeys)
 	if !ok {
 		t.Fatal("keys report missing from fixed enum")
 	}
-	if queries != 3 || errs != 1 || sum != 25 || count != 3 {
-		t.Fatalf("keys stats = queries=%d errors=%d sum=%d count=%d, want 3/1/25/3", queries, errs, sum, count)
+	if queries != 3 || errs != 1 || sum != 25*time.Millisecond || count != 3 {
+		t.Fatalf("keys stats = queries=%d errors=%d sum=%s count=%d, want 3/1/25ms/3", queries, errs, sum, count)
 	}
 
 	q2, e2, s2, c2, ok := SnapshotReportQuery(ReportModels)
@@ -105,9 +106,25 @@ func TestReportQueryMetricsSuccessAndErrorSemantics(t *testing.T) {
 	}
 }
 
+func TestReportQueryDurationPreservesSubMillisecondPrecision(t *testing.T) {
+	resetForTest()
+	ObserveReportQuery(ReportModels, 750*time.Microsecond, nil)
+
+	_, _, sum, count, ok := SnapshotReportQuery(ReportModels)
+	if !ok || sum != 750*time.Microsecond || count != 1 {
+		t.Fatalf("models duration = %s count=%d ok=%v, want 750us/1/true", sum, count, ok)
+	}
+
+	var b strings.Builder
+	writePrometheus(&b)
+	if !strings.Contains(b.String(), `metering_proxy_report_query_duration_ms_sum{report="models"} 0.75`) {
+		t.Fatalf("sub-millisecond duration missing from exposition:\n%s", b.String())
+	}
+}
+
 func TestReportQueryMetricsRejectHighCardinalityLabels(t *testing.T) {
 	resetForTest()
-	ObserveReportQuery(ReportKeys, 1, nil)
+	ObserveReportQuery(ReportKeys, time.Millisecond, nil)
 
 	banned := []ReportName{
 		ReportName("key_hash"),
@@ -121,7 +138,7 @@ func TestReportQueryMetricsRejectHighCardinalityLabels(t *testing.T) {
 		if IsKnownReport(name) {
 			t.Fatalf("banned label %q unexpectedly known", name)
 		}
-		ObserveReportQuery(name, 99, errors.New("should be ignored"))
+		ObserveReportQuery(name, 99*time.Millisecond, errors.New("should be ignored"))
 		if _, _, _, _, ok := SnapshotReportQuery(name); ok {
 			t.Fatalf("banned label %q became representable", name)
 		}
@@ -149,8 +166,8 @@ func TestReportQueryMetricsRejectHighCardinalityLabels(t *testing.T) {
 
 func TestReportQueryMetricsExpositionEmitsFixedEnum(t *testing.T) {
 	resetForTest()
-	ObserveReportQuery(ReportOverview, 3, nil)
-	ObserveReportQuery(ReportOverview, 2, errors.New("boom"))
+	ObserveReportQuery(ReportOverview, 3*time.Millisecond, nil)
+	ObserveReportQuery(ReportOverview, 2*time.Millisecond, errors.New("boom"))
 
 	var b strings.Builder
 	writePrometheus(&b)
@@ -199,7 +216,7 @@ func TestReportQueryMetricsConcurrentSafe(t *testing.T) {
 				if (i+j)%5 == 0 {
 					err = errors.New("x")
 				}
-				ObserveReportQuery(ReportTimeseries, 1, err)
+				ObserveReportQuery(ReportTimeseries, time.Millisecond, err)
 			}
 		}(i)
 	}
@@ -210,8 +227,10 @@ func TestReportQueryMetricsConcurrentSafe(t *testing.T) {
 		t.Fatal("timeseries missing")
 	}
 	wantQueries := int64(workers * perWorker)
-	if queries != wantQueries || count != wantQueries || sum != wantQueries {
-		t.Fatalf("queries/count/sum = %d/%d/%d want %d", queries, count, sum, wantQueries)
+	wantDuration := time.Duration(wantQueries) * time.Millisecond
+	if queries != wantQueries || count != wantQueries || sum != wantDuration {
+		t.Fatalf("queries/count/sum = %d/%d/%s want %d/%d/%s",
+			queries, count, sum, wantQueries, wantQueries, wantDuration)
 	}
 	wantErrs := wantQueries / 5
 	if errs != wantErrs {

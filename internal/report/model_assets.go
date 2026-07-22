@@ -1,11 +1,12 @@
 package report
 
 import (
-	"ai-gateway-metering-proxy/internal/metrics"
 	"context"
 	"fmt"
 	"sort"
 	"strings"
+
+	"ai-gateway-metering-proxy/internal/metrics"
 )
 
 func (s *Service) ModelAssets(ctx context.Context, filter ModelAssetsFilter) (ModelAssetsReport, error) {
